@@ -8,6 +8,13 @@ This repo is an official PyTorch implementation of our paper *<b>"RoboDuet: Lear
 
 </br>
 
+## Update
+- 2026.0409 Add `controller.py` to [RoboDuet_Deployment](https://github.com/locomanip-duet/RoboDuet_Deployment)
+
+
+</br>
+
+
 ## Installation
 ### Conda Environment
 ```bash
