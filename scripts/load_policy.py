@@ -21,18 +21,18 @@ def load_dog_policy(logdir, ckpt_id, Cfg):
     # for key, value in ckpt.items():
     #     print(key, value.shape)
     actor_critic.load_state_dict(ckpt)
-    
+
     actor_critic.eval()
     adaptation_module = actor_critic.adaptation_module
     body = actor_critic.actor_body
-    
+
     def policy(obs, info={}):
         i = 0
         latent = adaptation_module.forward(obs["obs_history"].to('cpu'))
         action = body.forward(torch.cat((obs["obs_history"].to('cpu'), latent), dim=-1))
         info['latent'] = latent
         return action
-    
+
     return policy
 
 def load_arm_policy(logdir, ckpt_id, Cfg):
@@ -43,7 +43,7 @@ def load_arm_policy(logdir, ckpt_id, Cfg):
         Cfg.arm.num_actions_arm_cd,
         device='cpu'
     ).to('cpu')
-    
+
     device = torch.device("cpu")
     if ckpt_id == 'last':
         ckpt_id_ = ckpt_id +'_arm'
@@ -51,12 +51,12 @@ def load_arm_policy(logdir, ckpt_id, Cfg):
         ckpt_id_ = ckpt_id.zfill(6)
     ckpt = torch.load(logdir + f'/checkpoints_arm/ac_weights_{str(ckpt_id_)}.pt', map_location=device)
     actor_critic.load_state_dict(ckpt)
-    
+
     actor_critic.eval()
     adaptation_module = actor_critic.adaptation_module
     body = actor_critic.actor_body
     actor_his = actor_critic.actor_history_encoder
-    
+
     def policy(obs, info={}):
         hist = actor_his.forward(obs["obs_history"].to('cpu')[..., :-Cfg.arm.arm_num_observations])
         latent = adaptation_module.forward(obs["obs_history"].to('cpu'))
@@ -85,10 +85,13 @@ def load_env(logdir, wrapper, headless=False, device='cuda:0'):
                         else:
                             for key3, value3 in cfg[key][key2].items():
                                 setattr(getattr(getattr(Cfg, key), key2), key3, value3)
-            
+
                 else:
-                    for key2, value2 in cfg[key].items():
-                        setattr(getattr(Cfg, key), key2, value2)
+                    if isinstance(cfg[key], dict):
+                        for key2, value2 in cfg[key].items():
+                            setattr(getattr(Cfg, key), key2, value2)
+                    else:
+                        setattr(Cfg, key, cfg[key])
 
     Cfg.terrain.mesh_type = "plane"
     if Cfg.terrain.mesh_type == "plane":
@@ -134,7 +137,7 @@ def load_env(logdir, wrapper, headless=False, device='cuda:0'):
     Cfg.arm.commands.T_traj = [20000, 30000]
     # Cfg.sim.physx["num_position_iterations"] = 8
     # Cfg.sim.physx["num_velocity_iterations"] = 8
-    
+
 
     env = wrapper(sim_device=device, headless=headless, cfg=Cfg)
     env = HistoryWrapper(env)

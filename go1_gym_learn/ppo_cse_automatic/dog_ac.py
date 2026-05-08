@@ -9,7 +9,7 @@ class DogAC_Args(PrefixProto, cli=False):
     init_noise_std = 1.0
     actor_hidden_dims = [512, 256, 128]
     critic_hidden_dims = [512, 256, 128]
-    activation = 'elu'  # can be elu, relu, selu, crelu, lrelu, tanh, sigmoid
+    activation = "elu"  # can be elu, relu, selu, crelu, lrelu, tanh, sigmoid
 
     adaptation_module_branch_hidden_dims = [256, 128]
 
@@ -19,14 +19,12 @@ class DogAC_Args(PrefixProto, cli=False):
 class DogActorCritic(nn.Module):
     is_recurrent = False
 
-    def __init__(self, num_obs,
-                 num_privileged_obs,
-                 num_obs_history,
-                 num_actions,
-                 **kwargs):
+    def __init__(self, num_obs, num_privileged_obs, num_obs_history, num_actions, **kwargs):
         if kwargs:
-            print("DogActorCritic.__init__ got unexpected arguments, which will be ignored: " + str(
-                [key for key in kwargs.keys()]))
+            print(
+                "DogActorCritic.__init__ got unexpected arguments, which will be ignored: "
+                + str([key for key in kwargs.keys()])
+            )
         self.decoder = DogAC_Args.use_decoder
         super().__init__()
 
@@ -37,19 +35,24 @@ class DogActorCritic(nn.Module):
 
         # Adaptation module
         adaptation_module_layers = []
-        adaptation_module_layers.append(nn.Linear(self.num_obs_history, DogAC_Args.adaptation_module_branch_hidden_dims[0]))
+        adaptation_module_layers.append(
+            nn.Linear(self.num_obs_history, DogAC_Args.adaptation_module_branch_hidden_dims[0])
+        )
         adaptation_module_layers.append(activation)
         for l in range(len(DogAC_Args.adaptation_module_branch_hidden_dims)):
             if l == len(DogAC_Args.adaptation_module_branch_hidden_dims) - 1:
                 adaptation_module_layers.append(
-                    nn.Linear(DogAC_Args.adaptation_module_branch_hidden_dims[l], self.num_privileged_obs))
+                    nn.Linear(DogAC_Args.adaptation_module_branch_hidden_dims[l], self.num_privileged_obs)
+                )
             else:
                 adaptation_module_layers.append(
-                    nn.Linear(DogAC_Args.adaptation_module_branch_hidden_dims[l],
-                              DogAC_Args.adaptation_module_branch_hidden_dims[l + 1]))
+                    nn.Linear(
+                        DogAC_Args.adaptation_module_branch_hidden_dims[l],
+                        DogAC_Args.adaptation_module_branch_hidden_dims[l + 1],
+                    )
+                )
                 adaptation_module_layers.append(activation)
         self.adaptation_module = nn.Sequential(*adaptation_module_layers)
-
 
         # Policy
         actor_layers = []
@@ -65,7 +68,9 @@ class DogActorCritic(nn.Module):
 
         # Value function
         critic_layers = []
-        critic_layers.append(nn.Linear(self.num_privileged_obs + self.num_obs_history, DogAC_Args.critic_hidden_dims[0]))
+        critic_layers.append(
+            nn.Linear(self.num_privileged_obs + self.num_obs_history, DogAC_Args.critic_hidden_dims[0])
+        )
         critic_layers.append(activation)
         for l in range(len(DogAC_Args.critic_hidden_dims)):
             if l == len(DogAC_Args.critic_hidden_dims) - 1:
@@ -88,8 +93,10 @@ class DogActorCritic(nn.Module):
     @staticmethod
     # not used at the moment
     def init_weights(sequential, scales):
-        [torch.nn.init.orthogonal_(module.weight, gain=scales[idx]) for idx, module in
-         enumerate(mod for mod in sequential if isinstance(mod, nn.Linear))]
+        [
+            torch.nn.init.orthogonal_(module.weight, gain=scales[idx])
+            for idx, module in enumerate(mod for mod in sequential if isinstance(mod, nn.Linear))
+        ]
 
     def reset(self, dones=None):
         pass
@@ -112,7 +119,7 @@ class DogActorCritic(nn.Module):
     def update_distribution(self, observation_history):
         latent = self.adaptation_module(observation_history)
         mean = self.actor_body(torch.cat((observation_history, latent), dim=-1))
-        self.distribution = Normal(mean, mean * 0. + self.std)
+        self.distribution = Normal(mean, mean * 0.0 + self.std)
 
     def act(self, observation_history, **kwargs):
         self.update_distribution(observation_history)
@@ -144,6 +151,7 @@ class DogActorCritic(nn.Module):
 
     def get_student_latent(self, observation_history):
         return self.adaptation_module(observation_history)
+
 
 def get_activation(act_name):
     if act_name == "elu":

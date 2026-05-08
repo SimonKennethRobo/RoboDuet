@@ -4,12 +4,13 @@ from params_proto import PrefixProto, ParamsProto
 import torch
 
 class Cfg(PrefixProto, cli=False):
-    
+    use_rot6d = False
+
     class hybrid(PrefixProto, cli=False):
         num_actions = 18
         plan_vel = False
         use_vision = False
-        
+
         class rewards(PrefixProto, cli=False):
             terminal_body_height = 0.28
             use_terminal_body_height = True
@@ -20,7 +21,7 @@ class Cfg(PrefixProto, cli=False):
             terminal_body_pitch = 0.2
             terminal_body_pitch_roll = 80./180.*torch.pi
             headupdown_thres = 0.1
-            
+
         class reward_scales(PrefixProto, cli=False):
             jump = -0.00
             # hip_joint_penality = -0.
@@ -47,21 +48,21 @@ class Cfg(PrefixProto, cli=False):
         arm_num_obs_history = arm_num_observations * arm_num_observation_history
         arm_num_commands = 6
         num_actions_arm_cd = 8
-        
+
         class commands(PrefixProto, cli=False):
             angle75 = torch.deg2rad(torch.tensor(75))
             angle60 = torch.deg2rad(torch.tensor(60))
             l = [0.3, 0.77]
-            p = [-torch.pi*0.45 , torch.pi*0.45]  # 75 
+            p = [-torch.pi*0.45 , torch.pi*0.45]  # 75
             y = [-torch.pi/2 , torch.pi/2]
             roll_ee = [-torch.pi * 0.45, torch.pi * 0.45]
             pitch_ee = [-angle60 , angle60]
             yaw_ee = [-angle75 , angle75]
-            
+
             T_traj = [2, 3.]
             T_force_range = [1, 4.]
             add_force_thres = 0.3
-        
+
         class obs_scales(PrefixProto, cli=False):
             l = 1.
             p = 1.
@@ -69,11 +70,11 @@ class Cfg(PrefixProto, cli=False):
             wx = 1.
             wy = 1.
             wz = 1.
-        
+
         class control(PrefixProto, cli=False):
             stiffness_arm = {'joint': 5., 'widow': 5.}  # [N*m/rad]
             damping_arm = {'joint': 1, 'widow': 1,}  # [N*m*s/rad]
-        
+
     class dog(PrefixProto, cli=False):
         num_actions_loco = 12
         dog_num_privileged_obs = 2
@@ -86,7 +87,7 @@ class Cfg(PrefixProto, cli=False):
         class control(PrefixProto, cli=False):
             stiffness_leg = {'joint': 35.}
             damping_leg = {'joint': 1.}
-    
+
     class env(PrefixProto, cli=False):
         num_envs = 4096
         num_observations = 235
