@@ -192,8 +192,8 @@ def train_go1(arg):
     elif args.robot == "go2":
         Cfg.asset.file = "{MINI_GYM_ROOT_DIR}/resources/robots/go2/urdf/arx5go2.urdf"
 
-    if args.headless:
-        RunnerArgs.log_video = False
+    # if args.headless:
+    #     RunnerArgs.log_video = False
 
     now = datetime.now()
     stem = Path(__file__).stem
@@ -278,7 +278,12 @@ def train_go1(arg):
             step=0,
         )
 
-    env = VelocityTrackingEasyEnv(sim_device=args.sim_device, headless=args.headless, cfg=Cfg)
+    env = VelocityTrackingEasyEnv(
+        sim_device=args.sim_device,
+        headless=args.headless,
+        cfg=Cfg,
+        graphics_device_id=args.graphics_device_id,
+    )
     env = HistoryWrapper(env)
     gpu_id = args.sim_device.split(":")[-1]
     runner = Runner(
@@ -293,6 +298,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Go1")
     parser.add_argument("--headless", action="store_true", default=False)
     parser.add_argument("--sim_device", type=str, default="cuda:0")
+    parser.add_argument("--graphics_device_id", type=int, default=None)
     parser.add_argument("--num_learning_iterations", type=int, default=100000)
     parser.add_argument("--eval_freq", type=int, default=100)
     parser.add_argument("--num_envs", type=int, default=2048)

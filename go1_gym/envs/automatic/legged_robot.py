@@ -24,7 +24,15 @@ import pytorch3d.transforms as pt3d
 
 class LeggedRobot(BaseTask):
     def __init__(
-        self, cfg: Cfg, sim_params, physics_engine, sim_device, headless, eval_cfg=None, initial_dynamics_dict=None
+        self,
+        cfg: Cfg,
+        sim_params,
+        physics_engine,
+        sim_device,
+        headless,
+        eval_cfg=None,
+        initial_dynamics_dict=None,
+        graphics_device_id=None,
     ):
 
         self.cfg = cfg
@@ -41,7 +49,7 @@ class LeggedRobot(BaseTask):
         self.num_actions_arm = cfg.arm.num_actions_arm
         self.num_actions_loco = cfg.dog.num_actions_loco
 
-        super().__init__(self.cfg, sim_params, physics_engine, sim_device, headless, self.eval_cfg)
+        super().__init__(self.cfg, sim_params, physics_engine, sim_device, headless, self.eval_cfg, graphics_device_id)
 
         self._init_command_distribution(torch.arange(self.num_envs, device=self.device))
         # self.rand_buffers_eval = self._init_custom_buffers__(self.num_eval_envs)

@@ -28,6 +28,7 @@ class VelocityTrackingEasyEnv(LeggedRobot):
         eval_cfg: Cfg = None,
         initial_dynamics_dict=None,
         physics_engine="SIM_PHYSX",
+        graphics_device_id=None,
     ):
 
         if num_envs is not None:
@@ -35,7 +36,16 @@ class VelocityTrackingEasyEnv(LeggedRobot):
 
         sim_params = gymapi.SimParams()
         gymutil.parse_sim_config(vars(cfg.sim), sim_params)
-        super().__init__(cfg, sim_params, physics_engine, sim_device, headless, eval_cfg, initial_dynamics_dict)
+        super().__init__(
+            cfg,
+            sim_params,
+            physics_engine,
+            sim_device,
+            headless,
+            eval_cfg,
+            initial_dynamics_dict,
+            graphics_device_id,
+        )
 
     def plan(self, obs):
         rescaled_obs = obs * 0.4
