@@ -186,6 +186,7 @@ class Cfg(PrefixProto, cli=False):
         center_span = 5
 
     class commands(PrefixProto, cli=False):
+        use_dynamic_gait = False
         command_curriculum = False
         max_reverse_curriculum = 1.
         max_forward_curriculum = 1.
@@ -448,6 +449,9 @@ class Cfg(PrefixProto, cli=False):
         body_height_cmd = 2.0
         gait_phase_cmd = 1.0
         gait_freq_cmd = 1.0
+        gait_offset_cmd = 1.0
+        gait_bound_cmd = 1.0
+        gait_duration_cmd = 1.0
         footswing_height_cmd = 0.15
         body_pitch_cmd = 1.
         body_roll_cmd = 1.

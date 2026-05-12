@@ -39,14 +39,48 @@ class VelocityTrackingEasyEnv(LeggedRobot):
 
     def plan(self, obs):
         rescaled_obs = obs * 0.4
+        n_plan = rescaled_obs.shape[-1]
         self.commands_dog[:, 3] = torch.clip(
             rescaled_obs[..., 0], self.cfg.commands.limit_body_pitch[0], self.cfg.commands.limit_body_pitch[1] / 4 * 3.0
-        )  # [n, 2]
+        )
         self.commands_dog[:, 4] = torch.clip(
             rescaled_obs[..., 1], self.cfg.commands.limit_body_roll[0], self.cfg.commands.limit_body_roll[1]
-        )  # [n, 2]
+        )
 
-        if self.cfg.hybrid.plan_vel:
+        if self.cfg.commands.use_dynamic_gait and n_plan >= 7:
+            # map tanh output [-1,1] to each gait parameter's range from config
+            def _map(x, lo, hi):
+                half = (hi - lo) / 2.0
+                center = (lo + hi) / 2.0
+                return torch.clip(center + half * x, lo, hi)
+
+            self.commands_dog[:, 5] = _map(
+                obs[..., 2],
+                self.cfg.commands.limit_gait_frequency[0],
+                self.cfg.commands.limit_gait_frequency[1],
+            )
+            self.commands_dog[:, 6] = _map(
+                obs[..., 3],
+                self.cfg.commands.limit_footswing_height[0],
+                self.cfg.commands.limit_footswing_height[1],
+            )
+            self.commands_dog[:, 7] = _map(
+                obs[..., 4],
+                self.cfg.commands.limit_stance_width[0],
+                self.cfg.commands.limit_stance_width[1],
+            )
+            self.commands_dog[:, 8] = _map(
+                obs[..., 5],
+                self.cfg.commands.limit_stance_length[0],
+                self.cfg.commands.limit_stance_length[1],
+            )
+            self.commands_dog[:, 9] = _map(
+                obs[..., 6],
+                self.cfg.commands.limit_gait_duration[0],
+                self.cfg.commands.limit_gait_duration[1],
+            )
+
+        if self.cfg.hybrid.plan_vel and not self.cfg.commands.use_dynamic_gait:
             self.commands_dog[:, 0] = torch.clip(rescaled_obs[..., 2], -2, 2)  # lin_vel
             self.commands_dog[:, 2] = torch.clip(rescaled_obs[..., 3], -2, 2)  # ang_vel
         self.plan_actions[:] = rescaled_obs
@@ -93,7 +127,7 @@ class VelocityTrackingEasyEnv(LeggedRobot):
                 dim=-1,
             )
         else:
-            idx = 9 if self.cfg.use_rot6d else 6
+            idx = self.cfg.arm.arm_num_commands
             obs_buf = torch.cat(
                 (
                     obs_buf,
@@ -102,6 +136,11 @@ class VelocityTrackingEasyEnv(LeggedRobot):
                     pitch.unsqueeze(1),
                 ),
                 dim=-1,
+            )
+
+        if self.cfg.commands.use_dynamic_gait:
+            obs_buf = torch.cat(
+                (obs_buf, (self.commands_dog * self.commands_scale_dog)[:, 5:10]), dim=-1
             )
 
         if self.cfg.env.observe_two_prev_actions:
@@ -239,7 +278,7 @@ class VelocityTrackingEasyEnv(LeggedRobot):
             obs_buf = torch.cat(
                 (
                     obs_buf,
-                    (self.commands_dog * self.commands_scale_dog)[:, :5],
+                    (self.commands_dog * self.commands_scale_dog)[:, :self.cfg.dog.dog_num_commands],
                     (self.obj_obs_pose_in_ee[:])
                     if global_switch.switch_open
                     else torch.zeros_like(self.obj_obs_pose_in_ee[:]),
@@ -252,12 +291,12 @@ class VelocityTrackingEasyEnv(LeggedRobot):
                 dim=-1,
             )
         else:
-            idx = 9 if self.cfg.use_rot6d else 6
+            idx = self.cfg.arm.arm_num_commands
             obs_buf = torch.cat(
                 (
                     obs_buf,
-                    (self.commands_dog * self.commands_scale_dog)[:, :5],
-                    (self.commands_arm_obs[:, :6])
+                    (self.commands_dog * self.commands_scale_dog)[:, :self.cfg.dog.dog_num_commands],
+                    (self.commands_arm_obs[:, :idx])
                     if global_switch.switch_open
                     else torch.zeros_like(self.commands_arm_obs[:, :idx]),
                     roll.unsqueeze(1),
@@ -797,10 +836,10 @@ class HistoryWrapper(gym.Wrapper):
     def get_arm_observations_hand(self, pose_in_ee):
         obs, privileged_obs = self.env.get_arm_observations()
         obs[:, 12:18] = pose_in_ee
-        self.dog_obs_history = torch.cat(
-            (self.dog_obs_history[:, self.env.cfg.dog.dog_num_observations :], obs), dim=-1
+        self.arm_obs_history = torch.cat(
+            (self.arm_obs_history[:, self.env.cfg.arm.arm_num_observations :], obs), dim=-1
         )
-        return {"obs": obs, "privileged_obs": privileged_obs, "obs_history": self.dog_obs_history}
+        return {"obs": obs, "privileged_obs": privileged_obs, "obs_history": self.arm_obs_history}
 
     def get_arm_observations(self):
         obs, privileged_obs = self.env.get_arm_observations()

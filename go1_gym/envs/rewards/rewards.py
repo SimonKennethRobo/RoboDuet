@@ -212,7 +212,11 @@ class Rewards:
     def _reward_feet_clearance_cmd_linear(self):
         phases = 1 - torch.abs(1.0 - torch.clip((self.env.foot_indices * 2.0) - 1.0, 0.0, 1.0) * 2.0)
         foot_height = (self.env.foot_positions[:, :, 2]).view(self.env.num_envs, -1)# - reference_heights
-        target_height = 0.04 * phases + 0.02 # offset for foot radius 2cm
+        if self.env.cfg.commands.use_dynamic_gait:
+            footswing_height = self.env.commands_dog[:, 6:7]  # (num_envs, 1)
+        else:
+            footswing_height = 0.04
+        target_height = footswing_height * phases + 0.02 # offset for foot radius 2cm
         rew_foot_clearance = torch.square(target_height - foot_height) * (1 - self.env.desired_contact_states)
         return torch.sum(rew_foot_clearance, dim=1)
 
@@ -260,18 +264,25 @@ class Rewards:
                                                               cur_footsteps_translated[:, i, :])
 
         # nominal positions: [FR, FL, RR, RL]
-        desired_stance_width = 0.3
-        desired_ys_nom = torch.tensor([desired_stance_width / 2, -desired_stance_width / 2, desired_stance_width / 2, -desired_stance_width / 2], device=self.env.device).unsqueeze(0)
+        if self.env.cfg.commands.use_dynamic_gait:
+            desired_stance_width = self.env.commands_dog[:, 7]  # (num_envs,)
+            desired_stance_length = self.env.commands_dog[:, 8]  # (num_envs,)
+        else:
+            desired_stance_width = torch.full((self.env.num_envs,), 0.3, device=self.env.device)
+            desired_stance_length = torch.full((self.env.num_envs,), 0.45, device=self.env.device)
+        desired_ys_nom = torch.stack([desired_stance_width / 2, -desired_stance_width / 2, desired_stance_width / 2, -desired_stance_width / 2], dim=1)
 
-        desired_stance_length = 0.45
-        desired_xs_nom = torch.tensor([desired_stance_length / 2,  desired_stance_length / 2, -desired_stance_length / 2, -desired_stance_length / 2], device=self.env.device).unsqueeze(0)
+        desired_xs_nom = torch.stack([desired_stance_length / 2,  desired_stance_length / 2, -desired_stance_length / 2, -desired_stance_length / 2], dim=1)
 
         # raibert offsets
         phases = torch.abs(1.0 - (self.env.foot_indices * 2.0)) * 1.0 - 0.5
-        frequencies = 3.
+        if self.env.cfg.commands.use_dynamic_gait:
+            frequencies = self.env.commands_dog[:, 5:6]  # (num_envs, 1)
+        else:
+            frequencies = 3.
         x_vel_des = self.env.commands_dog[:, 0:1]
         yaw_vel_des = self.env.commands_dog[:, 2:3]
-        y_vel_des = yaw_vel_des * desired_stance_length / 2
+        y_vel_des = yaw_vel_des * desired_stance_length.unsqueeze(1) / 2
         desired_ys_offset = phases * y_vel_des * (0.5 / frequencies)
         desired_ys_offset[:, 2:4] *= -1
         desired_xs_offset = phases * x_vel_des * (0.5 / frequencies)

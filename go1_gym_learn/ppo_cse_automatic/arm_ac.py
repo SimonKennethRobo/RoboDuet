@@ -148,7 +148,9 @@ class ArmActorCritic(nn.Module):
         latent = self.adaptation_module(observation_history)
         his_latent = self.actor_history_encoder(observation_history[..., : -self.num_obs])
         mean = self.actor_body(torch.cat((obs, latent, his_latent), dim=-1))
-        mean[..., -2:] = torch.tanh(mean[..., -2:])
+        num_plan_actions = mean.shape[-1] - 6  # arm joints are always 6
+        if num_plan_actions > 0:
+            mean[..., -num_plan_actions:] = torch.tanh(mean[..., -num_plan_actions:])
         try:
             self.distribution = Normal(mean, mean * 0.0 + self.std)
         # print("std: ", self.std)

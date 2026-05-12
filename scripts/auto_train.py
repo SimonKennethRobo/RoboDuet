@@ -146,6 +146,44 @@ def train_go1(arg):
         Cfg.dog.dog_num_observations += 3
         Cfg.dog.dog_num_obs_history = Cfg.dog.dog_num_observations * Cfg.dog.dog_num_observation_history
 
+    if args.dyna_gait:
+        Cfg.commands.use_dynamic_gait = True
+
+        # Unlock gait parameter ranges (wtw_config sets wide ranges, don't re-lock)
+        Cfg.commands.limit_gait_frequency = Cfg.commands.gait_frequency_cmd_range
+        Cfg.commands.limit_footswing_height = Cfg.commands.footswing_height_range
+        Cfg.commands.limit_gait_duration = Cfg.commands.gait_duration_cmd_range
+        Cfg.commands.limit_stance_width = Cfg.commands.stance_width_range
+        Cfg.commands.limit_stance_length = Cfg.commands.stance_length_range
+
+        # Expand dog command dims: +5 gait params
+        num_new_gait_dims = 5
+        Cfg.dog.dog_num_commands += num_new_gait_dims  # 5 -> 10
+
+        # Dog observation gets +5 extra command dims
+        Cfg.dog.dog_num_observations += num_new_gait_dims
+        Cfg.dog.dog_num_obs_history = Cfg.dog.dog_num_observations * Cfg.dog.dog_num_observation_history
+
+        # Arm plan actions: +5 gait suggestions
+        Cfg.arm.num_actions_arm_cd = Cfg.arm.num_actions_arm + 7  # 6 + 7 = 13
+
+        # Arm observation includes current gait params as feedback
+        Cfg.arm.arm_num_observations += num_new_gait_dims
+        Cfg.arm.arm_num_obs_history = Cfg.arm.arm_num_observations * Cfg.arm.arm_num_observation_history
+
+        # Update env observation dim (compute_observations goes from 3→10 cmd dims = +7)
+        Cfg.env.num_observations += num_new_gait_dims + 2
+
+        # Enable gait command observation
+        Cfg.env.observe_gait_commands = True
+
+        # Enable curriculum bins for gait parameters
+        Cfg.commands.num_bins_gait_frequency = 11
+        Cfg.commands.num_bins_footswing_height = 5
+        Cfg.commands.num_bins_gait_duration = 3
+        Cfg.commands.num_bins_stance_width = 3
+        Cfg.commands.num_bins_stance_length = 3
+
     global_switch.init_sigmoid_lr()
     # global_switch.init_linear_lr()
 
@@ -268,6 +306,7 @@ if __name__ == "__main__":
     parser.add_argument("--robot", type=str, default="go1", choices=["go1", "go2"])
     parser.add_argument("--wo_two_stage", action="store_true", default=False)
     parser.add_argument("--use_rot6d", action="store_true", default=False)
+    parser.add_argument("--dyna_gait", action="store_true", default=False)
 
     args = parser.parse_args()
 
