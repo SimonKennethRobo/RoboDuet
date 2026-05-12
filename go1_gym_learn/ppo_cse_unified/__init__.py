@@ -20,6 +20,7 @@ from go1_gym.envs.automatic import HistoryWrapper
 from go1_gym.utils import global_switch
 
 from .unified2head_ac import Unified2ActorCritic
+from .unified2head_ac import Unified2AC_Args
 from .ppo import PPO
 
 
@@ -82,6 +83,7 @@ class Runner:
         self.log_dir = log_dir
         self.debug = debug
         self.num_steps_per_env = UnifiedRunnerArgs.num_steps_per_env
+        self.num_policy_actions = Unified2AC_Args.num_actions_loco + Unified2AC_Args.num_actions_arm
         
         self.unified_model = Unified2ActorCritic(
             self.env.cfg.env.num_observations,
@@ -106,7 +108,7 @@ class Runner:
             [self.env.num_obs],
             [self.env.num_privileged_obs],
             [self.env.num_obs_history],
-            [self.env.num_actions])
+            [self.num_policy_actions])
 
 
         self.tot_timesteps = 0
@@ -152,8 +154,11 @@ class Runner:
                                                  obs_history[:num_train_envs])
 
                     actions_dog = actions_train[..., :self.env.cfg.dog.dog_actions]
-                    if global_switch.switch_open:                    
+                    if global_switch.switch_open:
                         actions_arm = actions_train[..., self.env.cfg.dog.dog_actions:]
+                        if actions_arm.shape[-1] > self.env.num_actions_arm:
+                            self.env.plan(actions_arm[..., -self.env.num_plan_actions:])
+                            actions_arm = actions_arm[..., :self.env.num_actions_arm]
                     else:
                         actions_arm = fake_actions_arm
                         
