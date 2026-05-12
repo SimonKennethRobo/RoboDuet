@@ -211,13 +211,14 @@ def train_go1(arg):
     args.log_dir = osp.join(f"{MINI_GYM_ROOT_DIR}/runs/{args.run_name}", wandb.run.name)
     args.log_dir += f"_seed{args.seed}"
 
+    os.makedirs(osp.join(args.log_dir, "checkpoints_arm"), exist_ok=True)
+    os.makedirs(osp.join(args.log_dir, "checkpoints_dog"), exist_ok=True)
+    os.makedirs(osp.join(args.log_dir, "videos"), exist_ok=True)
+    os.makedirs(osp.join(args.log_dir, "deploy_model"), exist_ok=True)
+    os.makedirs(f"{MINI_GYM_ROOT_DIR}/tmp/deploy_model", exist_ok=True)
+
     if not args.debug:
-        os.makedirs(osp.join(args.log_dir, "checkpoints_arm"), exist_ok=True)
-        os.makedirs(osp.join(args.log_dir, "checkpoints_dog"), exist_ok=True)
         os.makedirs(osp.join(args.log_dir, "scripts"), exist_ok=True)
-        os.makedirs(osp.join(args.log_dir, "videos"), exist_ok=True)
-        os.makedirs(osp.join(args.log_dir, "deploy_model"), exist_ok=True)
-        os.makedirs(f"{MINI_GYM_ROOT_DIR}/tmp/deploy_model", exist_ok=True)
 
         # save code
         shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/scripts/auto_train.py", f"{args.log_dir}/scripts/auto_train.py")
