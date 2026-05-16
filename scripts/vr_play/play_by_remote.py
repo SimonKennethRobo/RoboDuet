@@ -54,25 +54,25 @@ def lcm_thread():
         lcm_node.handle()
 
 def play_go1(args):
-    
+
     signal.signal(signal.SIGINT, signal_handler)
-    
+
     vr_control_subscription = lcm_node.subscribe("arm_control_data", arm_data_cb)
     thread1 = threading.Thread(target=lcm_thread, daemon=False)
     thread1.start()
-    
+
     global x_vel_cmd, y_vel_cmd, yaw_vel_cmd, l_cmd, p_cmd, y_cmd, roll_cmd, pitch_cmd, yaw_cmd, delta_xyzrpy, logdir, ckpt_id
-    
+
     logdir = args.logdir
     ckpt_id = str(args.ckptid).zfill(6)
-            
+
     from go1_gym.utils.global_switch import global_switch
     global_switch.open_switch()
-    
+
     env, cfg = load_env(logdir, wrapper=KeyboardWrapper, headless=args.headless, device=args.sim_device)
     dog_policy = load_dog_policy(logdir, ckpt_id, cfg)
     arm_policy = load_arm_policy(logdir, ckpt_id, cfg)
-    
+
     env.enable_viewer_sync = True
 
     num_eval_steps = 30000
@@ -93,27 +93,27 @@ def play_go1(args):
     env.commands_arm[:, 3] = roll_cmd
     env.commands_arm[:, 4] = pitch_cmd
     env.commands_arm[:, 5] = yaw_cmd
-    
+
     obs = env.get_arm_observations()
-    
+
     last_arm_actions = None
     last_pitch_roll = None
     filter_rate = 0.8
     pitch_filter_rate = 0.95
-    
+
     for i in (range(num_eval_steps)):
 
         with torch.no_grad():
             obs = env.get_arm_observations()
             actions_arm = arm_policy(obs)
-            
+
             if last_arm_actions is None:
                 last_arm_actions = actions_arm
                 last_pitch_roll = actions_arm[..., -2:]
             else:
                 last_arm_actions = filter_rate * last_arm_actions + (1 - filter_rate) * actions_arm
                 last_pitch_roll = pitch_filter_rate * last_pitch_roll + (1 - pitch_filter_rate) * actions_arm[..., -2:]
-                
+
 
             env.plan(last_pitch_roll)
             dog_obs = env.get_dog_observations()
@@ -127,14 +127,14 @@ def play_go1(args):
         delta_l = np.sqrt(delta_x1**2 + delta_y1**2 + delta_z1**2)
         delta_y = np.arctan2(delta_y1, delta_x1)
         delta_p = np.arcsin(delta_z1 / delta_l) if delta_l != 0 else 0
-    
+
         print("delta_xyzrpy: ", delta_x1, delta_y1, delta_z1, delta_roll, delta_pitch, delta_yaw)
         print("delta_lpy: ", delta_l, delta_p, delta_y)
-        
+
         cmd_l = min(max(delta_l + 0.2, 0.3), 0.8)  # 0.3 ~ 0.8
         cmd_p = min(max(delta_p + 0.3, -np.pi/3), np.pi/3)   # -pi/3 ~ pi/3
         cmd_y = min(max(delta_y, -np.pi/2), np.pi/2)  # -pi/2 ~ pi/2
-    
+
         cmd_alpha = min(max(delta_roll, -np.pi * 0.45), np.pi * 0.45)
         cmd_beta = min(max(delta_pitch, -1.5), 1.5)
         cmd_gamma = min(max(delta_yaw, -1.4), 1.4)
@@ -148,7 +148,7 @@ def play_go1(args):
         env.commands_arm[:, 3] = cmd_alpha
         env.commands_arm[:, 4] = cmd_beta
         env.commands_arm[:, 5] = cmd_gamma
-        
+
 
 
 def quat_apply(a, b):
@@ -245,7 +245,7 @@ def quat_to_angle(quat):
     pitch = torch.atan2(pitch_vec[0], pitch_vec[2]) # pitch angle = arctan2(x, z)
     yaw_vec = quat_apply(quat, x_vector) # [1,0,0]
     yaw = torch.atan2(yaw_vec[1], yaw_vec[0]) # yaw angle = arctan2(y, x)
-    
+
     return torch.stack([roll, pitch, yaw], dim=-1)
 
 def rpy_to_abg(roll, pitch, yaw):
@@ -255,7 +255,7 @@ def rpy_to_abg(roll, pitch, yaw):
     q3 = quat_from_euler_xyz(roll, zero_vec, zero_vec)
     quats = quat_mul(q1, quat_mul(q2, q3))  # np, (4,)
     abg = quat_to_angle(quats).numpy()
-    
+
     return abg
 
 if __name__ == '__main__':
@@ -265,7 +265,7 @@ if __name__ == '__main__':
     parser.add_argument('--sim_device', type=str, default="cuda:0")
     parser.add_argument('--logdir', type=str)
     parser.add_argument('--ckptid', type=int, default=40000)
-   
+
     args = parser.parse_args()
     play_go1(args)
 

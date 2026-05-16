@@ -1,0 +1,125 @@
+# RoboDuet joystick mapping configuration
+#
+# Tested with a standard PS4 / Xbox-style controller via ros2-joy.
+# Run:  ros2 run joy joy_node
+#
+# Axes layout (typical PS4 / Xbox):
+#   0  Left  stick  horizontal  (left +1, right -1)
+#   1  Left  stick  vertical    (up   +1, down  -1)
+#   2  Left  trigger             (rest +1, full -1)
+#   3  Right stick  horizontal  (left +1, right -1)
+#   4  Right stick  vertical    (up   +1, down  -1)
+#   5  RT (right trigger)        (rest +1, full -1)
+#   6  LT (left trigger)         (rest +1, full -1)
+#   7  D-pad horizontal         (left +1, right -1)
+#   8  D-pad vertical           (up   +1, down  -1)
+#
+# Buttons layout (typical PS4 / Xbox):
+#   0  Cross  / A
+#   1  Circle / B
+#   2  Square / X
+#   3  Triangle / Y
+#   6  LB
+#   7  RB
+#   9  Share / Back
+#  10  Options / Start
+#  11  L3 (left  stick click)
+#  12  R3 (right stick click)
+#
+# Supported axis modes:
+#   absolute   - command = axis_value * scale + offset   (clamped if clamp set)
+#   step       - increment channel by step * sign(axis_value)
+#
+# Supported button actions:
+#   reset            - call env.reset() and zero dog velocity commands
+#   arm_roll_left    - increment commands_arm[0, 3] by +step
+#   arm_roll_right   - increment commands_arm[0, 3] by -step
+#   arm_pitch_up  - increment commands_arm[0, 4] by +step
+#   arm_pitch_down- increment commands_arm[0, 4] by -step
+#   arm_yaw_left  - increment commands_arm[0, 5] by +step
+#   arm_yaw_right - increment commands_arm[0, 5] by -step
+
+topic: /joy
+
+# D-pad step control (uses binary axes with LT/RT as delta range)
+dpad_step:
+  horizontal_axis: 6
+  vertical_axis: 7
+  lt_axis: 5
+  rt_axis: 4
+  step: 0.05
+  threshold: 0.5
+  trigger_mode: zero_to_one
+  trigger_threshold: 0.1
+  arm_x_range: [-1.0, 1.0]
+  arm_y_range: [-1.0, 1.0]
+  arm_z_range: [-1.0, 1.0]
+
+# ----- Axis mappings -----
+axes:
+  # Left stick vertical -> forward / backward velocity
+  1:
+    channel: x_vel
+    scale: -1.5        # full stick = ±1.5 m/s
+    offset: 0.0
+    deadzone: 0.08
+    clamp: [-1.5, 1.5]
+
+  # Left stick horizontal -> lateral (strafe) velocity
+  0:
+    channel: y_vel
+    scale: -0.5        # full stick = ±0.5 m/s
+    offset: 0.0
+    deadzone: 0.08
+    clamp: [-0.5, 0.5]
+
+  # Right stick horizontal -> yaw rate
+  2:
+    channel: yaw_vel
+    scale: -1.5       # invert so right-stick-right = turn right
+    offset: 0.0
+    deadzone: 0.08
+    clamp: [-1.5, 1.5]
+
+  # Right stick vertical -> arm Z
+  3:
+    channel: arm_z
+    scale: -0.2
+    offset: 0.0
+    deadzone: 0.08
+    clamp: [-1.0, 1.0]
+
+# ----- Button mappings -----
+buttons:
+  # Cross / A -> reset environment
+  0:
+    action: reset
+
+  # Square / X -> arm roll
+  3:
+    action: arm_roll
+    step: 0.05
+
+  # Triangle / Y -> arm pitch
+  4:
+    action: arm_pitch
+    step: 0.05
+
+  # Circle / B -> arm yaw
+  1:
+    action: arm_yaw
+    step: 0.05
+
+# ----- Channel definitions -----
+# Override or extend the built-in channel table if needed.
+# Built-in channels (no need to repeat here unless you want to change them):
+#   x_vel       -> dog  index 0
+#   y_vel       -> dog  index 1
+#   yaw_vel     -> dog  index 2
+#   arm_x  -> arm  index 0
+#   arm_z   -> arm  index 1
+#   arm_y     -> arm  index 2
+#   arm_roll    -> arm  index 3
+#   arm_pitch-> arm  index 4
+#   arm_ee_yaw  -> arm  index 5
+channels: {}

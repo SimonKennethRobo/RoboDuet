@@ -13,7 +13,7 @@ import numpy as np
 # Base class for RL tasks
 class BaseTask(gym.Env):
 
-    def __init__(self, cfg, sim_params, physics_engine, sim_device, headless, eval_cfg=None):
+    def __init__(self, cfg, sim_params, physics_engine, sim_device, headless, eval_cfg=None, graphics_device_id=None):
         self.gym = gymapi.acquire_gym()
 
         if isinstance(physics_engine, str) and physics_engine == "SIM_PHYSX":
@@ -31,10 +31,9 @@ class BaseTask(gym.Env):
         else:
             self.device = 'cpu'
 
-        # graphics device for rendering, -1 for no rendering
-        self.graphics_device_id = self.sim_device_id
-        if self.headless == True:
-            self.graphics_device_id = self.sim_device_id
+        # graphics device for rendering. Keep the old default of following sim_device,
+        # but allow rendering/video capture to use a different GPU on multi-GPU hosts.
+        self.graphics_device_id = self.sim_device_id if graphics_device_id is None else graphics_device_id
 
         self.num_obs = cfg.env.num_observations
         self.num_privileged_obs = cfg.env.num_privileged_obs
