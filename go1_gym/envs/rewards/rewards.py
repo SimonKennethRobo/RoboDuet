@@ -277,7 +277,7 @@ class Rewards:
         # raibert offsets
         phases = torch.abs(1.0 - (self.env.foot_indices * 2.0)) * 1.0 - 0.5
         if self.env.cfg.commands.use_dynamic_gait:
-            frequencies = self.env.commands_dog[:, 5:6]  # (num_envs, 1)
+            frequencies = torch.clamp(self.env.commands_dog[:, 5:6], min=0.1)  # (num_envs, 1)
         else:
             frequencies = 3.
         x_vel_des = self.env.commands_dog[:, 0:1]

@@ -1188,6 +1188,9 @@ class LeggedRobot(BaseTask):
             self.commands_dog[env_ids, 7] = torch.Tensor(new_commands[:, 7]).to(self.device)
             self.commands_dog[env_ids, 8] = torch.Tensor(new_commands[:, 8]).to(self.device)
             self.commands_dog[env_ids, 9] = torch.Tensor(new_commands[:, 9]).to(self.device)
+            standing_mask = torch.norm(self.commands_dog[env_ids, :3], dim=1) < 0.1
+            if len(standing_mask.nonzero()) > 0:
+                self.commands_dog[env_ids[standing_mask], 5] = 0.0
 
         # reset command sums
         for key in self.command_sums.keys():

@@ -156,6 +156,10 @@ def train_go1(arg):
         Cfg.commands.use_dynamic_gait = True
 
         # Unlock gait parameter ranges (wtw_config sets wide ranges, don't re-lock)
+        Cfg.commands.gait_frequency_cmd_range = [
+            args.dyna_gait_min_frequency,
+            Cfg.commands.gait_frequency_cmd_range[1],
+        ]
         Cfg.commands.limit_gait_frequency = Cfg.commands.gait_frequency_cmd_range
         Cfg.commands.limit_footswing_height = Cfg.commands.footswing_height_range
         Cfg.commands.limit_gait_duration = Cfg.commands.gait_duration_cmd_range
@@ -326,6 +330,7 @@ if __name__ == "__main__":
     parser.add_argument("--stage1_arm_max_vel", type=float, default=1.0)
     parser.add_argument("--stage1_arm_max_offset", type=float, default=0.35)
     parser.add_argument("--stage1_arm_accel_resample_time_s", type=float, default=0.5)
+    parser.add_argument("--dyna_gait_min_frequency", type=float, default=0.0)
 
     args = parser.parse_args()
 
