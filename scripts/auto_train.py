@@ -72,6 +72,12 @@ def train_go1(arg):
     Cfg.env.num_envs = args.num_envs
 
     Cfg.env.keep_arm_fixed = True
+    Cfg.env.stage1_arm_curriculum = not args.no_stage1_arm_curriculum
+    Cfg.env.stage1_arm_fixed_fraction = args.stage1_arm_fixed_fraction
+    Cfg.env.stage1_arm_max_accel = args.stage1_arm_max_accel
+    Cfg.env.stage1_arm_max_vel = args.stage1_arm_max_vel
+    Cfg.env.stage1_arm_max_offset = args.stage1_arm_max_offset
+    Cfg.env.stage1_arm_accel_resample_time_s = args.stage1_arm_accel_resample_time_s
 
     Cfg.terrain.mesh_type = "plane"
     if Cfg.terrain.mesh_type == "plane":
@@ -97,7 +103,7 @@ def train_go1(arg):
     ArmRunnerArgs.resume_path = "your_arm_ckpt_path"
 
     global_switch.pretrained_to_hybrid_start = (
-        2000 if args.resume else 10000
+        2000 if args.resume else 8000
     )  # 2000 with pretrained, 10000 from scratch
 
     if args.wo_two_stage:
@@ -314,6 +320,12 @@ if __name__ == "__main__":
     parser.add_argument("--wo_two_stage", action="store_true", default=False)
     parser.add_argument("--use_rot6d", action="store_true", default=False)
     parser.add_argument("--dyna_gait", action="store_true", default=False)
+    parser.add_argument("--no_stage1_arm_curriculum", action="store_true", default=False)
+    parser.add_argument("--stage1_arm_fixed_fraction", type=float, default=0.1)
+    parser.add_argument("--stage1_arm_max_accel", type=float, default=2.0)
+    parser.add_argument("--stage1_arm_max_vel", type=float, default=1.0)
+    parser.add_argument("--stage1_arm_max_offset", type=float, default=0.35)
+    parser.add_argument("--stage1_arm_accel_resample_time_s", type=float, default=0.5)
 
     args = parser.parse_args()
 

@@ -119,6 +119,12 @@ class Cfg(PrefixProto, cli=False):
         num_recording_envs = 1
         debug_viz = False
         all_agents_share = False
+        stage1_arm_curriculum = False
+        stage1_arm_fixed_fraction = 0.1
+        stage1_arm_accel_resample_time_s = 0.5
+        stage1_arm_max_accel = 2.0  # rad / s^2
+        stage1_arm_max_vel = 1.0  # rad / s
+        stage1_arm_max_offset = 0.35  # rad from default joint position
 
         priv_observe_friction = True
         priv_observe_friction_indep = True

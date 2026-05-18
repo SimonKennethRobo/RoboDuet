@@ -221,6 +221,7 @@ class LeggedRobot(BaseTask):
         """
         clip_actions = self.cfg.normalization.clip_actions
         self.actions = torch.clip(actions, -clip_actions, clip_actions).to(self.device)
+        self._apply_stage1_arm_curriculum_actions()
         # step physics and render each frame
         self.prev_base_pos = self.base_pos.clone()
         self.prev_base_quat = self.base_quat.clone()
@@ -248,6 +249,12 @@ class LeggedRobot(BaseTask):
     def _keep_arm_fixed(self):
         if global_switch.switch_open:
             idx = self.num_actions_loco + self.num_actions_arm
+        elif self._stage1_arm_curriculum_active():
+            idx = (
+                self.num_actions_loco + self.num_actions_arm
+                if self._get_stage1_arm_curriculum_intensity() > 0.0
+                else self.num_actions_loco
+            )
         else:
             idx = self.num_actions_loco
 
@@ -256,6 +263,54 @@ class LeggedRobot(BaseTask):
         ret = self.gym.set_dof_state_tensor(self.sim, gymtorch.unwrap_tensor(self.dof_state))
 
         assert ret, "[ERROR] Failed to set dof state."
+
+    def _stage1_arm_curriculum_active(self):
+        return bool(getattr(self.cfg.env, "stage1_arm_curriculum", False)) and not global_switch.switch_open
+
+    def _get_stage1_arm_curriculum_intensity(self):
+        if not self._stage1_arm_curriculum_active():
+            return 0.0
+
+        ramp_iters = max(1, int(global_switch.pretrained_to_hybrid_start))
+        progress = min(1.0, max(0.0, global_switch.count / ramp_iters))
+        fixed_fraction = min(1.0, max(0.0, float(self.cfg.env.stage1_arm_fixed_fraction)))
+        if progress <= fixed_fraction:
+            return 0.0
+
+        return (progress - fixed_fraction) / max(1e-6, 1.0 - fixed_fraction)
+
+    def _apply_stage1_arm_curriculum_actions(self):
+        if not self._stage1_arm_curriculum_active():
+            return
+
+        intensity = self._get_stage1_arm_curriculum_intensity()
+        self.stage1_arm_curriculum_intensity = intensity
+        arm_slice = slice(self.num_actions_loco, self.num_actions_loco + self.num_actions_arm)
+
+        if intensity <= 0.0:
+            self.stage1_arm_target_offset.zero_()
+            self.stage1_arm_target_vel.zero_()
+            self.stage1_arm_target_accel.zero_()
+            self.actions[:, arm_slice] = 0.0
+            return
+
+        resample_steps = max(1, int(self.cfg.env.stage1_arm_accel_resample_time_s / self.dt))
+        if self.common_step_counter % resample_steps == 0:
+            accel = torch.rand_like(self.stage1_arm_target_accel) * 2.0 - 1.0
+            self.stage1_arm_target_accel[:] = accel * self.cfg.env.stage1_arm_max_accel * intensity
+
+        self.stage1_arm_target_vel += self.stage1_arm_target_accel * self.dt
+        max_vel = self.cfg.env.stage1_arm_max_vel * intensity
+        self.stage1_arm_target_vel[:] = torch.clamp(self.stage1_arm_target_vel, -max_vel, max_vel)
+
+        self.stage1_arm_target_offset += self.stage1_arm_target_vel * self.dt
+        max_offset = self.cfg.env.stage1_arm_max_offset * intensity
+        hit_upper = self.stage1_arm_target_offset > max_offset
+        hit_lower = self.stage1_arm_target_offset < -max_offset
+        self.stage1_arm_target_offset[:] = torch.clamp(self.stage1_arm_target_offset, -max_offset, max_offset)
+        self.stage1_arm_target_vel[hit_upper | hit_lower] *= -0.5
+
+        self.actions[:, arm_slice] = self.stage1_arm_target_offset / self.cfg.control.action_scale
 
     def post_physics_step(self):
         """check terminations, compute observations and rewards
@@ -382,6 +437,9 @@ class LeggedRobot(BaseTask):
         # reset buffers
         self.last_actions[env_ids] = 0.0
         self.last_last_actions[env_ids] = 0.0
+        self.stage1_arm_target_offset[env_ids] = 0.0
+        self.stage1_arm_target_vel[env_ids] = 0.0
+        self.stage1_arm_target_accel[env_ids] = 0.0
         self.last_dof_vel[env_ids] = 0.0
         self.feet_air_time[env_ids] = 0.0
         self.episode_length_buf[env_ids] = 0
@@ -1576,6 +1634,12 @@ class LeggedRobot(BaseTask):
         self.actions = torch.zeros(
             self.num_envs, self.num_actions, dtype=torch.float, device=self.device, requires_grad=False
         )
+        self.stage1_arm_target_offset = torch.zeros(
+            self.num_envs, self.num_actions_arm, dtype=torch.float, device=self.device, requires_grad=False
+        )
+        self.stage1_arm_target_vel = torch.zeros_like(self.stage1_arm_target_offset)
+        self.stage1_arm_target_accel = torch.zeros_like(self.stage1_arm_target_offset)
+        self.stage1_arm_curriculum_intensity = 0.0
         self.last_actions = torch.zeros(
             self.num_envs, self.num_actions, dtype=torch.float, device=self.device, requires_grad=False
         )
