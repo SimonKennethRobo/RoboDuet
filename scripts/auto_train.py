@@ -102,9 +102,7 @@ def train_go1(arg):
     ArmRunnerArgs.resume = args.resume
     ArmRunnerArgs.resume_path = "your_arm_ckpt_path"
 
-    global_switch.pretrained_to_hybrid_start = (
-        2000 if args.resume else 8000
-    )  # 2000 with pretrained, 10000 from scratch
+    global_switch.pretrained_to_hybrid_start = 2000 if args.resume else 8000  # 2000 with pretrained, 10000 from scratch
 
     if args.wo_two_stage:
         global_switch.pretrained_to_hybrid_start = 0
@@ -206,19 +204,18 @@ def train_go1(arg):
     #     RunnerArgs.log_video = False
 
     now = datetime.now()
-    stem = Path(__file__).stem
     wandb.init(
         entity="simon00715",
         project="roboduet",
         group=args.run_name,
         mode=mode,
         notes=args.notes,
-        name=f"{now.strftime('%Y-%m-%d')}/{stem}/{now.strftime('%H%M%S.%f')}",
+        name=f"{now.strftime('%Y-%m-%d')}/{now.strftime('%H%M%S')}_{args.run_name}",
         tags=args.tags,
         dir=f"{MINI_GYM_ROOT_DIR}",
     )
 
-    args.log_dir = osp.join(f"{MINI_GYM_ROOT_DIR}/runs/{args.run_name}", wandb.run.name)
+    args.log_dir = osp.join(f"{MINI_GYM_ROOT_DIR}/runs", wandb.run.name)
     args.log_dir += f"_seed{args.seed}"
 
     os.makedirs(osp.join(args.log_dir, "checkpoints_arm"), exist_ok=True)
