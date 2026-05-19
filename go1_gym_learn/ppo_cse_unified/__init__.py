@@ -84,7 +84,7 @@ class Runner:
         self.debug = debug
         self.num_steps_per_env = UnifiedRunnerArgs.num_steps_per_env
         self.num_policy_actions = Unified2AC_Args.num_actions_loco + Unified2AC_Args.num_actions_arm
-        
+
         self.unified_model = Unified2ActorCritic(
             self.env.cfg.env.num_observations,
             self.env.cfg.env.num_privileged_obs,
@@ -104,7 +104,7 @@ class Runner:
         self.alg = PPO(self.unified_model, device=self.device)
         self.alg.init_storage(
             self.env.num_train_envs,
-            self.num_steps_per_env, 
+            self.num_steps_per_env,
             [self.env.num_obs],
             [self.env.num_privileged_obs],
             [self.env.num_obs_history],
@@ -141,7 +141,7 @@ class Runner:
         cur_episode_length = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
         ep_infos = []
         beta = 0
-        
+
         tot_iter = self.current_learning_iteration + num_learning_iterations
         fake_actions_arm = torch.zeros(self.env.num_envs, self.env.num_actions_arm, dtype=torch.float, device=self.device, requires_grad=False)
         for it in range(self.current_learning_iteration, tot_iter):
@@ -161,15 +161,15 @@ class Runner:
                             actions_arm = actions_arm[..., :self.env.num_actions_arm]
                     else:
                         actions_arm = fake_actions_arm
-                        
+
                     ret = self.env.step(actions_dog, actions_arm)
-                    
+
                     rewards_dog, rewards_arm, dones, infos = ret
-                    
+
                     obs_dict = self.env.get_observations()
                     obs, privileged_obs, obs_history = obs_dict["obs"], obs_dict["privileged_obs"], obs_dict[
                     "obs_history"]
-                    
+
                     obs, privileged_obs, obs_history, rewards_dog, rewards_arm, dones = obs.to(self.device), privileged_obs.to(self.device), obs_history.to(self.device), rewards_dog.to(self.device), rewards_arm.to(self.device), dones.to(self.device)
                     self.alg.process_env_step(torch.stack([rewards_dog[:num_train_envs], rewards_arm[:num_train_envs]], dim=-1), dones[:num_train_envs], infos)
 
@@ -190,7 +190,7 @@ class Runner:
                         lenbuffer.extend(cur_episode_length[new_ids_train].cpu().numpy().tolist())
                         cur_reward_sum[new_ids_train] = 0
                         cur_episode_length[new_ids_train] = 0
-                   
+
 
                 stop = time.time()
                 collection_time = stop - start
@@ -202,8 +202,10 @@ class Runner:
             mean_value_loss_dog, mean_value_loss_arm, mean_surrogate_loss_dog, mean_surrogate_loss_arm, mean_adaptation_module_loss, mean_adaptation_module_test_loss = self.alg.update(beta)
             stop = time.time()
             learn_time = stop - start
-            
+
             global_switch.count += 1
+            if not global_switch.switch_open:
+                global_switch.stage1_count += 1
 
             if it == global_switch.pretrained_to_hybrid_start:
                 blue_bold_text = '\033[1;34m'
@@ -211,14 +213,14 @@ class Runner:
                 print(blue_bold_text + '=' * 160 + '\n'
                       + 'Unified Policy Output: Start to gradually integrate arm and leg rewards.' + '\n'
                       + '=' * 160 + reset_color )
-                
+
                 global_switch.open_switch()
                 change_setting = vars(self.env.cfg.hybrid.rewards)
                 for key, value in change_setting.items():
                     setattr(self.env.cfg.rewards, key, value)
-                        
+
             beta = global_switch.get_beta()
-            
+
             if self.log_dir is not None:
                 ep_string = f''
                 wandb_dict = {}
@@ -228,18 +230,18 @@ class Runner:
                 self.tot_time += learn_time + collection_time
                 iteration_time = learn_time + collection_time
                 fps = self.num_steps_per_env * self.env.num_envs / iteration_time
-                
+
                 for key in ep_infos[0].keys():
                     mean = []
                     for ep_info in ep_infos:
                         mean.append(ep_info[key])
                     mean = torch.mean(torch.stack(mean))
-                    
+
                     ep_string += f"""{f'Mean episode {key}:':>{pad}} {mean:.4f}\n"""
-                    
+
                     if not self.debug:
                         wandb_dict['Train_Reward_episode/' + key] = mean
-                
+
                 dog_action_std = self.alg.actor_critic.std_dog.clone()
                 arm_action_std = self.alg.actor_critic.std_arm.clone()
                 if not self.debug:
@@ -248,15 +250,15 @@ class Runner:
                     wandb_dict["Train_Loss/mean_value_loss_dog"] = mean_value_loss_dog
                     wandb_dict["Train_Loss/mean_surrogate_loss_dog"] = mean_surrogate_loss_dog
                     wandb_dict["Train_std/arm_action_std"] = arm_action_std.mean()
-                    wandb_dict["Train_std/dog_action_std"] = dog_action_std.mean()      
-            
+                    wandb_dict["Train_std/dog_action_std"] = dog_action_std.mean()
+
                     if len(rewbuffer) > 0:
                         wandb_dict['Train_Total_Reward/mean_reward'] = statistics.mean(rewbuffer)
                         wandb_dict['Train_Total_Reward/mean_episode_length'] = statistics.mean(lenbuffer)
-                    
+
                     wandb.log(wandb_dict, step=it)
                 str = f" \033[1m Learning iteration {it}/{tot_iter} \033[0m "
-        
+
                 log_string = (f"""{'#' * width}\n"""
                     f"""{str.center(width, ' ')}\n\n""")
                 log_string += ep_string
@@ -274,7 +276,7 @@ class Runner:
                                     f"""{'Train Adaptation loss:':>{pad}} {mean_adaptation_module_loss:.8f}\n"""
                                     f"""{'Mean reward (total):':>{pad}} {statistics.mean(rewbuffer):.4f}\n"""
                                     f"""{'Mean episode length:':>{pad}} {statistics.mean(lenbuffer):.4f}\n""")
-                    
+
                 else:
                     log_string = (f"""{'#' * width}\n"""
                                 f"""{str.center(width, ' ')}\n\n"""
@@ -285,7 +287,7 @@ class Runner:
                                 f"""{'Dog Surrogate loss:':>{pad}} {mean_surrogate_loss_dog:.8f}\n"""
                                 f"""{'Test Adaptation loss:':>{pad}} {mean_adaptation_module_test_loss:.8f}\n"""
                                 f"""{'Train Adaptation loss:':>{pad}} {mean_adaptation_module_loss:.8f}\n""")
-    
+
                 curr_it = it - copy.copy(self.current_learning_iteration)
                 eta = self.tot_time / (curr_it + 1) * (num_learning_iterations - curr_it)
                 mins = eta // 60
@@ -296,16 +298,16 @@ class Runner:
                             f"""{'Total time:':>{pad}} {self.tot_time:.2f}s\n"""
                             f"""{'ETA:':>{pad}} {mins:.0f} mins {secs:.1f} s\n""")
                 print(log_string)
-                
+
                 with open(osp.join(self.log_dir, "log.txt"), "a") as f:
                     f.write(log_string)
-                
+
             if UnifiedRunnerArgs.save_video_interval and UnifiedRunnerArgs.log_video:
                 self.log_video(it)
 
             if not self.debug and it % UnifiedRunnerArgs.save_interval == 0:
                 self.save(it)
-                
+
             ep_infos.clear()
 
         self.save(it)
@@ -314,7 +316,7 @@ class Runner:
         torch.save(self.alg.actor_critic.state_dict(), osp.join(self.log_dir, f"checkpoints_unified/ac_weights_{it:06d}.pt"))
         shutil.copyfile(osp.join(self.log_dir, f"checkpoints_unified/ac_weights_{it:06d}.pt"),
             osp.join(self.log_dir, f"checkpoints_unified/ac_weights_last.pt"))
-        
+
         if it in [44800, 44400, 44000]:
             torch.save(self.alg.actor_critic.state_dict(), osp.join(self.log_dir, f"checkpoints_unified/ac_weights_{it:06d}.pt"))
             wandb.save(osp.join(self.log_dir, f"checkpoints_unified/ac_weights_{it:06d}.pt"))
@@ -336,18 +338,18 @@ class Runner:
 
     def save_cv(self, frames, it):
         # fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        fourcc = cv2.VideoWriter_fourcc(*'X264')    
+        fourcc = cv2.VideoWriter_fourcc(*'X264')
         out = cv2.VideoWriter(osp.join(self.log_dir, f'videos/{it:06d}.mp4'), fourcc, int(1 / self.env.dt), (self.env.camera_props.width, self.env.camera_props.height))
         for frame in frames:
             out.write(frame[..., :3])
         out.release()
-        
+
     def save_io(self, frames, it):
         writer = imageio.get_writer(osp.join(self.log_dir, f'videos/{it:06d}.mp4'), fps=int(1 / self.env.dt))
         for frame in frames:
             writer.append_data(frame[..., :3])
         writer.close()
-            
+
     def log_video(self, it):
         if it - self.last_recording_it >= UnifiedRunnerArgs.save_video_interval:
             self.env.start_recording()
@@ -360,15 +362,15 @@ class Runner:
         if len(frames) > 0:
             self.env.pause_recording()
             print("LOGGING VIDEO")
-            
+
             self.save_io(frames, it)
-            
+
             frames = np.stack(frames, axis=0)
             # Channels should be (time, channel, height, width) or (batch, time, channel, height width)
             frames = np.transpose(frames, (0, 3, 1, 2))
             # wandb.log({"video": wandb.Video(frames, fps=1 / self.env.dt, format='mp4')})
             # wandb.run.summary["latest_video"] = wandb.Video(frames, fps=1 / self.env.dt, format='mp4')
-            
+
 
         if self.env.num_eval_envs > 0:
             frames = self.env.get_complete_frames_eval()

@@ -299,6 +299,8 @@ class Runner:
             learn_time = stop - start
 
             global_switch.count += 1
+            if not global_switch.switch_open:
+                global_switch.stage1_count += 1
 
             if it == global_switch.pretrained_to_hybrid_start:
                 blue_bold_text = "\033[1;34m"  # bold blue
