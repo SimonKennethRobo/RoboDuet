@@ -226,7 +226,11 @@ class Runner:
                         dog_obs_dict["obs"], dog_obs_dict["privileged_obs"], dog_obs_dict["obs_history"]
                     )
 
-                    ret = self.env.step(actions_dog, actions_arm[..., : -self.env.num_plan_actions])
+                    if global_switch.switch_open and self.env.num_plan_actions > 0:
+                        actions_arm_step = actions_arm[..., : -self.env.num_plan_actions]
+                    else:
+                        actions_arm_step = actions_arm
+                    ret = self.env.step(actions_dog, actions_arm_step)
                     rewards_dog, rewards_arm, dones, infos = ret
 
                     if global_switch.switch_open:

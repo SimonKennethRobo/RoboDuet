@@ -85,6 +85,49 @@ class Rewards:
         diff = diff * (self.env.last_last_actions[:, self.env.num_actions_loco:] != 0)  # ignore second step
         return torch.sum(diff, dim=1)
 
+    def _reward_trajectory_tracking(self):
+        return torch.exp(-self.env.get_trajectory_error_sum())
+
+    def _reward_trajectory_current_tracking(self):
+        env_ids = torch.arange(self.env.num_envs, device=self.env.device)
+        target = self.env._pose_world_to_body_9d(
+            self.env.traj_pos_world[env_ids, self.env.traj_progress_idx],
+            self.env.traj_quat_world[env_ids, self.env.traj_progress_idx],
+            env_ids,
+        )
+        ee_pose = self.env.get_ee_pose_body_9d()
+        pos_error = torch.sum(torch.square(ee_pose[:, :3] - target[:, :3]), dim=-1)
+        rot_error = torch.sum(torch.square(ee_pose[:, 3:] - target[:, 3:]), dim=-1)
+        return torch.exp(
+            -(
+                self.env.cfg.arm.trajectory.pos_error_scale * pos_error
+                + self.env.cfg.arm.trajectory.rot_error_scale * rot_error
+            )
+        )
+
+    def _reward_trajectory_completion_time(self):
+        low, high = self.env.cfg.arm.trajectory.completion_time_range
+        early = (low - self.env.traj_elapsed_time).clip(min=0.0)
+        late = (self.env.traj_elapsed_time - high).clip(min=0.0)
+        time_error = early + late
+        time_reward = torch.exp(
+            -torch.square(time_error) / self.env.cfg.arm.trajectory.completion_time_sigma
+        )
+        return time_reward * self.env.traj_complete_buf.float()
+
+    def _reward_arm_delta_vel_cmd(self):
+        limits = torch.tensor(
+            self.env.cfg.arm.trajectory.delta_vel_limit,
+            dtype=torch.float,
+            device=self.env.device,
+        ).view(1, 3)
+        normalized = self.env.arm_delta_vel_cmd / limits
+        return torch.sum(torch.square(normalized), dim=-1)
+
+    def _reward_ee_smoothness(self):
+        twist = self.env.get_ee_twist_body()
+        return torch.sum(torch.square((twist - self.env.prev_ee_twist_body) / self.env.dt), dim=-1)
+
     # dog rewards
     def _reward_tracking_lin_vel(self):
         # Tracking of linear velocity commands (xy axes)

@@ -10,6 +10,7 @@ from isaacgym.torch_utils import *
 assert gymtorch
 import sys
 
+import numpy as np
 import torch
 
 from go1_gym import MINI_GYM_ROOT_DIR
@@ -125,6 +126,7 @@ class LeggedRobot(BaseTask):
                 self.gym.clear_lines(self.viewer)
                 self._draw_ee_ori_coord()
                 self._draw_command_ori_coord()
+                self._draw_policy_trajectory()
                 self._draw_base_ori_coord()
 
     def draw_coord_pos_quat(self, x, y, z, quat, scale=0.1):
@@ -157,6 +159,17 @@ class LeggedRobot(BaseTask):
         self.draw_sphere_and_axes((x.item(), y.item(), z.item()), self.base_quat[0], 0.2, (0, 1, 1), scale=1)
 
     def _draw_command_ori_coord(self):
+        if self.cfg.arm.trajectory.enabled:
+            target = self.traj_pos_world[0, self.traj_progress_idx[0]]
+            quat = self.traj_quat_world[0, self.traj_progress_idx[0]]
+            self.draw_sphere_and_axes(
+                (target[0].item(), target[1].item(), target[2].item()),
+                quat,
+                0.02,
+                (0, 1, 1),
+            )
+            return
+
         x, y, z = self.lpy_to_world_xyz()
         roll = self.visual_rpy[0, -3]
         pitch = self.visual_rpy[0, -2]
@@ -165,6 +178,28 @@ class LeggedRobot(BaseTask):
         quat_world = quat_mul(self.base_quat[0], quat_base)
         # quat_world = quat_mul(base_quats, self.obj_quats[0])
         self.draw_sphere_and_axes((x, y, z), quat_world, 0.02, (0, 1, 1))
+
+    def _draw_policy_trajectory(self, env_id=0):
+        if not self.cfg.arm.trajectory.enabled or self.headless or self.viewer is None:
+            return
+        points = self.traj_pos_world[env_id].detach().cpu().numpy()
+        if points.shape[0] < 2:
+            return
+        stride = max(1, points.shape[0] // 64)
+        points = points[::stride]
+        if points.shape[0] < 2:
+            return
+        vertices = np.empty((points.shape[0] - 1, 2, 3), dtype=np.float32)
+        vertices[:, 0, :] = points[:-1]
+        vertices[:, 1, :] = points[1:]
+        colors = np.tile(np.array([[0.0, 0.9, 1.0]], dtype=np.float32), (vertices.shape[0], 1))
+        self.gym.add_lines(
+            self.viewer,
+            self.envs[env_id],
+            vertices.shape[0],
+            vertices.reshape(-1, 3),
+            colors,
+        )
 
     def _compute_torques(self, actions):
         """Compute torques from actions.
@@ -345,6 +380,7 @@ class LeggedRobot(BaseTask):
         self.end_effector_state[:] = self.rigid_body_state.view(self.num_envs, self.num_bodies, 13)[:, self.ee_idx]
 
         self._post_physics_step_callback()
+        self._step_trajectory_tracking()
 
         # compute observations, rewards, resets, ...
         self.check_termination()
@@ -366,6 +402,8 @@ class LeggedRobot(BaseTask):
         self.last_joint_pos_target[:] = self.joint_pos_target[:]
         self.last_dof_vel[:] = self.dof_vel[:]
         self.last_root_vel[:] = self.root_states[:, 7:13]
+        if self.cfg.arm.trajectory.enabled:
+            self.prev_ee_twist_body[:] = self.get_ee_twist_body()
 
         if not self.headless and self.viewer and self.enable_viewer_sync and self.debug_viz:
             self._draw_debug_vis()
@@ -426,7 +464,8 @@ class LeggedRobot(BaseTask):
 
         # reset robot states
         self._resample_commands(env_ids)
-        self._resample_arm_commands(env_ids)
+        if not self.cfg.arm.trajectory.enabled:
+            self._resample_arm_commands(env_ids)
         self._randomize_dof_props(env_ids, self.cfg)
         if self.cfg.domain_rand.randomize_rigids_after_start:
             self._randomize_rigid_body_props(env_ids, self.cfg)
@@ -434,6 +473,13 @@ class LeggedRobot(BaseTask):
 
         self._reset_dofs(env_ids, self.cfg)
         self._reset_root_states(env_ids, self.cfg)
+        if self.cfg.arm.trajectory.enabled:
+            self.gym.refresh_actor_root_state_tensor(self.sim)
+            self.gym.refresh_rigid_body_state_tensor(self.sim)
+            self.base_pos[:] = self.root_states[: self.num_envs, 0:3]
+            self.base_quat[:] = self.root_states[: self.num_envs, 3:7]
+            self.end_effector_state[:] = self.rigid_body_state.view(self.num_envs, self.num_bodies, 13)[:, self.ee_idx]
+            self._resample_arm_commands(env_ids)
 
         # reset buffers
         self.last_actions[env_ids] = 0.0
@@ -442,6 +488,7 @@ class LeggedRobot(BaseTask):
         self.stage1_arm_target_vel[env_ids] = 0.0
         self.stage1_arm_target_accel[env_ids] = 0.0
         self.last_dof_vel[env_ids] = 0.0
+        self.prev_ee_twist_body[env_ids] = 0.0
         self.feet_air_time[env_ids] = 0.0
         self.episode_length_buf[env_ids] = 0
         self.reset_buf[env_ids] = 1
@@ -558,6 +605,24 @@ class LeggedRobot(BaseTask):
         if self.cfg.env.observe_contact_states:
             obs_buf = torch.cat(
                 (obs_buf, (self.contact_forces[:, self.feet_indices, 2] > 1.0).view(self.num_envs, -1) * 1.0), dim=1
+            )
+
+        if self.cfg.arm.trajectory.enabled:
+            contact_states = (self.contact_forces[:, self.feet_indices, 2] > 1.0).float()
+            remaining_time = torch.clamp(
+                self.traj_target_time - self.traj_elapsed_time, min=0.0
+            ).unsqueeze(-1)
+            obs_buf = torch.cat(
+                (
+                    obs_buf,
+                    self.base_pos[:, 2:3],
+                    contact_states,
+                    self.get_ee_pose_body_9d(),
+                    self.get_ee_twist_body(),
+                    self.get_trajectory_window_obs(),
+                    remaining_time,
+                ),
+                dim=-1,
             )
 
         self.obs_buf = obs_buf
@@ -767,6 +832,51 @@ class LeggedRobot(BaseTask):
         gamma = torch.atan2(yaw_vec[:, 1], yaw_vec[:, 0])  # gamma angle = arctan2(y, x)
 
         return torch.stack([alpha, beta, gamma], dim=-1)
+
+    def _quat_xyzw_to_rot6d(self, quat):
+        quat_wxyz = quat[:, [3, 0, 1, 2]]
+        return pt3d.matrix_to_rotation_6d(pt3d.quaternion_to_matrix(quat_wxyz))
+
+    def _pose_world_to_body_9d(self, pos_world, quat_world, env_ids=None):
+        if env_ids is None:
+            base_pos = self.base_pos
+            base_quat = self.base_quat
+        else:
+            base_pos = self.base_pos[env_ids]
+            base_quat = self.base_quat[env_ids]
+
+        pos_body = quat_rotate_inverse(base_quat, pos_world - base_pos)
+        quat_body = quat_mul(quat_conjugate(base_quat), quat_world)
+        return torch.cat((pos_body, self._quat_xyzw_to_rot6d(quat_body)), dim=-1)
+
+    def get_ee_pose_body_9d(self, env_ids=None):
+        if env_ids is None:
+            return self._pose_world_to_body_9d(self.end_effector_state[:, :3], self.end_effector_state[:, 3:7])
+        return self._pose_world_to_body_9d(
+            self.end_effector_state[env_ids, :3],
+            self.end_effector_state[env_ids, 3:7],
+            env_ids,
+        )
+
+    def get_ee_twist_body(self):
+        ee_lin_vel_world = self.end_effector_state[:, 7:10]
+        ee_ang_vel_world = self.end_effector_state[:, 10:13]
+        base_lin_vel_world = self.root_states[: self.num_envs, 7:10]
+        base_ang_vel_world = self.root_states[: self.num_envs, 10:13]
+        rel_lin_vel_body = quat_rotate_inverse(self.base_quat, ee_lin_vel_world - base_lin_vel_world)
+        rel_ang_vel_body = quat_rotate_inverse(self.base_quat, ee_ang_vel_world - base_ang_vel_world)
+        return torch.cat((rel_lin_vel_body, rel_ang_vel_body), dim=-1)
+
+    def _trajectory_points_body_9d(self, waypoint_ids):
+        env_ids = torch.arange(self.num_envs, device=self.device)
+        flat_env_ids = env_ids[:, None].expand(-1, waypoint_ids.shape[1]).reshape(-1)
+        flat_wp_ids = waypoint_ids.reshape(-1)
+        points = self._pose_world_to_body_9d(
+            self.traj_pos_world[flat_env_ids, flat_wp_ids],
+            self.traj_quat_world[flat_env_ids, flat_wp_ids],
+            flat_env_ids,
+        )
+        return points.view(self.num_envs, waypoint_ids.shape[1] * 9)
 
     def get_lpy_in_base_coord(self, env_ids):
         forward = quat_apply(self.base_quat[env_ids], self.forward_vec[env_ids])
@@ -1032,6 +1142,9 @@ class LeggedRobot(BaseTask):
             return
         if not global_switch.switch_open:
             return
+        if self.cfg.arm.trajectory.enabled:
+            self._resample_trajectory_commands(env_ids)
+            return
 
         # position
         self.commands_arm[env_ids, 0] = torch_rand_float(
@@ -1094,6 +1207,148 @@ class LeggedRobot(BaseTask):
 
         self._resample_Traj_commands(env_ids)
 
+    def _resample_user_commands(self, env_ids):
+        if self.cfg.arm.trajectory.user_cmd_mode == "random":
+            self.user_vel_cmd[env_ids, 0] = torch_rand_float(
+                self.cfg.arm.trajectory.user_lin_vel_x[0],
+                self.cfg.arm.trajectory.user_lin_vel_x[1],
+                (len(env_ids), 1),
+                device=self.device,
+            ).squeeze()
+            self.user_vel_cmd[env_ids, 1] = torch_rand_float(
+                self.cfg.arm.trajectory.user_lin_vel_y[0],
+                self.cfg.arm.trajectory.user_lin_vel_y[1],
+                (len(env_ids), 1),
+                device=self.device,
+            ).squeeze()
+            self.user_vel_cmd[env_ids, 2] = torch_rand_float(
+                self.cfg.arm.trajectory.user_ang_vel_yaw[0],
+                self.cfg.arm.trajectory.user_ang_vel_yaw[1],
+                (len(env_ids), 1),
+                device=self.device,
+            ).squeeze()
+        else:
+            self.user_vel_cmd[env_ids] = 0.0
+
+    def _resample_trajectory_commands(self, env_ids):
+        self._resample_user_commands(env_ids)
+        n_envs = len(env_ids)
+        num_wp = self.traj_num_waypoints
+        t = torch.linspace(0.0, 1.0, num_wp, device=self.device).view(1, num_wp, 1)
+
+        start_pos = self.end_effector_state[env_ids, :3]
+        start_quat = self.end_effector_state[env_ids, 3:7]
+        start_offset_body = torch_rand_float(
+            -self.cfg.arm.trajectory.start_radius,
+            self.cfg.arm.trajectory.start_radius,
+            (n_envs, 3),
+            device=self.device,
+        )
+        start_offset_world = quat_rotate(self.base_quat[env_ids], start_offset_body)
+        start_pos = start_pos + start_offset_world
+
+        theta = torch_rand_float(-torch.pi, torch.pi, (n_envs, 1), device=self.device)
+        direction_body = torch.cat((torch.cos(theta), torch.sin(theta), torch.zeros_like(theta)), dim=-1)
+        lateral_body = torch.cat((-torch.sin(theta), torch.cos(theta), torch.zeros_like(theta)), dim=-1)
+        direction_world = quat_rotate(self.base_quat[env_ids], direction_body)
+        lateral_world = quat_rotate(self.base_quat[env_ids], lateral_body)
+
+        line = self.cfg.arm.trajectory.length * t * direction_world[:, None, :]
+        s_shape = (
+            self.cfg.arm.trajectory.s_curve_amplitude
+            * torch.sin(2.0 * torch.pi * self.cfg.arm.trajectory.s_curve_frequency * t)
+            * lateral_world[:, None, :]
+        )
+        circle_phase = 2.0 * torch.pi * self.cfg.arm.trajectory.circle_turns * t
+        circle = self.cfg.arm.trajectory.circle_radius * (
+            torch.sin(circle_phase) * direction_world[:, None, :]
+            + (1.0 - torch.cos(circle_phase)) * lateral_world[:, None, :]
+        )
+        traj_type = torch.randint(0, 3, (n_envs, 1, 1), device=self.device)
+        line_mask = (traj_type == 0).float()
+        s_mask = (traj_type == 1).float()
+        circle_mask = (traj_type == 2).float()
+        traj_offset = line_mask * line + s_mask * (line + s_shape) + circle_mask * circle
+        self.traj_pos_world[env_ids] = start_pos[:, None, :] + traj_offset
+        self.traj_quat_world[env_ids] = start_quat[:, None, :].expand(-1, num_wp, -1)
+
+        time_range = (
+            self.cfg.arm.trajectory.completion_time_range[1]
+            - self.cfg.arm.trajectory.completion_time_range[0]
+        )
+        self.traj_target_time[env_ids] = (
+            self.cfg.arm.trajectory.completion_time_range[0]
+            + torch.rand(n_envs, device=self.device) * time_range
+        )
+        self.T_trajs[env_ids] = self.traj_target_time[env_ids]
+        self.arm_time_buf[env_ids] = 0
+        self.traj_elapsed_time[env_ids] = 0.0
+        self.traj_progress_idx[env_ids] = 0
+        self.traj_complete_buf[env_ids] = False
+        self.traj_final_pos_error[env_ids] = 0.0
+        self.traj_final_rot_error[env_ids] = 0.0
+        self.traj_ee_pose_body_history[env_ids] = 0.0
+        self.traj_target_body_history[env_ids] = 0.0
+        self.traj_visited_mask[env_ids] = False
+        self.arm_delta_vel_cmd[env_ids] = 0.0
+        self.commands_dog[env_ids, :3] = self.user_vel_cmd[env_ids]
+
+    def _step_trajectory_tracking(self):
+        if not self.cfg.arm.trajectory.enabled:
+            return
+
+        self.traj_elapsed_time[:] = self.arm_time_buf.float() * self.dt
+        progress = self.traj_elapsed_time / torch.clamp(self.traj_target_time, min=self.dt)
+        self.traj_progress_idx[:] = torch.clamp(
+            (progress * (self.traj_num_waypoints - 1)).long(),
+            min=0,
+            max=self.traj_num_waypoints - 1,
+        )
+
+        env_ids = torch.arange(self.num_envs, device=self.device)
+        ee_pose = self.get_ee_pose_body_9d()
+        target_pose = self._pose_world_to_body_9d(
+            self.traj_pos_world[env_ids, self.traj_progress_idx],
+            self.traj_quat_world[env_ids, self.traj_progress_idx],
+            env_ids,
+        )
+        self.traj_ee_pose_body_history[env_ids, self.traj_progress_idx] = ee_pose
+        self.traj_target_body_history[env_ids, self.traj_progress_idx] = target_pose
+        self.traj_visited_mask[env_ids, self.traj_progress_idx] = True
+
+        target_final = self._pose_world_to_body_9d(self.traj_pos_world[:, -1], self.traj_quat_world[:, -1])
+        self.traj_final_pos_error[:] = torch.norm(ee_pose[:, :3] - target_final[:, :3], dim=-1)
+        self.traj_final_rot_error[:] = torch.norm(ee_pose[:, 3:] - target_final[:, 3:], dim=-1)
+        final_time_reached = self.traj_progress_idx >= self.traj_num_waypoints - 1
+        self.traj_complete_buf[:] = (
+            final_time_reached
+            & (self.traj_final_pos_error < self.cfg.arm.trajectory.completion_pos_threshold)
+            & (self.traj_final_rot_error < self.cfg.arm.trajectory.completion_rot_threshold)
+        )
+
+    def get_trajectory_window_obs(self):
+        waypoint_ids = torch.clamp(
+            self.traj_progress_idx[:, None] + self.traj_window_offsets[None, :],
+            min=0,
+            max=self.traj_num_waypoints - 1,
+        )
+        return self._trajectory_points_body_9d(waypoint_ids)
+
+    def get_trajectory_error_sum(self):
+        pos_error = torch.sum(
+            torch.square(self.traj_ee_pose_body_history[..., :3] - self.traj_target_body_history[..., :3]), dim=-1
+        )
+        rot_error = torch.sum(
+            torch.square(self.traj_ee_pose_body_history[..., 3:] - self.traj_target_body_history[..., 3:]), dim=-1
+        )
+        error = (
+            self.cfg.arm.trajectory.pos_error_scale * pos_error
+            + self.cfg.arm.trajectory.rot_error_scale * rot_error
+        )
+        error = error * self.traj_visited_mask.float()
+        denom = torch.clamp(self.traj_visited_mask.float().sum(dim=-1), min=1.0)
+        return torch.sum(error, dim=-1) / denom
+
     def _resample_Traj_commands(self, env_ids):
         time_range = (self.cfg.arm.commands.T_traj[1] - self.cfg.arm.commands.T_traj[0]) / self.dt
         time_interval = torch.from_numpy(np.random.choice(int(time_range + 1), len(env_ids))).to(self.device)
@@ -1106,6 +1361,9 @@ class LeggedRobot(BaseTask):
     def _resample_commands(self, env_ids):
         if len(env_ids) == 0:
             return
+        if self.cfg.arm.trajectory.enabled and global_switch.switch_open:
+            self._resample_user_commands(env_ids)
+            self.commands_dog[env_ids, :3] = self.user_vel_cmd[env_ids] + self.arm_delta_vel_cmd[env_ids]
 
         timesteps = int(self.cfg.commands.resampling_time / self.dt)
         ep_len = min(self.cfg.env.max_episode_length, timesteps)
@@ -1141,7 +1399,7 @@ class LeggedRobot(BaseTask):
         self.env_command_bins[env_ids.cpu().numpy()] = new_bin_inds
         self.env_command_categories[env_ids.cpu().numpy()] = 0
 
-        if not self.cfg.hybrid.plan_vel:
+        if not self.cfg.hybrid.plan_vel and not self.cfg.arm.trajectory.enabled:
             self.commands_dog[env_ids, 0] = torch.Tensor(new_commands[:, 0]).to(self.device)
             self.commands_dog[env_ids, 1] = torch.Tensor(new_commands[:, 1]).to(self.device)
             self.commands_dog[env_ids, 2] = torch.Tensor(new_commands[:, 2]).to(self.device)
@@ -1354,8 +1612,10 @@ class LeggedRobot(BaseTask):
         # teleport robots to prevent falling off the edge
         # self._teleport_robots(torch.arange(self.num_envs, device=self.device), self.cfg)
 
-        traj_ids = (self.arm_time_buf % (self.T_trajs / self.dt).long() == 0).nonzero(as_tuple=False).flatten()
-        self._resample_arm_commands(traj_ids)
+        if global_switch.switch_open:
+            traj_period = torch.clamp((self.T_trajs / self.dt).long(), min=1)
+            traj_ids = (self.arm_time_buf % traj_period == 0).nonzero(as_tuple=False).flatten()
+            self._resample_arm_commands(traj_ids)
 
         if self.cfg.domain_rand.randomize_end_effector_force:
             traj_ids = (self.force_time_buf % (self.T_force / self.dt).long() == 0).nonzero(as_tuple=False).flatten()
@@ -1802,6 +2062,33 @@ class LeggedRobot(BaseTask):
         self.plan_actions = torch.zeros(
             self.num_envs, self.num_plan_actions, dtype=torch.float, device=self.device, requires_grad=False
         )
+        self.traj_window_offsets = torch.tensor(
+            self.cfg.arm.trajectory.window_offsets, dtype=torch.long, device=self.device, requires_grad=False
+        )
+        self.traj_num_waypoints = int(self.cfg.arm.trajectory.num_waypoints)
+        self.traj_pos_world = torch.zeros(
+            self.num_envs, self.traj_num_waypoints, 3, dtype=torch.float, device=self.device, requires_grad=False
+        )
+        self.traj_quat_world = torch.zeros(
+            self.num_envs, self.traj_num_waypoints, 4, dtype=torch.float, device=self.device, requires_grad=False
+        )
+        self.traj_quat_world[..., 3] = 1.0
+        self.traj_progress_idx = torch.zeros(self.num_envs, dtype=torch.long, device=self.device, requires_grad=False)
+        self.traj_target_time = torch.ones(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
+        self.traj_elapsed_time = torch.zeros(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
+        self.traj_complete_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device, requires_grad=False)
+        self.traj_final_pos_error = torch.zeros(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
+        self.traj_final_rot_error = torch.zeros(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
+        self.traj_ee_pose_body_history = torch.zeros(
+            self.num_envs, self.traj_num_waypoints, 9, dtype=torch.float, device=self.device, requires_grad=False
+        )
+        self.traj_target_body_history = torch.zeros_like(self.traj_ee_pose_body_history)
+        self.traj_visited_mask = torch.zeros(
+            self.num_envs, self.traj_num_waypoints, dtype=torch.bool, device=self.device, requires_grad=False
+        )
+        self.user_vel_cmd = torch.zeros(self.num_envs, 3, dtype=torch.float, device=self.device, requires_grad=False)
+        self.arm_delta_vel_cmd = torch.zeros(self.num_envs, 3, dtype=torch.float, device=self.device, requires_grad=False)
+        self.prev_ee_twist_body = torch.zeros(self.num_envs, 6, dtype=torch.float, device=self.device, requires_grad=False)
 
     def _init_custom_buffers__(self):
         # domain randomization properties
@@ -2150,6 +2437,99 @@ class LeggedRobot(BaseTask):
         w, h = img.shape
         return img.reshape([w, h // 4, 4])
 
+    def _policy_command_overlay_lines(self, env_id=0):
+        def vals(tensor, count):
+            return [float(tensor[env_id, i].detach().cpu()) for i in range(min(count, tensor.shape[1]))]
+
+        lines = []
+        dog = vals(self.commands_dog, min(10, self.commands_dog.shape[1]))
+        lines.append(f"loco cmd final: vx={dog[0]:+.2f} vy={dog[1]:+.2f} yaw={dog[2]:+.2f}")
+
+        if self.cfg.arm.trajectory.enabled:
+            user = vals(self.user_vel_cmd, 3)
+            extra = vals(self.arm_delta_vel_cmd, 3)
+            lines.append(f"user cmd:       vx={user[0]:+.2f} vy={user[1]:+.2f} yaw={user[2]:+.2f}")
+            lines.append(f"arm->loco:      dvx={extra[0]:+.2f} dvy={extra[1]:+.2f} dyaw={extra[2]:+.2f}")
+            lines.append(
+                f"traj: step={int(self.traj_progress_idx[env_id])}/{self.traj_num_waypoints - 1} "
+                f"t={float(self.traj_elapsed_time[env_id]):.2f}/{float(self.traj_target_time[env_id]):.2f}s"
+            )
+            lines.append(
+                f"traj final err: pos={float(self.traj_final_pos_error[env_id]):.3f} "
+                f"rot6d={float(self.traj_final_rot_error[env_id]):.3f}"
+            )
+        else:
+            arm_cmd = vals(self.commands_arm_obs, min(6, self.commands_arm_obs.shape[1]))
+            lines.append(
+                "arm cmd target: "
+                + " ".join(f"{name}={value:+.2f}" for name, value in zip(["l", "p", "y", "r", "p", "y"], arm_cmd))
+            )
+
+        if self.cfg.commands.use_dynamic_gait and self.commands_dog.shape[1] >= 10:
+            lines.append(
+                f"gait/body extra: pitch={dog[3]:+.2f} roll={dog[4]:+.2f} "
+                f"freq={dog[5]:.2f} swing={dog[6]:.2f} width={dog[7]:.2f} "
+                f"len={dog[8]:.2f} dur={dog[9]:.2f}"
+            )
+        elif self.commands_dog.shape[1] >= 5:
+            lines.append(f"body extra: pitch={dog[3]:+.2f} roll={dog[4]:+.2f}")
+
+        arm_action = vals(self.actions[:, self.num_actions_loco : self.num_actions_loco + self.num_actions_arm], self.num_actions_arm)
+        lines.append("arm action: " + " ".join(f"a{i}={value:+.2f}" for i, value in enumerate(arm_action)))
+        lines.append(f"base: z={float(self.root_states[env_id, 2]):.2f} pitch={float(self.pitch[env_id]):+.2f} roll={float(self.roll[env_id]):+.2f}")
+        return lines
+
+    def _overlay_policy_text(self, frame, env_id=0):
+        lines = self._policy_command_overlay_lines(env_id)
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.42
+        line_height = 18
+        x, y0 = 10, 18
+        box_height = line_height * len(lines) + 12
+        cv2.rectangle(frame, (4, 4), (635, box_height), (0, 0, 0, 180), -1)
+        for i, text in enumerate(lines):
+            y = y0 + i * line_height
+            cv2.putText(frame, text, (x, y), font, font_scale, (0, 0, 0, 255), 2, cv2.LINE_AA)
+            cv2.putText(frame, text, (x, y), font, font_scale, (255, 255, 255, 255), 1, cv2.LINE_AA)
+
+    def _project_world_points_to_camera(self, points_world, env_handle, camera_handle):
+        view = np.asarray(self.gym.get_camera_view_matrix(self.sim, env_handle, camera_handle), dtype=np.float32).reshape(4, 4)
+        proj = np.asarray(self.gym.get_camera_proj_matrix(self.sim, env_handle, camera_handle), dtype=np.float32).reshape(4, 4)
+        points_h = np.concatenate((points_world, np.ones((points_world.shape[0], 1), dtype=np.float32)), axis=1)
+        clip = points_h @ view @ proj
+        w = clip[:, 3:4]
+        valid = np.abs(w[:, 0]) > 1e-5
+        ndc = np.zeros((points_world.shape[0], 3), dtype=np.float32)
+        ndc[valid] = clip[valid, :3] / w[valid]
+        width, height = self.camera_props.width, self.camera_props.height
+        pixels = np.empty((points_world.shape[0], 2), dtype=np.int32)
+        pixels[:, 0] = ((ndc[:, 0] + 1.0) * 0.5 * width).astype(np.int32)
+        pixels[:, 1] = ((1.0 - ndc[:, 1]) * 0.5 * height).astype(np.int32)
+        valid &= np.isfinite(ndc).all(axis=1)
+        valid &= (pixels[:, 0] >= -width) & (pixels[:, 0] <= 2 * width)
+        valid &= (pixels[:, 1] >= -height) & (pixels[:, 1] <= 2 * height)
+        return pixels, valid
+
+    def _overlay_policy_trajectory(self, frame, env_id, env_handle, camera_handle):
+        if not self.cfg.arm.trajectory.enabled:
+            return
+        points = self.traj_pos_world[env_id].detach().cpu().numpy().astype(np.float32)
+        stride = max(1, points.shape[0] // 96)
+        points = points[::stride]
+        if points.shape[0] < 2:
+            return
+        try:
+            pixels, valid = self._project_world_points_to_camera(points, env_handle, camera_handle)
+        except Exception:
+            return
+        for i in range(points.shape[0] - 1):
+            if valid[i] and valid[i + 1]:
+                cv2.line(frame, tuple(pixels[i]), tuple(pixels[i + 1]), (255, 220, 0, 255), 2, cv2.LINE_AA)
+        target = self.traj_pos_world[env_id, self.traj_progress_idx[env_id]].detach().cpu().numpy()[None, :].astype(np.float32)
+        pixels, valid = self._project_world_points_to_camera(target, env_handle, camera_handle)
+        if valid[0]:
+            cv2.circle(frame, tuple(pixels[0]), 5, (0, 255, 255, 255), -1, cv2.LINE_AA)
+
     def _render_headless(self):
         if self.record_now and self.complete_video_frames is not None and len(self.complete_video_frames) == 0:
             bx, by, bz = self.root_states[0, 0], self.root_states[0, 1], self.root_states[0, 2]
@@ -2160,42 +2540,8 @@ class LeggedRobot(BaseTask):
                 self.sim, self.envs[0], self.rendering_camera, gymapi.IMAGE_COLOR
             )
             self.video_frame = self.video_frame.reshape((self.camera_props.height, self.camera_props.width, 4))
-
-            # visualize key infos
-            font = cv2.FONT_HERSHEY_SIMPLEX
-            font_scale = 0.35
-            pos = 10
-
-            def put_text_func(text, pos):
-                cv2.putText(self.video_frame, text, (10, pos), font, font_scale, (0, 0, 0), 1, cv2.LINE_AA)
-                pos += 15
-                return pos
-
-            # put_text_func = lambda text, pos: cv2.putText(self.video_frame, text, (10, pos), font, font_scale, (0, 0, 0), 1, cv2.LINE_AA)
-
-            pos = put_text_func(f"x_vel={self.commands_dog[0, 0]:.3f}", pos)
-            pos = put_text_func(f"y_vel={self.commands_dog[0, 1]:.3f}", pos)
-            pos = put_text_func(f"yaw_vel={self.commands_dog[0, 2]:.3f}", pos)
-            pos = put_text_func(
-                f"[contrl] pitch={self.commands_dog[0, 3]:.3f}, roll={self.commands_dog[0, 4]:.3f}", pos
-            )
-
-            for i, command in enumerate(["l", "p", "y"]):
-                pos = put_text_func(f"{command}={self.commands_arm[0, i]:.3f}", pos)
-
-            pos = put_text_func(
-                f"leg kp={self.cfg.dog.control.stiffness_leg['joint']:.1f}\
-                kd={self.cfg.dog.control.damping_leg['joint']:.1f}",
-                pos,
-            )
-            pos = put_text_func(
-                f"arm kp={self.cfg.arm.control.stiffness_arm['zarx']:.1f}\
-                kd={self.cfg.arm.control.damping_arm['zarx']:.1f}",
-                pos,
-            )
-            pos = put_text_func(f"base height={self.root_states[0, 2]:.3f}", pos)
-            pos = put_text_func(f"delta z={self.delta_z[0]:.3f}", pos)
-            pos = put_text_func(f"'[body] pitch={self.pitch[0]:.3f}, roll={self.roll[0]:.3f}", pos)
+            self._overlay_policy_trajectory(self.video_frame, 0, self.envs[0], self.rendering_camera)
+            self._overlay_policy_text(self.video_frame, 0)
 
             self.video_frames.append(self.video_frame)
 
@@ -2222,6 +2568,13 @@ class LeggedRobot(BaseTask):
                 self.video_frame_eval = self.video_frame_eval.reshape(
                     (self.camera_props.height, self.camera_props.width, 4)
                 )
+                self._overlay_policy_trajectory(
+                    self.video_frame_eval,
+                    self.num_train_envs,
+                    self.envs[self.num_train_envs],
+                    self.rendering_camera_eval,
+                )
+                self._overlay_policy_text(self.video_frame_eval, self.num_train_envs)
                 self.video_frames_eval.append(self.video_frame_eval)
 
     def start_recording(self):

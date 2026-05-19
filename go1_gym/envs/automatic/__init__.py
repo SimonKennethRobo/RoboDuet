@@ -48,6 +48,64 @@ class VelocityTrackingEasyEnv(LeggedRobot):
         )
 
     def plan(self, obs):
+        if self.cfg.arm.trajectory.enabled:
+            limits = torch.tensor(
+                self.cfg.arm.trajectory.delta_vel_limit,
+                dtype=torch.float,
+                device=self.device,
+            ).view(1, 3)
+            delta_vel = torch.clip(obs[..., :3], -1.0, 1.0) * limits
+            self.arm_delta_vel_cmd[:] = delta_vel
+            self.commands_dog[:, :3] = self.user_vel_cmd + delta_vel
+            self.plan_actions[:, :3] = delta_vel
+
+            if self.cfg.commands.use_dynamic_gait and obs.shape[-1] >= 10:
+                gait_obs = obs[..., 3:10]
+
+                def _map(x, lo, hi):
+                    half = (hi - lo) / 2.0
+                    center = (lo + hi) / 2.0
+                    return torch.clip(center + half * x, lo, hi)
+
+                rescaled_gait_obs = gait_obs * 0.4
+                self.commands_dog[:, 3] = torch.clip(
+                    rescaled_gait_obs[..., 0],
+                    self.cfg.commands.limit_body_pitch[0],
+                    self.cfg.commands.limit_body_pitch[1] / 4 * 3.0,
+                )
+                self.commands_dog[:, 4] = torch.clip(
+                    rescaled_gait_obs[..., 1],
+                    self.cfg.commands.limit_body_roll[0],
+                    self.cfg.commands.limit_body_roll[1],
+                )
+                self.commands_dog[:, 5] = _map(
+                    gait_obs[..., 2],
+                    self.cfg.commands.limit_gait_frequency[0],
+                    self.cfg.commands.limit_gait_frequency[1],
+                )
+                self.commands_dog[:, 6] = _map(
+                    gait_obs[..., 3],
+                    self.cfg.commands.limit_footswing_height[0],
+                    self.cfg.commands.limit_footswing_height[1],
+                )
+                self.commands_dog[:, 7] = _map(
+                    gait_obs[..., 4],
+                    self.cfg.commands.limit_stance_width[0],
+                    self.cfg.commands.limit_stance_width[1],
+                )
+                self.commands_dog[:, 8] = _map(
+                    gait_obs[..., 5],
+                    self.cfg.commands.limit_stance_length[0],
+                    self.cfg.commands.limit_stance_length[1],
+                )
+                self.commands_dog[:, 9] = _map(
+                    gait_obs[..., 6],
+                    self.cfg.commands.limit_gait_duration[0],
+                    self.cfg.commands.limit_gait_duration[1],
+                )
+                self.plan_actions[:, 3:10] = torch.cat((rescaled_gait_obs[..., :2], gait_obs[..., 2:]), dim=-1)
+            return
+
         rescaled_obs = obs * 0.4
         n_plan = rescaled_obs.shape[-1]
         self.commands_dog[:, 3] = torch.clip(
@@ -117,6 +175,41 @@ class VelocityTrackingEasyEnv(LeggedRobot):
             ),
             dim=-1,
         )
+
+        if self.cfg.arm.trajectory.enabled:
+            contact_states = (self.contact_forces[:, self.feet_indices, 2] > 1.0).float()
+            remaining_time = torch.clamp(
+                self.traj_target_time - self.traj_elapsed_time, min=0.0
+            ).unsqueeze(-1)
+            obs_buf = torch.cat(
+                (
+                    obs_buf,
+                    self.base_pos[:, 2:3],
+                    contact_states,
+                    self.base_ang_vel * self.obs_scales.ang_vel,
+                    self.commands_dog[:, :3],
+                    (self.commands_dog * self.commands_scale_dog)[:, 5:10]
+                    if self.cfg.commands.use_dynamic_gait
+                    else torch.empty(self.num_envs, 0, device=self.device),
+                    self.get_ee_pose_body_9d(),
+                    self.get_ee_twist_body(),
+                    self.get_trajectory_window_obs(),
+                    remaining_time,
+                ),
+                dim=-1,
+            )
+            assert obs_buf.shape[1] == self.cfg.arm.arm_num_observations, (
+                f"arm num_observations ({self.cfg.arm.arm_num_observations}) != the number of observations ({obs_buf.shape[1]})"
+            )
+            clip_obs = self.cfg.normalization.clip_observations
+            obs_buf = torch.clip(obs_buf, -clip_obs, clip_obs)
+            privileged_obs_buf = torch.zeros(
+                self.num_envs,
+                self.cfg.arm.arm_num_privileged_obs,
+                dtype=torch.float,
+                device=self.device,
+            )
+            return obs_buf, privileged_obs_buf
 
         if self.cfg.hybrid.use_vision:
             env_ids = (
@@ -356,6 +449,9 @@ class VelocityTrackingEasyEnv(LeggedRobot):
             obs_buf = torch.cat(
                 (obs_buf, (self.contact_forces[:, self.feet_indices, 2] > 1.0).view(self.num_envs, -1) * 1.0), dim=1
             )
+
+        if self.cfg.arm.trajectory.enabled:
+            obs_buf = torch.cat((obs_buf, self.get_ee_pose_body_9d()), dim=-1)
 
         # add noise if needed
         # if self.add_noise:
@@ -726,6 +822,7 @@ class KeyboardWrapper(VelocityTrackingEasyEnv):
             self.gym.clear_lines(self.viewer)
             self._draw_ee_ori_coord()
             self._draw_command_ori_coord()
+            self._draw_policy_trajectory()
             self._draw_base_ori_coord()
 
         self.update_arm_commands()
@@ -952,6 +1049,7 @@ class JoyWrapper(VelocityTrackingEasyEnv):
             self.gym.clear_lines(self.viewer)
             self._draw_ee_ori_coord()
             self._draw_command_ori_coord()
+            self._draw_policy_trajectory()
             self._draw_base_ori_coord()
 
         self.update_arm_commands()

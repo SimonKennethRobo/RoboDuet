@@ -150,6 +150,25 @@ def train_go1(arg):
         Cfg.dog.dog_num_observations += 3
         Cfg.dog.dog_num_obs_history = Cfg.dog.dog_num_observations * Cfg.dog.dog_num_observation_history
 
+    if args.trajectory_tracking:
+        Cfg.arm.trajectory.enabled = True
+        traj_window_dims = len(Cfg.arm.trajectory.window_offsets) * 9
+        Cfg.arm.num_actions_arm_cd = Cfg.arm.num_actions_arm + 3
+        Cfg.arm.arm_num_observations = 12 + 1 + 4 + 3 + 3 + 9 + 6 + traj_window_dims + 1
+        Cfg.arm.arm_num_obs_history = Cfg.arm.arm_num_observations * Cfg.arm.arm_num_observation_history
+        Cfg.dog.dog_num_observations += 9
+        Cfg.dog.dog_num_obs_history = Cfg.dog.dog_num_observations * Cfg.dog.dog_num_observation_history
+        Cfg.env.num_observations += 1 + 4 + 9 + 6 + traj_window_dims + 1
+        Cfg.env.num_obs_history = Cfg.env.num_observation_history * Cfg.env.num_observations
+        Cfg.hybrid.reward_scales.arm_manip_commands_tracking_combine = 0.0
+        Cfg.hybrid.reward_scales.vis_manip_commands_tracking_lpy = 0.0
+        Cfg.hybrid.reward_scales.vis_manip_commands_tracking_rpy = 0.0
+        Cfg.hybrid.reward_scales.trajectory_tracking = 1.0
+        Cfg.hybrid.reward_scales.trajectory_current_tracking = 1.0
+        Cfg.hybrid.reward_scales.trajectory_completion_time = 0.5
+        Cfg.hybrid.reward_scales.arm_delta_vel_cmd = -0.05
+        Cfg.hybrid.reward_scales.ee_smoothness = -1e-4
+
     if args.dyna_gait:
         Cfg.commands.use_dynamic_gait = True
 
@@ -172,8 +191,8 @@ def train_go1(arg):
         Cfg.dog.dog_num_observations += num_new_gait_dims
         Cfg.dog.dog_num_obs_history = Cfg.dog.dog_num_observations * Cfg.dog.dog_num_observation_history
 
-        # Arm plan actions: +5 gait suggestions
-        Cfg.arm.num_actions_arm_cd = Cfg.arm.num_actions_arm + 7  # 6 + 7 = 13
+        plan_action_dims = 7 + (3 if Cfg.arm.trajectory.enabled else 0)
+        Cfg.arm.num_actions_arm_cd = Cfg.arm.num_actions_arm + plan_action_dims
 
         # Arm observation includes current gait params as feedback
         Cfg.arm.arm_num_observations += num_new_gait_dims
@@ -210,7 +229,7 @@ def train_go1(arg):
         group=args.run_name,
         mode=mode,
         notes=args.notes,
-        name=f"{now.strftime('%Y-%m-%d')}/{now.strftime('%H%M%S')}_{args.run_name}",
+        name=f"{now.strftime('%Y-%m-%d')}/{args.run_name}_{now.strftime('%H%M%S')}",
         tags=args.tags,
         dir=f"{MINI_GYM_ROOT_DIR}",
     )
@@ -328,6 +347,7 @@ if __name__ == "__main__":
     parser.add_argument("--stage1_arm_max_offset", type=float, default=0.35)
     parser.add_argument("--stage1_arm_accel_resample_time_s", type=float, default=0.5)
     parser.add_argument("--dyna_gait_min_frequency", type=float, default=0.0)
+    parser.add_argument("--trajectory_tracking", action="store_true", default=False)
 
     args = parser.parse_args()
 

@@ -138,6 +138,26 @@ def train_go1(headless=True):
         # Cfg.dog.dog_num_observations += 3
         # Cfg.dog.dog_num_obs_history = Cfg.dog.dog_num_observations * Cfg.dog.dog_num_observation_history
 
+    if args.trajectory_tracking:
+        Cfg.arm.trajectory.enabled = True
+        traj_window_dims = len(Cfg.arm.trajectory.window_offsets) * 9
+        Cfg.arm.num_actions_arm_cd = Cfg.arm.num_actions_arm + 3
+        Unified2AC_Args.num_actions_arm = Cfg.arm.num_actions_arm_cd
+        Cfg.arm.arm_num_observations = 12 + 1 + 4 + 3 + 3 + 9 + 6 + traj_window_dims + 1
+        Cfg.arm.arm_num_obs_history = Cfg.arm.arm_num_observations * Cfg.arm.arm_num_observation_history
+        Cfg.dog.dog_num_observations += 9
+        Cfg.dog.dog_num_obs_history = Cfg.dog.dog_num_observations * Cfg.dog.dog_num_observation_history
+        Cfg.env.num_observations += 1 + 4 + 9 + 6 + traj_window_dims + 1
+        Cfg.env.num_obs_history = Cfg.env.num_observation_history * Cfg.env.num_observations
+        Cfg.hybrid.reward_scales.arm_manip_commands_tracking_combine = 0.0
+        Cfg.hybrid.reward_scales.vis_manip_commands_tracking_lpy = 0.0
+        Cfg.hybrid.reward_scales.vis_manip_commands_tracking_rpy = 0.0
+        Cfg.hybrid.reward_scales.trajectory_tracking = 1.0
+        Cfg.hybrid.reward_scales.trajectory_current_tracking = 1.0
+        Cfg.hybrid.reward_scales.trajectory_completion_time = 0.5
+        Cfg.hybrid.reward_scales.arm_delta_vel_cmd = -0.05
+        Cfg.hybrid.reward_scales.ee_smoothness = -1e-4
+
     if args.dyna_gait:
         Cfg.commands.use_dynamic_gait = True
 
@@ -151,7 +171,8 @@ def train_go1(headless=True):
 
         Cfg.dog.dog_num_commands += num_new_gait_dims
 
-        Cfg.arm.num_actions_arm_cd = Cfg.arm.num_actions_arm + 7
+        plan_action_dims = 7 + (3 if Cfg.arm.trajectory.enabled else 0)
+        Cfg.arm.num_actions_arm_cd = Cfg.arm.num_actions_arm + plan_action_dims
         Unified2AC_Args.num_actions_arm = Cfg.arm.num_actions_arm_cd
 
         Cfg.env.num_observations += num_new_gait_dims + 2
@@ -256,6 +277,7 @@ if __name__ == '__main__':
     parser.add_argument('--wo_two_stage', action='store_true', default=False)
     parser.add_argument('--use_rot6d', action='store_true', default=False)
     parser.add_argument('--dyna_gait', action='store_true', default=False)
+    parser.add_argument('--trajectory_tracking', action='store_true', default=False)
 
     args = parser.parse_args()
 
