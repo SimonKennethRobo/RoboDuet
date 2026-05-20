@@ -4,10 +4,9 @@ assert isaacgym
 import torch
 import argparse
 
-from go1_gym.envs.automatic.legged_robot_config import Cfg
-from go1_gym.envs.go1.go1_config import config_go1
-from go1_gym.envs.go1.wtw_config import config_wtw
-from go1_gym.envs.go1.asset_config import config_asset
+from go1_gym.envs.roboduet.legged_robot_config import Cfg
+from go1_gym.envs.roboduet.stage_schedule import StageSchedule, apply_hybrid_reward_settings
+from go1_gym.envs.roboduet.wbc_env_config import configure_task_from_args
 
 import wandb
 import os
@@ -18,7 +17,7 @@ from go1_gym import MINI_GYM_ROOT_DIR
 import shutil
 import pickle
 
-from go1_gym.envs.automatic import HistoryWrapper, VelocityTrackingEasyEnv
+from go1_gym.envs.roboduet import HistoryWrapper, WBCEnv
 
 from go1_gym_learn.ppo_cse_unified import Runner
 from go1_gym_learn.ppo_cse_unified.ppo import UnifiedPPO_Args
@@ -29,33 +28,17 @@ from go1_gym.utils import format_code, set_seed, global_switch
 os.environ["WANDB_SILENT"] = "true"
 
 def configure_train_stage(args):
-    global_switch.count = 0
-    global_switch.stage1_count = 0
-    global_switch.switch_flag = False
-
-    if args.train_stage == "stage1":
-        global_switch.pretrained_to_hybrid_start = args.num_learning_iterations + 1
-        global_switch.pretrained_to_hybrid_end = global_switch.pretrained_to_hybrid_start + 1
-    elif args.train_stage == "stage2":
-        global_switch.pretrained_to_hybrid_start = -1
-        global_switch.pretrained_to_hybrid_end = 0
-        global_switch.count = global_switch.pretrained_to_hybrid_end
-        global_switch.open_switch()
-    else:
-        global_switch.pretrained_to_hybrid_start = 10000
-        global_switch.pretrained_to_hybrid_end = global_switch.pretrained_to_hybrid_start + 0
-        if args.debug and global_switch.pretrained_to_hybrid_start > 0:
-            global_switch.pretrained_to_hybrid_start = 2
-            global_switch.pretrained_to_hybrid_end = global_switch.pretrained_to_hybrid_start + 2
+    schedule = StageSchedule(
+        args.train_stage,
+        args.num_learning_iterations,
+        default_switch_iteration=10000,
+        debug=args.debug,
+    )
+    schedule.configure(global_switch)
 
     if args.debug:
         UnifiedRunnerArgs.save_interval = 2
         UnifiedRunnerArgs.save_video_interval = 10
-
-
-def apply_hybrid_reward_settings(cfg):
-    for key, value in vars(cfg.hybrid.rewards).items():
-        setattr(cfg.rewards, key, value)
 
 
 def unified_reward_scales_wrapper(self):
@@ -84,135 +67,15 @@ def train_go1(headless=True):
     args.seed = set_seed(args.seed)
     args.tags.append(f"seed{args.seed}")
 
-    config_go1(Cfg)
-    config_wtw(Cfg)
-    config_asset(Cfg)
-
-    Cfg.commands.distributional_commands = False
-    Cfg.domain_rand.lag_timesteps = 6
-    Cfg.domain_rand.randomize_lag_timesteps = False
-
-    Cfg.control.control_type = "M"
-
-    Cfg.domain_rand.added_mass_range = [-2.0, 2.0]
-    Cfg.env.observe_two_prev_actions = False
-    Cfg.commands.body_roll_range = [-0.4, 0.4]
-    Cfg.commands.limit_body_roll = [-0.4, 0.4]
-    Cfg.commands.body_pitch_range = [-0.4, 0.4]
-    Cfg.commands.limit_body_pitch = [-0.4, 0.4]
-
-    Cfg.env.num_envs = args.num_envs
-
-    Cfg.env.keep_arm_fixed = True
-
-    Cfg.terrain.mesh_type = "plane"
-    if Cfg.terrain.mesh_type == "plane":
-        Cfg.terrain.teleport_robots = False
-    Cfg.control.update_obs_freq = 20 # Hz
-    Cfg.env.num_actions = 18
-    Cfg.env.num_observations = 63
-    Cfg.env.num_obs_history = Cfg.env.num_observation_history * Cfg.env.num_observations
-
-    Cfg.hybrid.reward_scales.tracking_lin_vel = 0.7 * Cfg.reward_scales.tracking_lin_vel
-    Cfg.hybrid.reward_scales.tracking_ang_vel = 0.5 * Cfg.reward_scales.tracking_ang_vel
-
-    Cfg.hybrid.reward_scales.arm_energy = -0.00004
-    Cfg.reward_scales.loco_energy = -0.00004
-
-    Cfg.reward_scales.jump = -0.00
-    Cfg.rewards.terminal_body_height = 0.28
-    Cfg.rewards.use_terminal_body_height = True
+    configure_task_from_args(Cfg, args, traj_track_reward_scale=1.0)
+    Unified2AC_Args.num_actions_arm = Cfg.arm.num_actions_arm_cd
     configure_train_stage(args)
-
-    Cfg.commands.T_force_range = [2, 4.]
-    Cfg.domain_rand.randomize_end_effector_force = False
-    Cfg.commands.add_force_thres = 0.3
-    Cfg.domain_rand.max_force = 15
-    Cfg.domain_rand.max_force_offset = 0.01
-
-    Cfg.env.priv_observe_vel = False
-    Cfg.commands.global_reference = False
-    Cfg.env.priv_observe_high_freq_goal = False
-    Cfg.env.num_privileged_obs = 9
-
-    Cfg.asset.render_sphere = True # NOTE no use in headless
-    Cfg.hybrid.use_vision = False
-    Cfg.rewards.manip_weight_lpy = 3
-    Cfg.rewards.manip_weight_rpy = 1
-    Cfg.hybrid.reward_scales.arm_dof_vel = 10 * Cfg.reward_scales.dof_vel
-    Cfg.hybrid.reward_scales.arm_dof_acc = 10 * Cfg.reward_scales.dof_acc
-    Cfg.hybrid.reward_scales.arm_action_rate = 10 * Cfg.reward_scales.action_rate
-
-    Cfg.use_rot6d = args.use_rot6d
-    if Cfg.use_rot6d:
-        Cfg.env.num_observations += 3
-        Cfg.commands.num_commands += 3
-        Cfg.env.num_obs_history = Cfg.env.num_observation_history * Cfg.env.num_observations
-
-        Cfg.arm.arm_num_observations += 3
-        Cfg.arm.arm_num_obs_history = Cfg.arm.arm_num_observations * Cfg.arm.arm_num_observation_history
-        Cfg.arm.arm_num_commands += 3
-
-        # Cfg.dog.dog_num_observations += 3
-        # Cfg.dog.dog_num_obs_history = Cfg.dog.dog_num_observations * Cfg.dog.dog_num_observation_history
-
-    if args.traj_track:
-        Cfg.arm.trajectory.enabled = True
-        traj_window_dims = len(Cfg.arm.trajectory.window_offsets) * 9
-        Cfg.arm.num_actions_arm_cd = Cfg.arm.num_actions_arm + 3
-        Unified2AC_Args.num_actions_arm = Cfg.arm.num_actions_arm_cd
-        Cfg.arm.arm_num_observations = 12 + 1 + 4 + 3 + 3 + 9 + 6 + traj_window_dims + 1
-        Cfg.arm.arm_num_obs_history = Cfg.arm.arm_num_observations * Cfg.arm.arm_num_observation_history
-        Cfg.dog.dog_num_observations += 9
-        Cfg.dog.dog_num_obs_history = Cfg.dog.dog_num_observations * Cfg.dog.dog_num_observation_history
-        Cfg.env.num_observations += 1 + 4 + 9 + 6 + traj_window_dims + 1
-        Cfg.env.num_obs_history = Cfg.env.num_observation_history * Cfg.env.num_observations
-        Cfg.hybrid.reward_scales.arm_manip_commands_tracking_combine = 0.0
-        Cfg.hybrid.reward_scales.vis_manip_commands_tracking_lpy = 0.0
-        Cfg.hybrid.reward_scales.vis_manip_commands_tracking_rpy = 0.0
-        Cfg.hybrid.reward_scales.traj_track = 1.0
-        Cfg.hybrid.reward_scales.trajectory_current_tracking = 1.0
-        Cfg.hybrid.reward_scales.trajectory_completion_time = 0.5
-        Cfg.hybrid.reward_scales.arm_delta_vel_cmd = -0.05
-        Cfg.hybrid.reward_scales.ee_smoothness = -1e-4
-
-    if args.dyna_gait:
-        Cfg.commands.use_dynamic_gait = True
-
-        Cfg.commands.limit_gait_frequency = Cfg.commands.gait_frequency_cmd_range
-        Cfg.commands.limit_footswing_height = Cfg.commands.footswing_height_range
-        Cfg.commands.limit_gait_duration = Cfg.commands.gait_duration_cmd_range
-        Cfg.commands.limit_stance_width = Cfg.commands.stance_width_range
-        Cfg.commands.limit_stance_length = Cfg.commands.stance_length_range
-
-        num_new_gait_dims = 5
-
-        Cfg.dog.dog_num_commands += num_new_gait_dims
-
-        plan_action_dims = 7 + (3 if Cfg.arm.trajectory.enabled else 0)
-        Cfg.arm.num_actions_arm_cd = Cfg.arm.num_actions_arm + plan_action_dims
-        Unified2AC_Args.num_actions_arm = Cfg.arm.num_actions_arm_cd
-
-        Cfg.env.num_observations += num_new_gait_dims + 2
-        Cfg.env.num_obs_history = Cfg.env.num_observation_history * Cfg.env.num_observations
-        Cfg.env.observe_gait_commands = True
-
-        Cfg.commands.num_bins_gait_frequency = 11
-        Cfg.commands.num_bins_footswing_height = 5
-        Cfg.commands.num_bins_gait_duration = 3
-        Cfg.commands.num_bins_stance_width = 3
-        Cfg.commands.num_bins_stance_length = 3
 
     global_switch.init_sigmoid_lr()
     # global_switch.init_linear_lr()
 
     if args.train_stage == "stage2":
         apply_hybrid_reward_settings(Cfg)
-
-    if args.robot == "go1":
-        Cfg.asset.file = '{MINI_GYM_ROOT_DIR}/resources/robots/arx5p2Go1/urdf/arx5p2Go1.urdf'
-    elif args.robot == "go2":
-        Cfg.asset.file = '{MINI_GYM_ROOT_DIR}/resources/robots/go2/urdf/arx5go2.urdf'
 
     # if args.headless:
     #     UnifiedRunnerArgs.log_video = False
@@ -238,10 +101,20 @@ def train_go1(headless=True):
         os.makedirs(f"{MINI_GYM_ROOT_DIR}/tmp/deploy_model", exist_ok=True)
 
         shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/scripts/unified_train.py", f"{args.log_dir}/scripts/unified_train.py")
-        shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/automatic/legged_robot.py", f"{args.log_dir}/scripts/legged_robot.py")
-        shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/automatic/legged_robot_config.py", f"{args.log_dir}/scripts/legged_robot_config.py")
-        shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/automatic/__init__.py", f"{args.log_dir}/scripts/env__init__.py")
-        shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/go1/asset_config.py", f"{args.log_dir}/scripts/asset_config.py")
+        shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet/legged_robot.py", f"{args.log_dir}/scripts/legged_robot.py")
+        shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet/legged_robot_config.py", f"{args.log_dir}/scripts/legged_robot_config.py")
+        shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet/__init__.py", f"{args.log_dir}/scripts/env__init__.py")
+        shutil.copyfile(
+            f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet/wbc_env.py",
+            f"{args.log_dir}/scripts/wbc_env.py",
+        )
+        shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet/observation_builder.py", f"{args.log_dir}/scripts/observation_builder.py")
+        shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet/trajectory_geometry.py", f"{args.log_dir}/scripts/trajectory_geometry.py")
+        shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet/stage_schedule.py", f"{args.log_dir}/scripts/stage_schedule.py")
+        shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet/wbc_env_config.py", f"{args.log_dir}/scripts/wbc_env_config.py")
+        shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet/asset_config.py", f"{args.log_dir}/scripts/asset_config.py")
+        shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/go1/go1_config.py", f"{args.log_dir}/scripts/go1_config.py")
+        shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/go1/wtw_config.py", f"{args.log_dir}/scripts/wtw_config.py")
 
         shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/go1_gym_learn/ppo_cse_unified/__init__.py", f"{args.log_dir}/scripts/ppo_cse_unified__init__.py")
         shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/go1_gym_learn/ppo_cse_unified/unified2head_ac.py", f"{args.log_dir}/scripts/unified2head_ac.py")
@@ -266,7 +139,7 @@ def train_go1(headless=True):
             "Global_Switch/end": global_switch.pretrained_to_hybrid_end,
             }, step=0)
 
-    env = VelocityTrackingEasyEnv(
+    env = WBCEnv(
         sim_device=args.sim_device,
         headless=args.headless,
         cfg=Cfg,

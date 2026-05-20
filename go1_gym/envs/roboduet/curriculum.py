@@ -167,7 +167,7 @@ if __name__ == '__main__':
 
     # r.set_to(low, high, value=1.0)
 
-    adjacents = r.get_local_bins(np.array([10, ]), range=0.5)
+    adjacents = r.get_local_bins(np.array([10, ]), ranges=0.5)
     for adjacent in adjacents:
         adjacent_inds = np.array(adjacent.nonzero()[0])
         print(adjacent_inds)

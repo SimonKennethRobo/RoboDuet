@@ -16,7 +16,8 @@ from params_proto import PrefixProto
 
 import wandb
 from go1_gym import MINI_GYM_ROOT_DIR
-from go1_gym.envs.automatic import HistoryWrapper
+from go1_gym.envs.roboduet import HistoryWrapper
+from go1_gym.envs.roboduet.stage_schedule import apply_hybrid_reward_settings
 from go1_gym.utils import global_switch
 
 from .unified2head_ac import Unified2ActorCritic
@@ -118,6 +119,29 @@ class Runner:
 
         self.env.reset()
 
+    def _advance_stage_schedule(self, iteration):
+        global_switch.count += 1
+        if not global_switch.switch_open:
+            global_switch.stage1_count += 1
+
+        if iteration != global_switch.pretrained_to_hybrid_start or global_switch.switch_open:
+            return
+
+        blue_bold_text = "\033[1;34m"
+        reset_color = "\033[0m"
+        print(
+            blue_bold_text
+            + "=" * 160
+            + "\n"
+            + "Unified Policy Output: Start to gradually integrate arm and leg rewards."
+            + "\n"
+            + "=" * 160
+            + reset_color
+        )
+
+        global_switch.open_switch()
+        apply_hybrid_reward_settings(self.env.cfg)
+
     def learn(self, num_learning_iterations, init_at_random_ep_len=False, eval_freq=100, eval_expert=False, width=80, pad=35):
 
         if init_at_random_ep_len:
@@ -203,21 +227,7 @@ class Runner:
             stop = time.time()
             learn_time = stop - start
 
-            global_switch.count += 1
-            if not global_switch.switch_open:
-                global_switch.stage1_count += 1
-
-            if it == global_switch.pretrained_to_hybrid_start:
-                blue_bold_text = '\033[1;34m'
-                reset_color = '\033[0m'
-                print(blue_bold_text + '=' * 160 + '\n'
-                      + 'Unified Policy Output: Start to gradually integrate arm and leg rewards.' + '\n'
-                      + '=' * 160 + reset_color )
-
-                global_switch.open_switch()
-                change_setting = vars(self.env.cfg.hybrid.rewards)
-                for key, value in change_setting.items():
-                    setattr(self.env.cfg.rewards, key, value)
+            self._advance_stage_schedule(it)
 
             beta = global_switch.get_beta()
 

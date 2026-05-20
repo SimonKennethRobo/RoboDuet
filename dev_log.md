@@ -8,7 +8,7 @@ Extend the original dual-stage legged manipulator task from single 6D EE goal tr
 
 ## Configuration
 
-- Added `Cfg.arm.trajectory` in `go1_gym/envs/automatic/legged_robot_config.py`.
+- Added `Cfg.arm.trajectory` in `go1_gym/envs/roboduet/legged_robot_config.py`.
 - Main trajectory config fields:
   - `enabled`: switch for trajectory tracking mode.
   - `window_offsets`: exponential step offsets, currently `[0, 1, 2, 4, 8, 16, 32, 64]`.
@@ -30,7 +30,7 @@ Extend the original dual-stage legged manipulator task from single 6D EE goal tr
 
 ## Trajectory Command Generation
 
-Implemented in `go1_gym/envs/automatic/legged_robot.py`.
+Implemented in `go1_gym/envs/roboduet/legged_robot.py`.
 
 - Added `_resample_trajectory_commands(env_ids)`.
 - Every reset/resample generates one random trajectory from the current EE pose neighborhood.
@@ -103,7 +103,7 @@ Legacy `lpy/rpy` goal observation remains active when trajectory mode is disable
 
 ## Actions and Command Composition
 
-Implemented in `go1_gym/envs/automatic/__init__.py`.
+Implemented in `go1_gym/envs/roboduet/__init__.py`.
 
 Arm policy action layout now depends on enabled modes:
 

@@ -6,7 +6,7 @@ import os
 import argparse
 import time
 
-from go1_gym.envs.automatic.joy_wrapper import JoyController
+from go1_gym.envs.roboduet.joy_wrapper import JoyController
 
 
 def _format_commands(ctrl, dog_cmds, arm_cmds):

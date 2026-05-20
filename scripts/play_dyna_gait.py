@@ -8,7 +8,7 @@ import torch
 from isaacgym.torch_utils import *
 
 from go1_gym.envs import *
-from go1_gym.envs.automatic import KeyboardWrapper
+from go1_gym.envs.roboduet import KeyboardWrapper
 from scripts.load_policy import load_arm_policy, load_dog_policy, load_env
 
 x_vel_cmd, y_vel_cmd, yaw_vel_cmd = 0.0, 0.0, 0.0

@@ -10,7 +10,7 @@ import torch
 from isaacgym.torch_utils import *
 
 from go1_gym.envs import *
-from go1_gym.envs.automatic import KeyboardWrapper
+from go1_gym.envs.roboduet import KeyboardWrapper
 from scripts.load_policy import load_dog_policy, load_arm_policy, load_env
 from go1_gym.lcm_types.arm_actions_t import arm_actions_t
 import math

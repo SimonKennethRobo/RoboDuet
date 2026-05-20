@@ -1,10 +1,6 @@
-from typing import Union
+from typing import Any
 
-from params_proto import Meta
-
-from go1_gym.envs.automatic.legged_robot_config import Cfg
-
-def config_wtw(Cnfg: Union[Cfg, Meta]):
+def config_wtw(Cnfg: Any):
     Cnfg.commands.num_lin_vel_bins = 30
     Cnfg.commands.num_ang_vel_bins = 30
     Cnfg.curriculum_thresholds.tracking_ang_vel = 0.7

@@ -54,7 +54,7 @@ if __name__ == "__main__":
     from go1_gym.envs.mini_cheetah.mini_cheetah_config import config_mini_cheetah
     config_mini_cheetah(Cfg)
 
-    test_env = gym.make("VelocityTrackingEasyEnv-v0", cfg=Cfg)
+    test_env = gym.make("WBCEnv-v0", cfg=Cfg)
     env = HistoryWrapper(test_env)
 
     env.reset()

@@ -20,7 +20,7 @@ import torch
 from isaacgym.torch_utils import *  # noqa: F403
 
 from go1_gym.envs import *  # noqa: F403
-from go1_gym.envs.automatic import JoyWrapper
+from go1_gym.envs.roboduet import JoyWrapper
 from scripts.load_policy import load_dog_policy, load_arm_policy, load_env
 
 # Default run/checkpoint (overridden by CLI args)

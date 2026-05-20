@@ -16,7 +16,8 @@ from params_proto import PrefixProto
 
 import wandb
 from go1_gym import MINI_GYM_ROOT_DIR
-from go1_gym.envs.automatic import HistoryWrapper
+from go1_gym.envs.roboduet import HistoryWrapper
+from go1_gym.envs.roboduet.stage_schedule import apply_hybrid_reward_settings
 from go1_gym.utils import global_switch
 
 from .arm_ac import ArmActorCritic
@@ -150,6 +151,28 @@ class Runner:
         self.last_recording_it = 0
 
         self.env.reset()
+
+    def _advance_stage_schedule(self, iteration):
+        global_switch.count += 1
+        if not global_switch.switch_open:
+            global_switch.stage1_count += 1
+
+        if iteration != global_switch.pretrained_to_hybrid_start or global_switch.switch_open:
+            return
+
+        blue_bold_text = "\033[1;34m"  # bold blue
+        reset_color = "\033[0m"  # reset
+        print(
+            blue_bold_text
+            + "=" * 160
+            + "\n"
+            + "Multi-agents Policy Output: Pretrained model training finished, start to train hybrid model."
+            + "\n"
+            + "=" * 160
+            + reset_color
+        )
+        global_switch.open_switch()
+        apply_hybrid_reward_settings(self.env.cfg)
 
     def learn(
         self, num_learning_iterations, init_at_random_ep_len=False, eval_freq=100, eval_expert=False, width=80, pad=35
@@ -302,26 +325,7 @@ class Runner:
             stop = time.time()
             learn_time = stop - start
 
-            global_switch.count += 1
-            if not global_switch.switch_open:
-                global_switch.stage1_count += 1
-
-            if it == global_switch.pretrained_to_hybrid_start:
-                blue_bold_text = "\033[1;34m"  # bold blue
-                reset_color = "\033[0m"  # reset
-                print(
-                    blue_bold_text
-                    + "=" * 160
-                    + "\n"
-                    + "Multi-agents Policy Output: Pretrained model training finished, start to train hybrid model."
-                    + "\n"
-                    + "=" * 160
-                    + reset_color
-                )
-                global_switch.open_switch()
-                change_setting = vars(self.env.cfg.hybrid.rewards)
-                for key, value in change_setting.items():
-                    setattr(self.env.cfg.rewards, key, value)
+            self._advance_stage_schedule(it)
 
             if self.log_dir is not None:
                 ep_string = f""

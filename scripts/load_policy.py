@@ -3,8 +3,8 @@ from go1_gym_learn.ppo_cse_automatic.arm_ac import ArmActorCritic
 from go1_gym_learn.ppo_cse_automatic.dog_ac import DogActorCritic
 import os.path as osp
 import pickle as pkl
-from go1_gym.envs.automatic.legged_robot_config import Cfg
-from go1_gym.envs.automatic import HistoryWrapper
+from go1_gym.envs.roboduet.legged_robot_config import Cfg
+from go1_gym.envs.roboduet import HistoryWrapper
 
 def load_dog_policy(logdir, ckpt_id, Cfg):
     actor_critic = DogActorCritic(Cfg.dog.dog_num_observations,

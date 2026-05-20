@@ -3,7 +3,7 @@ import numpy as np
 from go1_gym.utils.math_utils import quat_apply_yaw, wrap_to_pi, get_scale_shift
 from isaacgym.torch_utils import *
 from isaacgym import gymapi
-from go1_gym.envs.automatic.legged_robot import LeggedRobot
+from go1_gym.envs.roboduet.legged_robot import LeggedRobot
 
 class Rewards:
     def __init__(self, env):
@@ -16,13 +16,13 @@ class Rewards:
     def _reward_arm_vel_control(self):
         linv_vel_error = torch.abs(self.env.plan_actions[:, 2] - self.env.base_lin_vel[:, 0] * self.env.obs_scales.lin_vel)
         ang_vel_error = torch.abs(self.env.plan_actions[:, 3] - self.env.base_ang_vel[:, 2] * self.env.obs_scales.ang_vel)
-    
+
         return linv_vel_error + ang_vel_error
-    
+
     def _reward_arm_orientation_control(self):
         pitch_error = torch.abs(self.env.plan_actions[:, 0] + self.env.pitch)
         roll_error = torch.abs(self.env.plan_actions[:, 1] + self.env.roll)
-    
+
         return pitch_error + roll_error
 
     def _reward_arm_control_limits(self):
@@ -31,7 +31,7 @@ class Rewards:
         out_of_limits += -(self.env.plan_actions[:, 1] - self.env.cfg.commands.limit_body_roll[0]).clip(max=0.)  # lower limit
         out_of_limits += (self.env.plan_actions[:, 1] - self.env.cfg.commands.limit_body_roll[1]).clip(min=0.)
         return out_of_limits
-        
+
     def _reward_arm_control_smoothness_1(self):
         # Penalize changes in actions
         diff = torch.square(self.env.plan_actions - self.env.last_plan_actions)
@@ -44,7 +44,7 @@ class Rewards:
         diff = diff * (self.env.last_actions[:, :self.env.num_dof] != 0)  # ignore first step
         diff = diff * (self.env.last_last_actions[:, :self.env.num_dof] != 0)  # ignore second step
         return torch.sum(diff, dim=1)
-        
+
     def _reward_arm_energy(self):
         energy_sum = torch.sum(
             torch.square(self.env.torques[:, self.env.num_actions_loco:]*self.env.dof_vel[:, self.env.num_actions_loco:])
@@ -66,10 +66,10 @@ class Rewards:
     def _reward_arm_manip_commands_tracking_combine(self):
         lpy = self.env.get_lpy_in_base_coord(torch.arange(self.env.num_envs, device=self.env.device))
         lpy_error = torch.sum((torch.abs(lpy - self.env.commands_arm_obs[:, 0:3])) / self.env.commands_arm_lpy_range, dim=1)
-        
+
         rpy = self.env.get_alpha_beta_gamma_in_base_coord(torch.arange(self.env.num_envs, device=self.env.device))
         rpy_error = torch.sum((torch.abs(rpy - self.env.target_abg)) / self.env.commands_arm_rpy_range, dim=1)
-    
+
         return torch.exp(-(self.env.cfg.rewards.manip_weight_lpy*lpy_error + self.env.cfg.rewards.manip_weight_rpy*rpy_error))
 
     def _reward_arm_action_smoothness_1(self):
@@ -144,12 +144,12 @@ class Rewards:
         return torch.square(self.env.base_lin_vel[:, 2])
 
     def _reward_loco_energy(self):
-      
+
         # print("loco energy: ", -0.00005*torch.sum(torch.square(self.env.torques[:, :self.env.num_actions_loco]*self.env.dof_vel[:, :self.env.num_actions_loco]), dim=1)[:20])
         return torch.sum(
             torch.square(self.env.torques[:, :self.env.num_actions_loco]*self.env.dof_vel[:, :self.env.num_actions_loco])
             , dim=1)
-    
+
     def _reward_hip_action_l2(self):
         action_l2 = torch.sum(self.env.actions[:, [0, 3, 6, 9]] ** 2, dim=1)
         return action_l2
@@ -281,7 +281,7 @@ class Rewards:
         up_flag = self.env.delta_z > self.env.cfg.hybrid.rewards.headupdown_thres+0.3
         guide[down_flag] = torch.square(self.env.pitch - 0.4)[down_flag]
         guide[up_flag] = torch.square(self.env.pitch + 0.3)[up_flag]
-        
+
         return guide
 
     def _reward_orientation_control(self):
@@ -340,7 +340,7 @@ class Rewards:
         reward = torch.sum(torch.square(err_raibert_heuristic), dim=(1, 2))
 
         return reward
-    
+
     # vis
     def _reward_vis_manip_commands_tracking_lpy(self):
         lpy = self.env.get_lpy_in_base_coord(torch.arange(self.env.num_envs, device=self.env.device))
