@@ -138,7 +138,7 @@ def train_go1(headless=True):
         # Cfg.dog.dog_num_observations += 3
         # Cfg.dog.dog_num_obs_history = Cfg.dog.dog_num_observations * Cfg.dog.dog_num_observation_history
 
-    if args.trajectory_tracking:
+    if args.traj_track:
         Cfg.arm.trajectory.enabled = True
         traj_window_dims = len(Cfg.arm.trajectory.window_offsets) * 9
         Cfg.arm.num_actions_arm_cd = Cfg.arm.num_actions_arm + 3
@@ -152,7 +152,7 @@ def train_go1(headless=True):
         Cfg.hybrid.reward_scales.arm_manip_commands_tracking_combine = 0.0
         Cfg.hybrid.reward_scales.vis_manip_commands_tracking_lpy = 0.0
         Cfg.hybrid.reward_scales.vis_manip_commands_tracking_rpy = 0.0
-        Cfg.hybrid.reward_scales.trajectory_tracking = 1.0
+        Cfg.hybrid.reward_scales.traj_track = 1.0
         Cfg.hybrid.reward_scales.trajectory_current_tracking = 1.0
         Cfg.hybrid.reward_scales.trajectory_completion_time = 0.5
         Cfg.hybrid.reward_scales.arm_delta_vel_cmd = -0.05
@@ -277,7 +277,7 @@ if __name__ == '__main__':
     parser.add_argument('--wo_two_stage', action='store_true', default=False)
     parser.add_argument('--use_rot6d', action='store_true', default=False)
     parser.add_argument('--dyna_gait', action='store_true', default=False)
-    parser.add_argument('--trajectory_tracking', action='store_true', default=False)
+    parser.add_argument('--traj_track', action='store_true', default=False)
 
     args = parser.parse_args()
 

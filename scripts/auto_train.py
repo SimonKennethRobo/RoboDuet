@@ -32,11 +32,11 @@ from go1_gym.utils import format_code, set_seed, global_switch
 os.environ["WANDB_SILENT"] = "true"
 
 
-def train_go1(arg):
+def main(arg):
 
     if args.debug:
         mode = "disabled"
-        args.num_envs = 12
+        args.num_envs = 4
     else:
         mode = "online"
 
@@ -150,7 +150,7 @@ def train_go1(arg):
         Cfg.dog.dog_num_observations += 3
         Cfg.dog.dog_num_obs_history = Cfg.dog.dog_num_observations * Cfg.dog.dog_num_observation_history
 
-    if args.trajectory_tracking:
+    if args.traj_track:
         Cfg.arm.trajectory.enabled = True
         traj_window_dims = len(Cfg.arm.trajectory.window_offsets) * 9
         Cfg.arm.num_actions_arm_cd = Cfg.arm.num_actions_arm + 3
@@ -163,7 +163,7 @@ def train_go1(arg):
         Cfg.hybrid.reward_scales.arm_manip_commands_tracking_combine = 0.0
         Cfg.hybrid.reward_scales.vis_manip_commands_tracking_lpy = 0.0
         Cfg.hybrid.reward_scales.vis_manip_commands_tracking_rpy = 0.0
-        Cfg.hybrid.reward_scales.trajectory_tracking = 1.0
+        Cfg.hybrid.reward_scales.traj_track = 5.0
         Cfg.hybrid.reward_scales.trajectory_current_tracking = 1.0
         Cfg.hybrid.reward_scales.trajectory_completion_time = 0.5
         Cfg.hybrid.reward_scales.arm_delta_vel_cmd = -0.05
@@ -235,6 +235,7 @@ def train_go1(arg):
     )
 
     args.log_dir = osp.join(f"{MINI_GYM_ROOT_DIR}/runs", wandb.run.name)
+    print(f"Logging to {args.log_dir}")
     args.log_dir += f"_seed{args.seed}"
 
     os.makedirs(osp.join(args.log_dir, "checkpoints_arm"), exist_ok=True)
@@ -327,7 +328,7 @@ if __name__ == "__main__":
     parser.add_argument("--graphics_device_id", type=int, default=None)
     parser.add_argument("--num_learning_iterations", type=int, default=100000)
     parser.add_argument("--eval_freq", type=int, default=100)
-    parser.add_argument("--num_envs", type=int, default=2048)
+    parser.add_argument("--num_envs", type=int, default=4096)
     parser.add_argument("--run_name", type=str, default="test")
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--offline", action="store_true")
@@ -336,7 +337,7 @@ if __name__ == "__main__":
     parser.add_argument("--tags", nargs="+", default=[])
     parser.add_argument("--notes", type=str, default=None)
     parser.add_argument("--seed", type=int, default=-1)
-    parser.add_argument("--robot", type=str, default="go1", choices=["go1", "go2"])
+    parser.add_argument("--robot", type=str, default="go2", choices=["go1", "go2"])
     parser.add_argument("--wo_two_stage", action="store_true", default=False)
     parser.add_argument("--use_rot6d", action="store_true", default=False)
     parser.add_argument("--dyna_gait", action="store_true", default=False)
@@ -347,8 +348,8 @@ if __name__ == "__main__":
     parser.add_argument("--stage1_arm_max_offset", type=float, default=0.35)
     parser.add_argument("--stage1_arm_accel_resample_time_s", type=float, default=0.5)
     parser.add_argument("--dyna_gait_min_frequency", type=float, default=0.0)
-    parser.add_argument("--trajectory_tracking", action="store_true", default=False)
+    parser.add_argument("--traj_track", action="store_true", default=False)
 
     args = parser.parse_args()
 
-    train_go1(args)
+    main(args)

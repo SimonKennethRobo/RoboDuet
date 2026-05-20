@@ -49,8 +49,8 @@ class RunnerArgs(PrefixProto, cli=False):
     max_iterations = 1500  # number of policy updates
 
     # logging
-    save_interval = 400  # check for potential saves every this many iterations
-    save_video_interval = 400
+    save_interval = 1000  # check for potential saves every this many iterations
+    save_video_interval = 1000
     log_freq = 10
     log_video = True
 

@@ -85,7 +85,7 @@ class Rewards:
         diff = diff * (self.env.last_last_actions[:, self.env.num_actions_loco:] != 0)  # ignore second step
         return torch.sum(diff, dim=1)
 
-    def _reward_trajectory_tracking(self):
+    def _reward_traj_track(self):
         return torch.exp(-self.env.get_trajectory_error_sum())
 
     def _reward_trajectory_current_tracking(self):

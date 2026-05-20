@@ -425,7 +425,7 @@ class LeggedRobot(BaseTask):
         self.end_effector_state[:] = self.rigid_body_state.view(self.num_envs, self.num_bodies, 13)[:, self.ee_idx]
 
         self._post_physics_step_callback()
-        self._step_trajectory_tracking()
+        self._step_traj_track()
 
         # compute observations, rewards, resets, ...
         self.check_termination()
@@ -1338,7 +1338,7 @@ class LeggedRobot(BaseTask):
         self.arm_delta_vel_cmd[env_ids] = 0.0
         self.commands_dog[env_ids, :3] = self.user_vel_cmd[env_ids]
 
-    def _step_trajectory_tracking(self):
+    def _step_traj_track(self):
         if not self.cfg.arm.trajectory.enabled:
             return
 
