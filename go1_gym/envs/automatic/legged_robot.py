@@ -115,19 +115,13 @@ class LeggedRobot(BaseTask):
             # step graphics
             if self.enable_viewer_sync:
                 self.gym.step_graphics(self.sim)
+                self._draw_viewer_overlays()
                 self.gym.draw_viewer(self.viewer, self.sim, True)
                 if sync_frame_time:
                     self.gym.sync_frame_time(self.sim)
             else:
+                self._draw_viewer_overlays()
                 self.gym.poll_viewer_events(self.viewer)
-
-            # render desired spheres
-            if self.cfg.asset.render_sphere:
-                self.gym.clear_lines(self.viewer)
-                self._draw_ee_ori_coord()
-                self._draw_command_ori_coord()
-                self._draw_policy_trajectory()
-                self._draw_base_ori_coord()
 
     def draw_coord_pos_quat(self, x, y, z, quat, scale=0.1):
         draw_scale = scale
@@ -179,20 +173,22 @@ class LeggedRobot(BaseTask):
         # quat_world = quat_mul(base_quats, self.obj_quats[0])
         self.draw_sphere_and_axes((x, y, z), quat_world, 0.02, (0, 1, 1))
 
-    def _draw_policy_trajectory(self, env_id=0):
-        if not self.cfg.arm.trajectory.enabled or self.headless or self.viewer is None:
+    def _draw_viewer_overlays(self):
+        if self.headless or self.viewer is None or not self.cfg.asset.render_sphere:
             return
-        points = self.traj_pos_world[env_id].detach().cpu().numpy()
-        if points.shape[0] < 2:
-            return
-        stride = max(1, points.shape[0] // 64)
-        points = points[::stride]
+        self.gym.clear_lines(self.viewer)
+        self._draw_ee_ori_coord()
+        self._draw_command_ori_coord()
+        self._draw_policy_trajectory()
+        self._draw_base_ori_coord()
+
+    def _draw_viewer_polyline(self, points, color, env_id=0):
         if points.shape[0] < 2:
             return
         vertices = np.empty((points.shape[0] - 1, 2, 3), dtype=np.float32)
         vertices[:, 0, :] = points[:-1]
         vertices[:, 1, :] = points[1:]
-        colors = np.tile(np.array([[0.0, 0.9, 1.0]], dtype=np.float32), (vertices.shape[0], 1))
+        colors = np.tile(np.array([color], dtype=np.float32), (vertices.shape[0], 1))
         self.gym.add_lines(
             self.viewer,
             self.envs[env_id],
@@ -200,6 +196,55 @@ class LeggedRobot(BaseTask):
             vertices.reshape(-1, 3),
             colors,
         )
+
+    def _draw_policy_trajectory(self, env_id=0):
+        if not self.cfg.arm.trajectory.enabled or self.headless or self.viewer is None:
+            return
+        points = self.traj_pos_world[env_id].detach().cpu().numpy().astype(np.float32)
+        if points.shape[0] < 2:
+            return
+        stride = max(1, points.shape[0] // 96)
+        sampled_points = points[::stride]
+        progress = int(self.traj_progress_idx[env_id].item())
+        sampled_progress = int(np.clip(progress // stride, 0, sampled_points.shape[0] - 1))
+
+        self._draw_viewer_polyline(sampled_points[: sampled_progress + 1], (1.0, 0.75, 0.0), env_id)
+        self._draw_viewer_polyline(sampled_points[sampled_progress:], (0.0, 0.85, 1.0), env_id)
+
+        target = self.traj_pos_world[env_id, self.traj_progress_idx[env_id]]
+        target_quat = self.traj_quat_world[env_id, self.traj_progress_idx[env_id]]
+        final = self.traj_pos_world[env_id, -1]
+        final_quat = self.traj_quat_world[env_id, -1]
+        self.draw_sphere_and_axes(
+            (target[0].item(), target[1].item(), target[2].item()),
+            target_quat,
+            0.035,
+            (0.0, 1.0, 1.0),
+            scale=0.12,
+        )
+        self.draw_sphere_and_axes(
+            (final[0].item(), final[1].item(), final[2].item()),
+            final_quat,
+            0.03,
+            (1.0, 0.0, 1.0),
+            scale=0.1,
+        )
+
+        ee_to_target = torch.stack((self.end_effector_state[env_id, :3], target), dim=0).detach().cpu().numpy().astype(np.float32)
+        self._draw_viewer_polyline(ee_to_target, (1.0, 0.1, 0.1), env_id)
+
+        lookahead_ids = torch.clamp(
+            self.traj_progress_idx[env_id] + self.traj_window_offsets,
+            min=0,
+            max=self.traj_num_waypoints - 1,
+        )
+        for waypoint in self.traj_pos_world[env_id, lookahead_ids[::2]]:
+            sphere_geom = gymutil.WireframeSphereGeometry(0.012, 4, 4, None, color=(0.2, 0.8, 1.0))
+            sphere_pose = gymapi.Transform(
+                gymapi.Vec3(waypoint[0].item(), waypoint[1].item(), waypoint[2].item()),
+                r=None,
+            )
+            gymutil.draw_lines(sphere_geom, self.gym, self.viewer, self.envs[env_id], sphere_pose)
 
     def _compute_torques(self, actions):
         """Compute torques from actions.

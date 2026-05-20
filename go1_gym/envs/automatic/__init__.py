@@ -810,20 +810,13 @@ class KeyboardWrapper(VelocityTrackingEasyEnv):
         # step graphics
         if self.enable_viewer_sync:
             self.gym.step_graphics(self.sim)
+            self._draw_viewer_overlays()
             self.gym.draw_viewer(self.viewer, self.sim, True)
             if sync_frame_time:
                 self.gym.sync_frame_time(self.sim)
         else:
+            self._draw_viewer_overlays()
             self.gym.poll_viewer_events(self.viewer)
-
-        # render desired spheres
-        # import ipdb; ipdb.set_trace()
-        if self.cfg.asset.render_sphere:
-            self.gym.clear_lines(self.viewer)
-            self._draw_ee_ori_coord()
-            self._draw_command_ori_coord()
-            self._draw_policy_trajectory()
-            self._draw_base_ori_coord()
 
         self.update_arm_commands()
 
@@ -1039,18 +1032,13 @@ class JoyWrapper(VelocityTrackingEasyEnv):
 
         if self.enable_viewer_sync:
             self.gym.step_graphics(self.sim)
+            self._draw_viewer_overlays()
             self.gym.draw_viewer(self.viewer, self.sim, True)
             if sync_frame_time:
                 self.gym.sync_frame_time(self.sim)
         else:
+            self._draw_viewer_overlays()
             self.gym.poll_viewer_events(self.viewer)
-
-        if self.cfg.asset.render_sphere:
-            self.gym.clear_lines(self.viewer)
-            self._draw_ee_ori_coord()
-            self._draw_command_ori_coord()
-            self._draw_policy_trajectory()
-            self._draw_base_ori_coord()
 
         self.update_arm_commands()
 
