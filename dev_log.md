@@ -237,7 +237,7 @@ python scripts/auto_train.py --sim_device cuda:0 --dyna_gait --traj_track --debu
 Start directly in stage2:
 
 ```bash
-python scripts/auto_train.py --sim_device cuda:0 --dyna_gait --traj_track --debug --wo_two_stage
+python scripts/auto_train.py --sim_device cuda:0 --dyna_gait --traj_track --debug --train_stage stage2
 ```
 
 ## Known Issues / Follow-Ups

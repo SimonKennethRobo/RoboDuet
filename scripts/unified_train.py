@@ -28,6 +28,36 @@ from go1_gym_learn.ppo_cse_unified.unified2head_ac import Unified2AC_Args
 from go1_gym.utils import format_code, set_seed, global_switch
 os.environ["WANDB_SILENT"] = "true"
 
+def configure_train_stage(args):
+    global_switch.count = 0
+    global_switch.stage1_count = 0
+    global_switch.switch_flag = False
+
+    if args.train_stage == "stage1":
+        global_switch.pretrained_to_hybrid_start = args.num_learning_iterations + 1
+        global_switch.pretrained_to_hybrid_end = global_switch.pretrained_to_hybrid_start + 1
+    elif args.train_stage == "stage2":
+        global_switch.pretrained_to_hybrid_start = -1
+        global_switch.pretrained_to_hybrid_end = 0
+        global_switch.count = global_switch.pretrained_to_hybrid_end
+        global_switch.open_switch()
+    else:
+        global_switch.pretrained_to_hybrid_start = 10000
+        global_switch.pretrained_to_hybrid_end = global_switch.pretrained_to_hybrid_start + 0
+        if args.debug and global_switch.pretrained_to_hybrid_start > 0:
+            global_switch.pretrained_to_hybrid_start = 2
+            global_switch.pretrained_to_hybrid_end = global_switch.pretrained_to_hybrid_start + 2
+
+    if args.debug:
+        UnifiedRunnerArgs.save_interval = 2
+        UnifiedRunnerArgs.save_video_interval = 10
+
+
+def apply_hybrid_reward_settings(cfg):
+    for key, value in vars(cfg.hybrid.rewards).items():
+        setattr(cfg.rewards, key, value)
+
+
 def unified_reward_scales_wrapper(self):
     def get_reward_scales():
         return self.hybrid_reward_scales
@@ -92,19 +122,7 @@ def train_go1(headless=True):
     Cfg.reward_scales.jump = -0.00
     Cfg.rewards.terminal_body_height = 0.28
     Cfg.rewards.use_terminal_body_height = True
-    global_switch.pretrained_to_hybrid_start = 10000  # 2000 with pretrained, 10000 from scratch
-
-    if args.wo_two_stage:
-        global_switch.pretrained_to_hybrid_start = 0
-
-    global_switch.pretrained_to_hybrid_end = global_switch.pretrained_to_hybrid_start + 0
-
-    if args.debug:
-        if global_switch.pretrained_to_hybrid_start > 0:
-            global_switch.pretrained_to_hybrid_start = 2
-        global_switch.pretrained_to_hybrid_end = global_switch.pretrained_to_hybrid_start + 2
-        UnifiedRunnerArgs.save_interval = 2
-        UnifiedRunnerArgs.save_video_interval = 10
+    configure_train_stage(args)
 
     Cfg.commands.T_force_range = [2, 4.]
     Cfg.domain_rand.randomize_end_effector_force = False
@@ -187,6 +205,9 @@ def train_go1(headless=True):
 
     global_switch.init_sigmoid_lr()
     # global_switch.init_linear_lr()
+
+    if args.train_stage == "stage2":
+        apply_hybrid_reward_settings(Cfg)
 
     if args.robot == "go1":
         Cfg.asset.file = '{MINI_GYM_ROOT_DIR}/resources/robots/arx5p2Go1/urdf/arx5p2Go1.urdf'
@@ -274,7 +295,7 @@ if __name__ == '__main__':
     parser.add_argument('--notes', type=str, default=None)
     parser.add_argument('--seed', type=int, default=-1)
     parser.add_argument('--robot', type=str, default="go1", choices=["go1", "go2"])
-    parser.add_argument('--wo_two_stage', action='store_true', default=False)
+    parser.add_argument('--train_stage', type=str, default="two_stage", choices=["stage1", "stage2", "two_stage"])
     parser.add_argument('--use_rot6d', action='store_true', default=False)
     parser.add_argument('--dyna_gait', action='store_true', default=False)
     parser.add_argument('--traj_track', action='store_true', default=False)
