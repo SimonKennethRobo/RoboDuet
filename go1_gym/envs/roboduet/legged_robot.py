@@ -357,7 +357,10 @@ class LeggedRobot(BaseTask):
         if not self._stage1_arm_curriculum_active():
             return 0.0
 
-        ramp_iters = max(1, int(global_switch.pretrained_to_hybrid_start))
+        ramp_iters = max(
+            1,
+            int(getattr(global_switch, "stage1_arm_ramp_iterations", global_switch.pretrained_to_hybrid_start)),
+        )
         stage1_iter = getattr(global_switch, "stage1_count", global_switch.count)
         progress = min(1.0, max(0.0, stage1_iter / ramp_iters))
         fixed_fraction = min(1.0, max(0.0, float(self.cfg.env.stage1_arm_fixed_fraction)))

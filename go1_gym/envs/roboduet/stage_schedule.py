@@ -28,10 +28,18 @@ class StageSchedule:
     def starts_in_stage2(self):
         return self.train_stage == self.STAGE2
 
+    def _stage1_learning_iterations(self):
+        if self.train_stage == self.STAGE1:
+            return self.num_learning_iterations
+        if self.train_stage == self.STAGE2:
+            return 1
+        return self.default_switch_iteration
+
     def configure(self, global_switch):
         global_switch.count = 0
         global_switch.stage1_count = 0
         global_switch.switch_flag = False
+        global_switch.stage1_arm_ramp_iterations = max(1, int(self._stage1_learning_iterations()))
 
         if self.train_stage == self.STAGE1:
             global_switch.pretrained_to_hybrid_start = self.num_learning_iterations + 1
@@ -50,6 +58,7 @@ class StageSchedule:
         if self.debug and global_switch.pretrained_to_hybrid_start > 0:
             global_switch.pretrained_to_hybrid_start = self.debug_switch_iteration
             global_switch.pretrained_to_hybrid_end = global_switch.pretrained_to_hybrid_start + 2
+            global_switch.stage1_arm_ramp_iterations = self.debug_switch_iteration
 
     def maybe_switch(self, iteration, global_switch, env, message):
         if global_switch.switch_open or iteration != global_switch.pretrained_to_hybrid_start:
