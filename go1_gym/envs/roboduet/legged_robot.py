@@ -259,6 +259,10 @@ class LeggedRobot(BaseTask):
         """Per-episode arm command resampling alongside _resample_commands."""
         pass
 
+    def _arm_post_dof_randomization_hook(self, env_ids):
+        """Let arm tasks override generic DOF randomization for selected envs."""
+        pass
+
     def _arm_post_callback_hook(self):
         """Extra updates inside _post_physics_step_callback (force, traj progress)."""
         pass
@@ -1084,6 +1088,7 @@ class LeggedRobot(BaseTask):
             (self.episode_length_buf % int(self.cfg.domain_rand.rand_interval) == 0).nonzero(as_tuple=False).flatten()
         )
         self._randomize_dof_props(env_ids, self.cfg)
+        self._arm_post_dof_randomization_hook(env_ids)
 
         if self.common_step_counter % int(self.cfg.domain_rand.gravity_rand_interval) == 0:
             self._randomize_gravity()

@@ -184,6 +184,8 @@ class ArmDomainRandConfig:
     link_mass_range: tuple = (0.85, 1.15)
     randomize_link_com: bool = True
     link_com_range: float = 0.01
+    randomize_mount_pos: bool = True
+    mount_pos_range: tuple = ((-0.02, 0.02), (-0.02, 0.02), (-0.01, 0.01))
 
 
 @dataclass(frozen=True)
@@ -202,6 +204,7 @@ class DomainRandConfig:
         motor_offset_range=0.05,
         link_mass_range=(0.1, 2),
         link_com_range=0.1,
+        mount_pos_range=((-0.03, 0.03), (-0.03, 0.03), (-0.02, 0.02)),
     )
     stage2_arm: ArmDomainRandConfig = ArmDomainRandConfig()
 

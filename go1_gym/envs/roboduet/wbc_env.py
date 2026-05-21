@@ -66,12 +66,17 @@ class WBCEnv(LeggedRobot):
     def quat_to_angle(self, quat):
         return quat_to_angle(quat.to(self.device))
 
+    def _arm_mount_base_pos(self, env_ids=None):
+        if env_ids is None:
+            return self.base_pos + quat_rotate(self.base_quat, self.arm_mount_pos_offsets)
+        return self.base_pos[env_ids] + quat_rotate(self.base_quat[env_ids], self.arm_mount_pos_offsets[env_ids])
+
     def _pose_world_to_body_9d(self, pos_world, quat_world, env_ids=None):
         if env_ids is None:
-            base_pos = self.base_pos
+            base_pos = self._arm_mount_base_pos()
             base_quat = self.base_quat
         else:
-            base_pos = self.base_pos[env_ids]
+            base_pos = self._arm_mount_base_pos(env_ids)
             base_quat = self.base_quat[env_ids]
         return pose_world_to_body_9d(pos_world, quat_world, base_pos, base_quat)
 
@@ -107,14 +112,19 @@ class WBCEnv(LeggedRobot):
         grasper_offset = torch.tensor([0.1, 0, 0], dtype=torch.float, device=self.device).repeat((len(env_ids), 1))
         grasper_move_in_world = quat_rotate(self.end_effector_state[env_ids, 3:7], grasper_offset)
         grasper_in_world = self.end_effector_state[env_ids, :3] + grasper_move_in_world
+        mount_base_pos = self._arm_mount_base_pos(env_ids)
 
-        x = torch.cos(yaw) * (grasper_in_world[:, 0] - self.root_states[env_ids, 0]) + torch.sin(yaw) * (
-            grasper_in_world[:, 1] - self.root_states[env_ids, 1]
+        x = torch.cos(yaw) * (grasper_in_world[:, 0] - mount_base_pos[:, 0]) + torch.sin(yaw) * (
+            grasper_in_world[:, 1] - mount_base_pos[:, 1]
         )
-        y = -torch.sin(yaw) * (grasper_in_world[:, 0] - self.root_states[env_ids, 0]) + torch.cos(yaw) * (
-            grasper_in_world[:, 1] - self.root_states[env_ids, 1]
+        y = -torch.sin(yaw) * (grasper_in_world[:, 0] - mount_base_pos[:, 0]) + torch.cos(yaw) * (
+            grasper_in_world[:, 1] - mount_base_pos[:, 1]
         )
-        z = torch.mean(grasper_in_world[:, 2].unsqueeze(1) - self.measured_heights, dim=1) - 0.38
+        z = (
+            torch.mean(grasper_in_world[:, 2].unsqueeze(1) - self.measured_heights, dim=1)
+            - 0.38
+            - self.arm_mount_pos_offsets[env_ids, 2]
+        )
 
         l = torch.sqrt(x ** 2 + y ** 2 + z ** 2)
         p = torch.atan2(z, torch.sqrt(x ** 2 + y ** 2))
@@ -137,9 +147,10 @@ class WBCEnv(LeggedRobot):
         z = l * torch.sin(p)
         forward = quat_apply(self.base_quat[env_ids], self.forward_vec[env_ids])
         yaw = torch.atan2(forward[:, 1], forward[:, 0])
-        x_ = x * torch.cos(yaw) - y * torch.sin(yaw) + self.root_states[env_ids, 0]
-        y_ = x * torch.sin(yaw) + y * torch.cos(yaw) + self.root_states[env_ids, 1]
-        z_ = z + self.measured_heights + 0.38
+        mount_base_pos = self._arm_mount_base_pos(env_ids)
+        x_ = x * torch.cos(yaw) - y * torch.sin(yaw) + mount_base_pos[:, 0]
+        y_ = x * torch.sin(yaw) + y * torch.cos(yaw) + mount_base_pos[:, 1]
+        z_ = z + self.measured_heights + 0.38 + self.arm_mount_pos_offsets[env_ids, 2]
         return x_, y_, z_
 
     def _get_object_pose_in_ee(self):
@@ -332,6 +343,7 @@ class WBCEnv(LeggedRobot):
             & (self.traj_final_pos_error < self.cfg.arm.trajectory.completion_pos_threshold)
             & (self.traj_final_rot_error < self.cfg.arm.trajectory.completion_rot_threshold)
         )
+        self.traj_episode_success_buf |= self.traj_complete_buf
 
     def get_trajectory_window_obs(self):
         waypoint_ids = torch.clamp(
@@ -426,6 +438,7 @@ class WBCEnv(LeggedRobot):
         intensity = self._get_stage1_arm_curriculum_intensity()
         self.stage1_arm_curriculum_intensity = intensity
         arm_slice = slice(self.num_actions_loco, self.num_actions_loco + self.num_actions_arm)
+        arm_default = self.default_dof_pos[:, arm_slice]
 
         if intensity <= 0.0:
             self.stage1_arm_target_offset.zero_()
@@ -433,8 +446,7 @@ class WBCEnv(LeggedRobot):
             self.stage1_arm_target_accel.zero_()
             # Set actions so pos_target matches stage1_arm_fixed_dof_pos.
             # pos_target = action_scale * action + default_dof_pos
-            # → action = (fixed_pos - default_arm) / action_scale
-            arm_default = self.default_dof_pos[:, arm_slice]
+            # action = (fixed_pos - default_arm) / action_scale
             self.actions[:, arm_slice] = (
                 (self.stage1_arm_fixed_dof_pos - arm_default) / self.cfg.control.action_scale
             )
@@ -450,13 +462,17 @@ class WBCEnv(LeggedRobot):
         self.stage1_arm_target_vel[:] = torch.clamp(self.stage1_arm_target_vel, -max_vel, max_vel)
 
         self.stage1_arm_target_offset += self.stage1_arm_target_vel * self.dt
-        max_offset = self.cfg.env.stage1_arm_max_offset * intensity
-        hit_upper = self.stage1_arm_target_offset > max_offset
-        hit_lower = self.stage1_arm_target_offset < -max_offset
-        self.stage1_arm_target_offset[:] = torch.clamp(self.stage1_arm_target_offset, -max_offset, max_offset)
-        self.stage1_arm_target_vel[hit_upper | hit_lower] *= -1 # bounce back with some damping when hitting limits
 
-        self.actions[:, arm_slice] = self.stage1_arm_target_offset / self.cfg.control.action_scale # scale back since it will be multiplied by action_scale later
+        raw_target = arm_default + self.stage1_arm_target_offset
+        lower = self.dof_pos_limits[arm_slice, 0].unsqueeze(0)
+        upper = self.dof_pos_limits[arm_slice, 1].unsqueeze(0)
+        hit_limit = ((raw_target < lower) & (self.stage1_arm_target_vel < 0.0)) | (
+            (raw_target > upper) & (self.stage1_arm_target_vel > 0.0)
+        )
+        self.stage1_arm_target_vel[hit_limit] *= -1
+        target = torch.clamp(raw_target, lower, upper)
+
+        self.actions[:, arm_slice] = (target - arm_default) / self.cfg.control.action_scale
 
     def _keep_arm_fixed(self):
         arm_slice = slice(self.num_actions_loco, self.num_actions_loco + self.num_actions_arm)
@@ -566,6 +582,7 @@ class WBCEnv(LeggedRobot):
         self.traj_target_time = torch.ones(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
         self.traj_elapsed_time = torch.zeros(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
         self.traj_complete_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device, requires_grad=False)
+        self.traj_episode_success_buf = torch.zeros_like(self.traj_complete_buf)
         self.traj_final_pos_error = torch.zeros(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
         self.traj_final_rot_error = torch.zeros(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
         self.traj_ee_pose_body_history = torch.zeros(
@@ -578,6 +595,9 @@ class WBCEnv(LeggedRobot):
         self.user_vel_cmd = torch.zeros(self.num_envs, 3, dtype=torch.float, device=self.device, requires_grad=False)
         self.arm_delta_vel_cmd = torch.zeros(self.num_envs, 3, dtype=torch.float, device=self.device, requires_grad=False)
         self.prev_ee_twist_body = torch.zeros(self.num_envs, 6, dtype=torch.float, device=self.device, requires_grad=False)
+        self.arm_mount_pos_offsets = torch.zeros(
+            self.num_envs, 3, dtype=torch.float, device=self.device, requires_grad=False
+        )
 
         # Per-env arm target position when arm is fixed (intensity=0). Populated at reset
         # with randomized init noise so _keep_arm_fixed holds a varied pose, not always 0.
@@ -594,6 +614,10 @@ class WBCEnv(LeggedRobot):
         props0 = self.gym.get_actor_rigid_body_properties(self.envs[0], self.actor_handles[0])
         self.arm_default_link_masses = torch.tensor(
             [props0[i].mass for i in self.arm_body_indices],
+            dtype=torch.float, device=self.device,
+        )
+        self.arm_default_link_coms = torch.tensor(
+            [[props0[i].com.x, props0[i].com.y, props0[i].com.z] for i in self.arm_body_indices],
             dtype=torch.float, device=self.device,
         )
         self.arm_link_mass_scales = torch.ones(
@@ -644,7 +668,12 @@ class WBCEnv(LeggedRobot):
 
         p_align = self.commands_arm[:, 1]
         l_align = self.commands_arm[:, 0]
-        self.delta_z = l_align * torch.sin(p_align) + 0.38 - self.base_pos[:, 2]
+        self.delta_z = (
+            l_align * torch.sin(p_align)
+            + 0.38
+            + self.arm_mount_pos_offsets[:, 2]
+            - self.base_pos[:, 2]
+        )
 
         if global_switch.switch_open and self.cfg.hybrid.rewards.use_terminal_pitch:
             reverse_buf3 = torch.logical_and(
@@ -674,12 +703,13 @@ class WBCEnv(LeggedRobot):
         if len(env_ids) == 0:
             return
         max_level = self.cfg.arm.trajectory.curriculum_levels - 1
-        completed = self.traj_complete_buf[env_ids]
+        completed = self.traj_episode_success_buf[env_ids]
         advance_ids = env_ids[completed]
         if len(advance_ids) > 0:
             self.traj_curriculum_level[advance_ids] = torch.clamp(
                 self.traj_curriculum_level[advance_ids] + 1, max=max_level
             )
+        self.traj_episode_success_buf[env_ids] = False
 
     def _arm_post_reset_refresh_hook(self, env_ids):
         if len(env_ids) == 0:
@@ -690,6 +720,8 @@ class WBCEnv(LeggedRobot):
         self._randomize_arm_dof_props(env_ids)
         # ---- Arm rigid-body domain rand (link mass / COM) ----
         self._randomize_arm_rigid_body_props(env_ids)
+        # ---- Arm installation/mount-frame randomization ----
+        self._randomize_arm_mount_props(env_ids)
 
         # Add additive noise to arm joint positions at reset.
         # Arm default angles are 0, so the multiplicative noise in _reset_dofs has no effect;
@@ -734,6 +766,8 @@ class WBCEnv(LeggedRobot):
 
     def _randomize_arm_dof_props(self, env_ids):
         """Override arm DOF slice in Kp/Kd/strength/offset buffers with stage-specific ranges."""
+        if len(env_ids) == 0:
+            return
         arm_dr = (
             self.cfg.domain_rand.stage1_arm
             if not global_switch.switch_open
@@ -762,6 +796,29 @@ class WBCEnv(LeggedRobot):
             self.motor_offsets[env_ids, arm_slice] = torch_rand_float(
                 -r, r, (n, self.num_actions_arm), device=self.device
             )
+
+    def _arm_post_dof_randomization_hook(self, env_ids):
+        self._randomize_arm_dof_props(env_ids)
+
+    def _randomize_arm_mount_props(self, env_ids):
+        """Randomize perceived arm installation position in the robot body frame."""
+        if len(env_ids) == 0:
+            return
+        arm_dr = (
+            self.cfg.domain_rand.stage1_arm
+            if not global_switch.switch_open
+            else self.cfg.domain_rand.stage2_arm
+        )
+        if not getattr(arm_dr, "randomize_mount_pos", False):
+            self.arm_mount_pos_offsets[env_ids] = 0.0
+            return
+
+        ranges = torch.tensor(arm_dr.mount_pos_range, dtype=torch.float, device=self.device)
+        lo = ranges[:, 0].view(1, 3)
+        hi = ranges[:, 1].view(1, 3)
+        self.arm_mount_pos_offsets[env_ids] = (
+            torch.rand(len(env_ids), 3, dtype=torch.float, device=self.device) * (hi - lo) + lo
+        )
 
     def _randomize_arm_rigid_body_props(self, env_ids):
         """Randomize arm link masses and COM offsets; push to the physics engine."""
@@ -800,8 +857,8 @@ class WBCEnv(LeggedRobot):
                         * self.arm_link_mass_scales[env_id, k].item()
                     )
                 if arm_dr.randomize_link_com:
-                    dx, dy, dz = self.arm_link_com_offsets[env_id, k].tolist()
-                    props[body_idx].com = gymapi.Vec3(dx, dy, dz)
+                    com = self.arm_default_link_coms[k] + self.arm_link_com_offsets[env_id, k]
+                    props[body_idx].com = gymapi.Vec3(com[0].item(), com[1].item(), com[2].item())
             self.gym.set_actor_rigid_body_properties(
                 self.envs[env_id], self.actor_handles[env_id], props, recomputeInertia=True
             )
@@ -824,6 +881,10 @@ class WBCEnv(LeggedRobot):
             # by _arm_post_physics_hook, so this triggers exactly once per T_trajs seconds.
             traj_period = torch.clamp((self.T_trajs / self.dt).long(), min=1)
             traj_ids = (self.arm_time_buf % traj_period == 0).nonzero(as_tuple=False).flatten()
+            if len(deferred_ids) > 0 and len(traj_ids) > 0:
+                is_deferred = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+                is_deferred[deferred_ids] = True
+                traj_ids = traj_ids[~is_deferred[traj_ids]]
             self._resample_arm_commands(traj_ids)
 
         if self.cfg.domain_rand.randomize_end_effector_force:
@@ -1661,10 +1722,11 @@ class WBCEnv(LeggedRobot):
 
         forward = quat_apply(self.base_quat[0], self.forward_vec[0])
         yaw = torch.atan2(forward[1], forward[0])
+        mount_base_pos = self._arm_mount_base_pos(torch.tensor([0], device=self.device))[0]
 
-        x_ = x * torch.cos(yaw) - y * torch.sin(yaw) + self.root_states[0, 0]
-        y_ = x * torch.sin(yaw) + y * torch.cos(yaw) + self.root_states[0, 1]
-        z_ = torch.mean(z + self.measured_heights) + 0.38
+        x_ = x * torch.cos(yaw) - y * torch.sin(yaw) + mount_base_pos[0]
+        y_ = x * torch.sin(yaw) + y * torch.cos(yaw) + mount_base_pos[1]
+        z_ = torch.mean(z + self.measured_heights) + 0.38 + self.arm_mount_pos_offsets[0, 2]
         return x_, y_, z_
 
 
