@@ -191,13 +191,14 @@ class ArmDomainRandConfig:
 class DomainRandConfig:
     lag_timesteps: int = 6
     randomize_lag_timesteps: bool = False
+    randomize_action_delay: bool = True
     added_mass_range: tuple = (-2.0, 2.0)
     randomize_end_effector_force: bool = False
     max_force: float = 15
     max_force_offset: float = 0.01
     randomize_mount_pos: bool = True
     mount_pos_range: tuple = ((-0.05, 0.05), (-0.02, 0.02), (-0.05, 0.05))
-    mount_pos_buckets: int = 32
+    mount_pos_buckets: int = 16
     mount_pos_bucket_seed: int = 1234
     mount_joint_name: str = "zarx5p2_mount"
 

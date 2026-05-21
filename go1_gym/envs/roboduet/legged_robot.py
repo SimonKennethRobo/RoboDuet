@@ -210,9 +210,21 @@ class LeggedRobot(BaseTask):
         self.prev_foot_velocities = self.foot_velocities.clone()
         if not self.headless:
             self.render_gui()
-        for _ in range(self.cfg.control.decimation):
+        if getattr(self.cfg.domain_rand, "randomize_action_delay", False):
+            actions_start_decimation = torch.randint(
+                0,
+                self.cfg.control.decimation + 1,
+                (self.num_envs, 1),
+                device=self.device,
+            )
+        for i in range(self.cfg.control.decimation):
             self._arm_decimation_hook()
-            self.torques = self._compute_torques(self.actions).view(self.torques.shape)
+            if getattr(self.cfg.domain_rand, "randomize_action_delay", False):
+                use_actions = (i >= actions_start_decimation).float()
+                input_actions = (1.0 - use_actions) * self.last_actions + use_actions * self.actions
+            else:
+                input_actions = self.actions
+            self.torques = self._compute_torques(input_actions).view(self.torques.shape)
             self.gym.set_dof_actuation_force_tensor(self.sim, gymtorch.unwrap_tensor(self.torques))
             self.gym.set_dof_position_target_tensor(self.sim, gymtorch.unwrap_tensor(self.torques))
 

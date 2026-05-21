@@ -265,6 +265,7 @@ class LeggedRobotCfg(PrefixProto, cli=False):
         push_robots = True
         push_interval_s = 15
         max_push_vel_xy = 1.
+        randomize_action_delay = True
         randomize_lag_timesteps = True
         lag_timesteps = 6
 
