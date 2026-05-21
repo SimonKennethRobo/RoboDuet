@@ -10,7 +10,6 @@ from collections import deque
 
 import cv2
 import imageio
-import numpy as np
 import torch
 from params_proto import PrefixProto
 
@@ -206,6 +205,8 @@ class Runner:
         lenbuffer_eval = deque(maxlen=100)
         cur_reward_sum = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
         cur_episode_length = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
+        pending_reward_sums = []
+        pending_episode_lengths = []
         ep_infos = []
 
         mean_value_loss_arm, mean_surrogate_loss_arm, mean_adaptation_module_loss_arm = 0, 0, 0
@@ -287,8 +288,9 @@ class Runner:
                         new_ids = (dones > 0).nonzero(as_tuple=False)
 
                         new_ids_train = new_ids[new_ids < num_train_envs]
-                        rewbuffer.extend(cur_reward_sum[new_ids_train].cpu().numpy().tolist())
-                        lenbuffer.extend(cur_episode_length[new_ids_train].cpu().numpy().tolist())
+                        if len(new_ids_train) > 0:
+                            pending_reward_sums.append(cur_reward_sum[new_ids_train].detach().clone())
+                            pending_episode_lengths.append(cur_episode_length[new_ids_train].detach().clone())
                         cur_reward_sum[new_ids_train] = 0
                         cur_episode_length[new_ids_train] = 0
 
@@ -328,6 +330,12 @@ class Runner:
             self._advance_stage_schedule(it)
 
             if self.log_dir is not None:
+                if pending_reward_sums:
+                    rewbuffer.extend(torch.cat(pending_reward_sums).cpu().tolist())
+                    lenbuffer.extend(torch.cat(pending_episode_lengths).cpu().tolist())
+                    pending_reward_sums.clear()
+                    pending_episode_lengths.clear()
+
                 ep_string = f""
                 wandb_dict = {}
                 wandb_dict["Efficiency/collect_time"] = collection_time
@@ -491,7 +499,10 @@ class Runner:
         out.release()
 
     def save_io(self, frames, it):
-        writer = imageio.get_writer(osp.join(self.log_dir, f"videos/{it:06d}.mp4"), fps=int(1 / self.env.dt))
+        frame_stride = max(1, int(getattr(self.env.cfg.env, "recording_frame_stride", 1)))
+        writer = imageio.get_writer(
+            osp.join(self.log_dir, f"videos/{it:06d}.mp4"), fps=max(1, int(1 / (self.env.dt * frame_stride)))
+        )
         for frame in frames:
             writer.append_data(frame[..., :3])
         writer.close()
@@ -510,12 +521,6 @@ class Runner:
             print("LOGGING VIDEO")
 
             self.save_io(frames, it)
-
-            frames = np.stack(frames, axis=0)
-            # Channels should be (time, channel, height, width) or (batch, time, channel, height, width)
-            frames = np.transpose(frames, (0, 3, 1, 2))
-            # wandb.log({"video": wandb.Video(frames, fps=1 / self.env.dt, format='mp4')})
-            # wandb.run.summary["latest_video"] = wandb.Video(frames, fps=1 / self.env.dt, format='mp4')
 
         if self.env.num_eval_envs > 0:
             frames = self.env.get_complete_frames_eval()

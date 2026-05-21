@@ -114,12 +114,12 @@ class PPO:
         self.storage.compute_returns(last_values, PPO_Args.gamma, PPO_Args.lam)
 
     def update(self, un_adapt=False):
-        mean_value_loss = 0
-        mean_surrogate_loss = 0
-        mean_adaptation_module_loss = 0
+        value_loss_log = []
+        surrogate_loss_log = []
+        adaptation_module_loss_log = []
+        adaptation_module_test_loss_log = []
         mean_decoder_loss = 0
         mean_decoder_loss_student = 0
-        mean_adaptation_module_test_loss = 0
         mean_decoder_test_loss = 0
         mean_decoder_test_loss_student = 0
         generator = self.storage.mini_batch_generator(PPO_Args.num_mini_batches, PPO_Args.num_learning_epochs)
@@ -192,8 +192,8 @@ class PPO:
             nn.utils.clip_grad_norm_(self.actor_critic.parameters(), PPO_Args.max_grad_norm)
             self.optimizer.step()
 
-            mean_value_loss += value_loss.item()
-            mean_surrogate_loss += surrogate_loss.item()
+            value_loss_log.append(value_loss.detach())
+            surrogate_loss_log.append(surrogate_loss.detach())
 
             data_size = privileged_obs_batch.shape[0]
             num_train = int(data_size // 5 * 4)
@@ -206,8 +206,8 @@ class PPO:
                     with torch.no_grad():
                         adaptation_target = privileged_obs_batch
 
-                    selection_indices = torch.linspace(
-                        0, adaptation_pred.shape[1] - 1, steps=adaptation_pred.shape[1], dtype=torch.long
+                    selection_indices = torch.arange(
+                        adaptation_pred.shape[1], device=adaptation_pred.device, dtype=torch.long
                     )
                     if PPO_Args.selective_adaptation_module_loss:
                         # mask out indices corresponding to swing feet
@@ -224,16 +224,20 @@ class PPO:
                     adaptation_loss.backward()
                     self.adaptation_module_optimizer.step()
 
-                    mean_adaptation_module_loss += adaptation_loss.item()
-                    mean_adaptation_module_test_loss += adaptation_test_loss.item()
+                    adaptation_module_loss_log.append(adaptation_loss.detach())
+                    adaptation_module_test_loss_log.append(adaptation_test_loss.detach())
 
         num_updates = PPO_Args.num_learning_epochs * PPO_Args.num_mini_batches
-        mean_value_loss /= num_updates
-        mean_surrogate_loss /= num_updates
-        mean_adaptation_module_loss /= num_updates * PPO_Args.num_adaptation_module_substeps
+        mean_value_loss = torch.stack(value_loss_log).mean().item() if value_loss_log else 0.0
+        mean_surrogate_loss = torch.stack(surrogate_loss_log).mean().item() if surrogate_loss_log else 0.0
+        mean_adaptation_module_loss = (
+            torch.stack(adaptation_module_loss_log).mean().item() if adaptation_module_loss_log else 0.0
+        )
         mean_decoder_loss /= num_updates * PPO_Args.num_adaptation_module_substeps
         mean_decoder_loss_student /= num_updates * PPO_Args.num_adaptation_module_substeps
-        mean_adaptation_module_test_loss /= num_updates * PPO_Args.num_adaptation_module_substeps
+        mean_adaptation_module_test_loss = (
+            torch.stack(adaptation_module_test_loss_log).mean().item() if adaptation_module_test_loss_log else 0.0
+        )
         mean_decoder_test_loss /= num_updates * PPO_Args.num_adaptation_module_substeps
         mean_decoder_test_loss_student /= num_updates * PPO_Args.num_adaptation_module_substeps
         self.storage.clear()

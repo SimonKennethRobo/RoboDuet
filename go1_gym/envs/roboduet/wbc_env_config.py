@@ -132,11 +132,14 @@ class EnvConfig:
     priv_observe_vel: bool = False
     priv_observe_high_freq_goal: bool = False
     observe_two_prev_actions: bool = False
-    record_video: bool = True
+    record_video: bool = False
     recording_width_px: int = 360
     recording_height_px: int = 240
     recording_mode: str = "COLOR"
     num_recording_envs: int = 1
+    recording_frame_stride: int = 1
+    recording_overlay_text: bool = True
+    recording_overlay_trajectory: bool = True
     debug_viz: bool = False
     all_agents_share: bool = False
 
@@ -462,6 +465,9 @@ class RoboDuetCfg(LeggedRobotCfg):
         recording_height_px = ROBODUET_DEFAULTS.env.recording_height_px
         recording_mode = ROBODUET_DEFAULTS.env.recording_mode
         num_recording_envs = ROBODUET_DEFAULTS.env.num_recording_envs
+        recording_frame_stride = ROBODUET_DEFAULTS.env.recording_frame_stride
+        recording_overlay_text = ROBODUET_DEFAULTS.env.recording_overlay_text
+        recording_overlay_trajectory = ROBODUET_DEFAULTS.env.recording_overlay_trajectory
         debug_viz = ROBODUET_DEFAULTS.env.debug_viz
         all_agents_share = ROBODUET_DEFAULTS.env.all_agents_share
         stage1_arm_curriculum = True

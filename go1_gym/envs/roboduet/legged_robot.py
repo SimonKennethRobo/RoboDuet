@@ -410,10 +410,6 @@ class LeggedRobot(BaseTask):
         self.gym.refresh_actor_root_state_tensor(self.sim)
         self.gym.refresh_net_contact_force_tensor(self.sim)
         self.gym.refresh_rigid_body_state_tensor(self.sim)
-        if self.record_now:
-            self.gym.step_graphics(self.sim)
-            self.gym.render_all_camera_sensors(self.sim)
-
         self.episode_length_buf += 1
         self.common_step_counter += 1
         self.arm_time_buf += 1
@@ -1359,7 +1355,12 @@ class LeggedRobot(BaseTask):
 
     def _resample_Traj_commands(self, env_ids):
         time_range = (self.cfg.arm.commands.T_traj[1] - self.cfg.arm.commands.T_traj[0]) / self.dt
-        time_interval = torch.from_numpy(np.random.choice(int(time_range + 1), len(env_ids))).to(self.device)
+        time_interval = torch.randint(
+            0,
+            int(time_range + 1),
+            (len(env_ids),),
+            device=self.device,
+        ).to(dtype=self.T_trajs.dtype)
 
         self.T_trajs[env_ids] = (
             torch.ones_like(self.T_trajs[env_ids]) * self.cfg.arm.commands.T_traj[0] + time_interval * self.dt
@@ -1403,14 +1404,15 @@ class LeggedRobot(BaseTask):
 
         # sample from new category curricula
         new_commands, new_bin_inds = curriculum.sample(batch_size=len(env_ids))
+        new_commands = torch.as_tensor(new_commands, dtype=self.commands_dog.dtype, device=self.device)
 
         self.env_command_bins[env_ids.cpu().numpy()] = new_bin_inds
         self.env_command_categories[env_ids.cpu().numpy()] = 0
 
         if not self.cfg.hybrid.plan_vel and not self.cfg.arm.trajectory.enabled:
-            self.commands_dog[env_ids, 0] = torch.Tensor(new_commands[:, 0]).to(self.device)
-            self.commands_dog[env_ids, 1] = torch.Tensor(new_commands[:, 1]).to(self.device)
-            self.commands_dog[env_ids, 2] = torch.Tensor(new_commands[:, 2]).to(self.device)
+            self.commands_dog[env_ids, 0] = new_commands[:, 0]
+            self.commands_dog[env_ids, 1] = new_commands[:, 1]
+            self.commands_dog[env_ids, 2] = new_commands[:, 2]
             # self.commands_dog[env_ids, :2] *= (torch.norm(self.commands_dog[env_ids, :2], dim=1) > 0.1).unsqueeze(1)
 
             # # Randomly select 10% of the environment to remain stationary
@@ -1418,7 +1420,7 @@ class LeggedRobot(BaseTask):
             # zero_env_ids = torch.randperm(len(env_ids))[:num_zero_envs]
             # self.commands_dog[env_ids[zero_env_ids], :3] = 0
 
-            zero_mask = torch.rand(len(env_ids)) < 0.1
+            zero_mask = torch.rand(len(env_ids), device=self.device) < 0.1
             if len(zero_mask.nonzero()) > 0:
                 self.commands_dog[env_ids[zero_mask], :3] = 0
 
@@ -1428,16 +1430,16 @@ class LeggedRobot(BaseTask):
 
         else:
             if not global_switch.switch_open:
-                self.commands_dog[env_ids, 0] = torch.Tensor(new_commands[:, 0]).to(self.device)
-                self.commands_dog[env_ids, 1] = torch.Tensor(new_commands[:, 1]).to(self.device)
-                self.commands_dog[env_ids, 2] = torch.Tensor(new_commands[:, 2]).to(self.device)
+                self.commands_dog[env_ids, 0] = new_commands[:, 0]
+                self.commands_dog[env_ids, 1] = new_commands[:, 1]
+                self.commands_dog[env_ids, 2] = new_commands[:, 2]
 
                 # # Randomly select 10% of the environment to remain stationary
                 # num_zero_envs = int(0.1 * len(env_ids))
                 # zero_env_ids = torch.randperm(len(env_ids))[:num_zero_envs]
                 # self.commands_dog[env_ids[zero_env_ids], :3] = 0
 
-                zero_mask = torch.rand(len(env_ids)) < 0.1
+                zero_mask = torch.rand(len(env_ids), device=self.device) < 0.1
                 if len(zero_mask.nonzero()) > 0:
                     self.commands_dog[env_ids[zero_mask], :3] = 0
 
@@ -1446,15 +1448,15 @@ class LeggedRobot(BaseTask):
                 self.commands_dog[env_ids, 2] *= torch.abs(self.commands_dog[env_ids, 2]) > 0.1
 
         if not global_switch.switch_open:
-            self.commands_dog[env_ids, 3] = torch.Tensor(new_commands[:, 3]).to(self.device)
-            self.commands_dog[env_ids, 4] = torch.Tensor(new_commands[:, 4]).to(self.device)
+            self.commands_dog[env_ids, 3] = new_commands[:, 3]
+            self.commands_dog[env_ids, 4] = new_commands[:, 4]
 
         if self.cfg.commands.use_dynamic_gait and not global_switch.switch_open:
-            self.commands_dog[env_ids, 5] = torch.Tensor(new_commands[:, 5]).to(self.device)
-            self.commands_dog[env_ids, 6] = torch.Tensor(new_commands[:, 6]).to(self.device)
-            self.commands_dog[env_ids, 7] = torch.Tensor(new_commands[:, 7]).to(self.device)
-            self.commands_dog[env_ids, 8] = torch.Tensor(new_commands[:, 8]).to(self.device)
-            self.commands_dog[env_ids, 9] = torch.Tensor(new_commands[:, 9]).to(self.device)
+            self.commands_dog[env_ids, 5] = new_commands[:, 5]
+            self.commands_dog[env_ids, 6] = new_commands[:, 6]
+            self.commands_dog[env_ids, 7] = new_commands[:, 7]
+            self.commands_dog[env_ids, 8] = new_commands[:, 8]
+            self.commands_dog[env_ids, 9] = new_commands[:, 9]
             standing_mask = torch.norm(self.commands_dog[env_ids, :3], dim=1) < 0.1
             if len(standing_mask.nonzero()) > 0:
                 self.commands_dog[env_ids[standing_mask], 5] = 0.0
@@ -1581,7 +1583,12 @@ class LeggedRobot(BaseTask):
         )
 
         time_range = (self.cfg.commands.T_force_range[1] - self.cfg.commands.T_force_range[0]) / self.dt
-        time_interval = torch.from_numpy(np.random.choice(int(time_range + 1), len(env_ids))).to(self.device)
+        time_interval = torch.randint(
+            0,
+            int(time_range + 1),
+            (len(env_ids),),
+            device=self.device,
+        ).to(dtype=self.T_force.dtype)
         self.T_force[env_ids] = (
             torch.ones_like(self.T_force[env_ids]) * self.cfg.commands.T_force_range[0] + time_interval * self.dt
         )
@@ -2411,8 +2418,8 @@ class LeggedRobot(BaseTask):
         # if recording video, set up camera
         if self.cfg.env.record_video:
             self.camera_props = gymapi.CameraProperties()
-            self.camera_props.width = 640
-            self.camera_props.height = 480
+            self.camera_props.width = int(self.cfg.env.recording_width_px)
+            self.camera_props.height = int(self.cfg.env.recording_height_px)
             self.rendering_camera = self.gym.create_camera_sensor(self.envs[0], self.camera_props)
             self.gym.set_camera_location(
                 self.rendering_camera, self.envs[0], gymapi.Vec3(1.5, 1, 3.0), gymapi.Vec3(0, 0, 0)
@@ -2447,7 +2454,7 @@ class LeggedRobot(BaseTask):
 
     def _policy_command_overlay_lines(self, env_id=0):
         def vals(tensor, count):
-            return [float(tensor[env_id, i].detach().cpu()) for i in range(min(count, tensor.shape[1]))]
+            return tensor[env_id, : min(count, tensor.shape[1])].detach().cpu().tolist()
 
         lines = []
         dog = vals(self.commands_dog, min(10, self.commands_dog.shape[1]))
@@ -2456,16 +2463,22 @@ class LeggedRobot(BaseTask):
         if self.cfg.arm.trajectory.enabled:
             user = vals(self.user_vel_cmd, 3)
             extra = vals(self.arm_delta_vel_cmd, 3)
+            traj_status = torch.stack(
+                (
+                    self.traj_progress_idx[env_id].float(),
+                    self.traj_elapsed_time[env_id],
+                    self.traj_target_time[env_id],
+                    self.traj_final_pos_error[env_id],
+                    self.traj_final_rot_error[env_id],
+                )
+            ).detach().cpu().tolist()
             lines.append(f"user cmd:       vx={user[0]:+.2f} vy={user[1]:+.2f} yaw={user[2]:+.2f}")
             lines.append(f"arm->loco:      dvx={extra[0]:+.2f} dvy={extra[1]:+.2f} dyaw={extra[2]:+.2f}")
             lines.append(
-                f"traj: step={int(self.traj_progress_idx[env_id])}/{self.traj_num_waypoints - 1} "
-                f"t={float(self.traj_elapsed_time[env_id]):.2f}/{float(self.traj_target_time[env_id]):.2f}s"
+                f"traj: step={int(traj_status[0])}/{self.traj_num_waypoints - 1} "
+                f"t={traj_status[1]:.2f}/{traj_status[2]:.2f}s"
             )
-            lines.append(
-                f"traj final err: pos={float(self.traj_final_pos_error[env_id]):.3f} "
-                f"rot6d={float(self.traj_final_rot_error[env_id]):.3f}"
-            )
+            lines.append(f"traj final err: pos={traj_status[3]:.3f} rot6d={traj_status[4]:.3f}")
         else:
             arm_cmd = vals(self.commands_arm_obs, min(6, self.commands_arm_obs.shape[1]))
             lines.append(
@@ -2484,7 +2497,8 @@ class LeggedRobot(BaseTask):
 
         arm_action = vals(self.actions[:, self.num_actions_loco : self.num_actions_loco + self.num_actions_arm], self.num_actions_arm)
         lines.append("arm action: " + " ".join(f"a{i}={value:+.2f}" for i, value in enumerate(arm_action)))
-        lines.append(f"base: z={float(self.root_states[env_id, 2]):.2f} pitch={float(self.pitch[env_id]):+.2f} roll={float(self.roll[env_id]):+.2f}")
+        base_status = torch.stack((self.root_states[env_id, 2], self.pitch[env_id], self.roll[env_id])).detach().cpu().tolist()
+        lines.append(f"base: z={base_status[0]:.2f} pitch={base_status[1]:+.2f} roll={base_status[2]:+.2f}")
         return lines
 
     def _overlay_policy_text(self, frame, env_id=0):
@@ -2519,7 +2533,7 @@ class LeggedRobot(BaseTask):
         return pixels, valid
 
     def _overlay_policy_trajectory(self, frame, env_id, env_handle, camera_handle):
-        if not self.cfg.arm.trajectory.enabled:
+        if not self.cfg.env.recording_overlay_trajectory or not self.cfg.arm.trajectory.enabled:
             return
         points = self.traj_pos_world[env_id].detach().cpu().numpy().astype(np.float32)
         stride = max(1, points.shape[0] // 96)
@@ -2539,51 +2553,73 @@ class LeggedRobot(BaseTask):
             cv2.circle(frame, tuple(pixels[0]), 5, (0, 255, 255, 255), -1, cv2.LINE_AA)
 
     def _render_headless(self):
-        if self.record_now and self.complete_video_frames is not None and len(self.complete_video_frames) == 0:
+        capture_train = self._should_capture_recording_frame(eval_video=False)
+        capture_eval = self._should_capture_recording_frame(eval_video=True) and self.eval_cfg is not None
+        if not capture_train and not capture_eval:
+            return
+
+        if capture_train:
             bx, by, bz = self.root_states[0, 0], self.root_states[0, 1], self.root_states[0, 2]
             self.gym.set_camera_location(
                 self.rendering_camera, self.envs[0], gymapi.Vec3(bx, by - 1.0, bz + 1.0), gymapi.Vec3(bx, by, bz)
             )
+
+        if capture_eval:
+            bx, by, bz = (
+                self.root_states[self.num_train_envs, 0],
+                self.root_states[self.num_train_envs, 1],
+                self.root_states[self.num_train_envs, 2],
+            )
+            self.gym.set_camera_location(
+                self.rendering_camera_eval,
+                self.envs[self.num_train_envs],
+                gymapi.Vec3(bx, by - 1.0, bz + 1.0),
+                gymapi.Vec3(bx, by, bz),
+            )
+
+        self.gym.step_graphics(self.sim)
+        self.gym.render_all_camera_sensors(self.sim)
+
+        if capture_train:
             self.video_frame = self.gym.get_camera_image(
                 self.sim, self.envs[0], self.rendering_camera, gymapi.IMAGE_COLOR
             )
             self.video_frame = self.video_frame.reshape((self.camera_props.height, self.camera_props.width, 4))
             self._overlay_policy_trajectory(self.video_frame, 0, self.envs[0], self.rendering_camera)
-            self._overlay_policy_text(self.video_frame, 0)
+            if self.cfg.env.recording_overlay_text:
+                self._overlay_policy_text(self.video_frame, 0)
 
             self.video_frames.append(self.video_frame)
 
-        if (
-            self.record_eval_now
-            and self.complete_video_frames_eval is not None
-            and len(self.complete_video_frames_eval) == 0
-        ):
-            if self.eval_cfg is not None:
-                bx, by, bz = (
-                    self.root_states[self.num_train_envs, 0],
-                    self.root_states[self.num_train_envs, 1],
-                    self.root_states[self.num_train_envs, 2],
-                )
-                self.gym.set_camera_location(
-                    self.rendering_camera_eval,
-                    self.envs[self.num_train_envs],
-                    gymapi.Vec3(bx, by - 1.0, bz + 1.0),
-                    gymapi.Vec3(bx, by, bz),
-                )
-                self.video_frame_eval = self.gym.get_camera_image(
-                    self.sim, self.envs[self.num_train_envs], self.rendering_camera_eval, gymapi.IMAGE_COLOR
-                )
-                self.video_frame_eval = self.video_frame_eval.reshape(
-                    (self.camera_props.height, self.camera_props.width, 4)
-                )
-                self._overlay_policy_trajectory(
-                    self.video_frame_eval,
-                    self.num_train_envs,
-                    self.envs[self.num_train_envs],
-                    self.rendering_camera_eval,
-                )
+        if capture_eval:
+            self.video_frame_eval = self.gym.get_camera_image(
+                self.sim, self.envs[self.num_train_envs], self.rendering_camera_eval, gymapi.IMAGE_COLOR
+            )
+            self.video_frame_eval = self.video_frame_eval.reshape((self.camera_props.height, self.camera_props.width, 4))
+            self._overlay_policy_trajectory(
+                self.video_frame_eval,
+                self.num_train_envs,
+                self.envs[self.num_train_envs],
+                self.rendering_camera_eval,
+            )
+            if self.cfg.env.recording_overlay_text:
                 self._overlay_policy_text(self.video_frame_eval, self.num_train_envs)
-                self.video_frames_eval.append(self.video_frame_eval)
+            self.video_frames_eval.append(self.video_frame_eval)
+
+    def _recording_frame_due(self):
+        stride = max(1, int(getattr(self.cfg.env, "recording_frame_stride", 1)))
+        return self.common_step_counter % stride == 0
+
+    def _should_capture_recording_frame(self, eval_video=False):
+        if not self._recording_frame_due():
+            return False
+        if eval_video:
+            return (
+                self.record_eval_now
+                and self.complete_video_frames_eval is not None
+                and len(self.complete_video_frames_eval) == 0
+            )
+        return self.record_now and self.complete_video_frames is not None and len(self.complete_video_frames) == 0
 
     def start_recording(self):
         self.complete_video_frames = None
