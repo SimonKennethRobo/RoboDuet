@@ -76,8 +76,8 @@ def config_asset(Cnfg: Any):
         'widow_right_finger': 0.,
 
         "zarx_j1": 0.0,
-        "zarx_j2": 0.8,
-        "zarx_j3": 0.8,
+        "zarx_j2": 0.0,
+        "zarx_j3": 0.0,
         "zarx_j4": 0.0,
         "zarx_j5": 0.0,
         "zarx_j6": 0.0,

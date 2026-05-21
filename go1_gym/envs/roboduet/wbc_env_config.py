@@ -18,7 +18,7 @@ from .legged_robot_config import LeggedRobotCfg
 
 @dataclass(frozen=True)
 class HybridRewardTerminationConfig:
-    terminal_body_height: float = 0.1
+    terminal_body_height: float = 0.17
     use_terminal_body_height: bool = True
     use_terminal_roll: bool = False
     use_terminal_pitch: bool = False
@@ -170,6 +170,23 @@ class TerrainConfig:
 
 
 @dataclass(frozen=True)
+class ArmDomainRandConfig:
+    """Per-stage arm domain randomization (applied every episode reset)."""
+    randomize_Kp_factor: bool = True
+    Kp_factor_range: tuple = (0.9, 1.1)
+    randomize_Kd_factor: bool = True
+    Kd_factor_range: tuple = (0.9, 1.1)
+    randomize_motor_strength: bool = True
+    motor_strength_range: tuple = (0.85, 1.15)
+    randomize_motor_offset: bool = True
+    motor_offset_range: float = 0.025
+    randomize_link_mass: bool = True
+    link_mass_range: tuple = (0.85, 1.15)
+    randomize_link_com: bool = True
+    link_com_range: float = 0.01
+
+
+@dataclass(frozen=True)
 class DomainRandConfig:
     lag_timesteps: int = 6
     randomize_lag_timesteps: bool = False
@@ -178,10 +195,20 @@ class DomainRandConfig:
     max_force: float = 15
     max_force_offset: float = 0.01
 
+    stage1_arm: ArmDomainRandConfig = ArmDomainRandConfig(
+        Kp_factor_range=(0.5, 1.5),
+        Kd_factor_range=(0.2, 2.0),
+        motor_strength_range=(0.7, 1.3),
+        motor_offset_range=0.05,
+        link_mass_range=(0.1, 2),
+        link_com_range=0.1,
+    )
+    stage2_arm: ArmDomainRandConfig = ArmDomainRandConfig()
+
 
 @dataclass(frozen=True)
 class RewardConfig:
-    terminal_body_height: float = 0.1
+    terminal_body_height: float = 0.17
     use_terminal_body_height: bool = True
     manip_weight_lpy: float = 3
     manip_weight_rpy: float = 1
@@ -208,10 +235,12 @@ class HybridRewardScaleOverrideConfig:
 @dataclass(frozen=True)
 class Stage1ArmDisturbanceConfig:
     fixed_fraction: float = 0.1
+    saturation_fraction: float = 0.8
     accel_resample_time_s: float = 0.01 # 100 Hz, larger than actual ctrl freq
     max_accel: float = 10.0
     max_vel: float = 5.0
     max_offset: float = 999
+    init_dof_pos_noise: float = 1  # ±rad additive noise on arm joints at reset
 
 
 @dataclass(frozen=True)
@@ -476,6 +505,8 @@ class RoboDuetCfg(LeggedRobotCfg):
         all_agents_share = ROBODUET_DEFAULTS.env.all_agents_share
         stage1_arm_curriculum = True
         stage1_arm_fixed_fraction = ROBODUET_DEFAULTS.stage1_arm_disturbance.fixed_fraction
+        stage1_arm_saturation_fraction = ROBODUET_DEFAULTS.stage1_arm_disturbance.saturation_fraction
+        stage1_arm_init_dof_pos_noise = ROBODUET_DEFAULTS.stage1_arm_disturbance.init_dof_pos_noise
         stage1_arm_accel_resample_time_s = ROBODUET_DEFAULTS.stage1_arm_disturbance.accel_resample_time_s
         stage1_arm_max_accel = ROBODUET_DEFAULTS.stage1_arm_disturbance.max_accel
         stage1_arm_max_vel = ROBODUET_DEFAULTS.stage1_arm_disturbance.max_vel
@@ -549,6 +580,8 @@ def materialize_base_cfg(cfg, defaults, options):
     _copy_dataclass_attrs(cfg.env, defaults.env)
     cfg.env.stage1_arm_curriculum = options.stage1_arm_curriculum
     cfg.env.stage1_arm_fixed_fraction = defaults.stage1_arm_disturbance.fixed_fraction
+    cfg.env.stage1_arm_saturation_fraction = defaults.stage1_arm_disturbance.saturation_fraction
+    cfg.env.stage1_arm_init_dof_pos_noise = defaults.stage1_arm_disturbance.init_dof_pos_noise
     cfg.env.stage1_arm_accel_resample_time_s = defaults.stage1_arm_disturbance.accel_resample_time_s
     cfg.env.stage1_arm_max_accel = defaults.stage1_arm_disturbance.max_accel
     cfg.env.stage1_arm_max_vel = defaults.stage1_arm_disturbance.max_vel

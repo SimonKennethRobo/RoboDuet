@@ -47,9 +47,9 @@ def config_wtw(Cnfg: Any):
     Cnfg.domain_rand.motor_offset_range = [-0.02, 0.02]
     Cnfg.env.priv_observe_motor_offset = False
     Cnfg.domain_rand.push_robots = False
-    Cnfg.domain_rand.randomize_Kp_factor = False
+    Cnfg.domain_rand.randomize_Kp_factor = True
     Cnfg.env.priv_observe_Kp_factor = False
-    Cnfg.domain_rand.randomize_Kd_factor = False
+    Cnfg.domain_rand.randomize_Kd_factor = True
     Cnfg.env.priv_observe_Kd_factor = False
     Cnfg.env.priv_observe_body_velocity = False
     Cnfg.env.priv_observe_body_height = False

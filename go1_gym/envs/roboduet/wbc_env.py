@@ -411,9 +411,14 @@ class WBCEnv(LeggedRobot):
         stage1_iter = getattr(global_switch, "stage1_count", global_switch.count)
         progress = min(1.0, max(0.0, stage1_iter / ramp_iters))
         fixed_fraction = min(1.0, max(0.0, float(self.cfg.env.stage1_arm_fixed_fraction)))
+        saturation_fraction = min(1.0, max(fixed_fraction, float(
+            getattr(self.cfg.env, "stage1_arm_saturation_fraction", 1.0)
+        )))
         if progress <= fixed_fraction:
             return 0.0
-        return (progress - fixed_fraction) / max(1e-6, 1.0 - fixed_fraction)
+        if progress >= saturation_fraction:
+            return 1.0
+        return (progress - fixed_fraction) / max(1e-6, saturation_fraction - fixed_fraction)
 
     def _apply_stage1_arm_curriculum_actions(self):
         if not self._stage1_arm_curriculum_active():
@@ -426,7 +431,13 @@ class WBCEnv(LeggedRobot):
             self.stage1_arm_target_offset.zero_()
             self.stage1_arm_target_vel.zero_()
             self.stage1_arm_target_accel.zero_()
-            self.actions[:, arm_slice] = 0.0
+            # Set actions so pos_target matches stage1_arm_fixed_dof_pos.
+            # pos_target = action_scale * action + default_dof_pos
+            # → action = (fixed_pos - default_arm) / action_scale
+            arm_default = self.default_dof_pos[:, arm_slice]
+            self.actions[:, arm_slice] = (
+                (self.stage1_arm_fixed_dof_pos - arm_default) / self.cfg.control.action_scale
+            )
             return
 
         resample_steps = max(1, int(self.cfg.env.stage1_arm_accel_resample_time_s / self.dt))
@@ -448,19 +459,28 @@ class WBCEnv(LeggedRobot):
         self.actions[:, arm_slice] = self.stage1_arm_target_offset / self.cfg.control.action_scale # scale back since it will be multiplied by action_scale later
 
     def _keep_arm_fixed(self):
-        if global_switch.switch_open:
-            idx = self.num_actions_loco + self.num_actions_arm
-        elif self._stage1_arm_curriculum_active():
-            idx = (
-                self.num_actions_loco + self.num_actions_arm
-                if self._get_stage1_arm_curriculum_intensity() > 0.0
-                else self.num_actions_loco
-            )
-        else:
-            idx = self.num_actions_loco
+        arm_slice = slice(self.num_actions_loco, self.num_actions_loco + self.num_actions_arm)
 
-        self.dof_pos[:, idx:] = self.default_dof_pos[:, idx:]
-        self.dof_vel[:, idx:] = 0.0
+        if global_switch.switch_open:
+            # Stage2: arm is controlled by policy, nothing to fix.
+            return
+        elif self._stage1_arm_curriculum_active():
+            intensity = self._get_stage1_arm_curriculum_intensity()
+            if intensity > 0.0:
+                # Curriculum active: arm moves via position targets from _apply_stage1_arm_curriculum_actions.
+                # Fix DOFs beyond the arm (none exist, but harmless).
+                idx = self.num_actions_loco + self.num_actions_arm
+                self.dof_pos[:, idx:] = self.default_dof_pos[:, idx:]
+                self.dof_vel[:, idx:] = 0.0
+            else:
+                # Fixed phase: hold the per-env randomized reset position.
+                self.dof_pos[:, arm_slice] = self.stage1_arm_fixed_dof_pos
+                self.dof_vel[:, arm_slice] = 0.0
+        else:
+            # No curriculum: fix arm at per-env randomized reset position.
+            self.dof_pos[:, arm_slice] = self.stage1_arm_fixed_dof_pos
+            self.dof_vel[:, arm_slice] = 0.0
+
         ret = self.gym.set_dof_state_tensor(self.sim, gymtorch.unwrap_tensor(self.dof_state))
         assert ret, "[ERROR] Failed to set dof state."
 
@@ -559,6 +579,30 @@ class WBCEnv(LeggedRobot):
         self.arm_delta_vel_cmd = torch.zeros(self.num_envs, 3, dtype=torch.float, device=self.device, requires_grad=False)
         self.prev_ee_twist_body = torch.zeros(self.num_envs, 6, dtype=torch.float, device=self.device, requires_grad=False)
 
+        # Per-env arm target position when arm is fixed (intensity=0). Populated at reset
+        # with randomized init noise so _keep_arm_fixed holds a varied pose, not always 0.
+        arm_default = self.default_dof_pos[
+            :, self.num_actions_loco : self.num_actions_loco + self.num_actions_arm
+        ]
+        self.stage1_arm_fixed_dof_pos = arm_default.expand(self.num_envs, -1).clone()
+
+        # Arm rigid-body domain rand buffers
+        arm_body_names = [n for n in self.body_names if "zarx" in n.lower()]
+        self.arm_body_indices = [self.body_names.index(n) for n in arm_body_names]
+        n_arm_bodies = len(self.arm_body_indices)
+        # Default masses fetched from env 0 actor (available after _create_envs)
+        props0 = self.gym.get_actor_rigid_body_properties(self.envs[0], self.actor_handles[0])
+        self.arm_default_link_masses = torch.tensor(
+            [props0[i].mass for i in self.arm_body_indices],
+            dtype=torch.float, device=self.device,
+        )
+        self.arm_link_mass_scales = torch.ones(
+            self.num_envs, n_arm_bodies, dtype=torch.float, device=self.device
+        )
+        self.arm_link_com_offsets = torch.zeros(
+            self.num_envs, n_arm_bodies, 3, dtype=torch.float, device=self.device
+        )
+
         # Deferred resample: set at episode reset, cleared after first post-simulate step.
         # Avoids using stale FK state (set_dof_state_tensor_indexed does not propagate FK
         # until the next gym.simulate() call).
@@ -622,9 +666,8 @@ class WBCEnv(LeggedRobot):
             self._update_traj_curriculum(env_ids)
         elif not self.cfg.arm.trajectory.enabled:
             self._resample_arm_commands(env_ids)
-        self.stage1_arm_target_offset[env_ids] = 0.0
-        self.stage1_arm_target_vel[env_ids] = 0.0
-        self.stage1_arm_target_accel[env_ids] = 0.0
+        # stage1_arm_target_offset / vel / accel are re-initialised in
+        # _arm_post_reset_refresh_hook (after the randomised dof_pos is known).
         self.prev_ee_twist_body[env_ids] = 0.0
 
     def _update_traj_curriculum(self, env_ids):
@@ -639,14 +682,129 @@ class WBCEnv(LeggedRobot):
             )
 
     def _arm_post_reset_refresh_hook(self, env_ids):
+        if len(env_ids) == 0:
+            return
+
+        # ---- Arm DOF domain rand (Kp/Kd/strength/offset) ----
+        # Must override the arm slice AFTER _randomize_dof_props has set leg-wide values.
+        self._randomize_arm_dof_props(env_ids)
+        # ---- Arm rigid-body domain rand (link mass / COM) ----
+        self._randomize_arm_rigid_body_props(env_ids)
+
+        # Add additive noise to arm joint positions at reset.
+        # Arm default angles are 0, so the multiplicative noise in _reset_dofs has no effect;
+        # we apply ±noise [rad] here instead.
+        noise = getattr(self.cfg.env, "stage1_arm_init_dof_pos_noise", 0.0)
+        if noise > 0.0:
+            arm_slice = slice(self.num_actions_loco, self.num_actions_loco + self.num_actions_arm)
+            self.dof_pos[env_ids, arm_slice] += torch_rand_float(
+                -noise, noise,
+                (len(env_ids), self.num_actions_arm),
+                device=self.device,
+            )
+            # Clamp to DOF limits to avoid out-of-range positions
+            self.dof_pos[env_ids] = torch.clamp(
+                self.dof_pos[env_ids],
+                self.dof_pos_limits[:, 0],
+                self.dof_pos_limits[:, 1],
+            )
+            env_ids_int32 = env_ids.to(dtype=torch.int32)
+            self.gym.set_dof_state_tensor_indexed(
+                self.sim,
+                gymtorch.unwrap_tensor(self.dof_state),
+                gymtorch.unwrap_tensor(env_ids_int32),
+                len(env_ids_int32),
+            )
+
+        # Unified initial arm state: record the randomized position and initialise the
+        # curriculum offset so both fix (intensity=0) and disturbance (intensity>0) phases
+        # start from the same randomised joint configuration.
+        arm_slice = slice(self.num_actions_loco, self.num_actions_loco + self.num_actions_arm)
+        self.stage1_arm_fixed_dof_pos[env_ids] = self.dof_pos[env_ids, arm_slice].clone()
+
+        arm_default = self.default_dof_pos[:, arm_slice]  # (1, num_actions_arm)
+        self.stage1_arm_target_offset[env_ids] = self.stage1_arm_fixed_dof_pos[env_ids] - arm_default
+        self.stage1_arm_target_vel[env_ids] = 0.0
+        self.stage1_arm_target_accel[env_ids] = 0.0
+
         if not self.cfg.arm.trajectory.enabled:
             return
-        # Do NOT resample here: set_dof_state_tensor_indexed does not propagate FK until
-        # the next gym.simulate() call, so end_effector_state is still the end-of-episode
-        # position.  Mark these envs for deferred resample in _arm_post_callback_hook, which
-        # runs AFTER the first physics step of the new episode.
-        if len(env_ids) > 0:
-            self.traj_deferred_resample[env_ids] = True
+        # Deferred trajectory resample (FK not valid until next simulate()).
+        self.traj_deferred_resample[env_ids] = True
+
+    def _randomize_arm_dof_props(self, env_ids):
+        """Override arm DOF slice in Kp/Kd/strength/offset buffers with stage-specific ranges."""
+        arm_dr = (
+            self.cfg.domain_rand.stage1_arm
+            if not global_switch.switch_open
+            else self.cfg.domain_rand.stage2_arm
+        )
+        arm_slice = slice(self.num_actions_loco, self.num_actions_loco + self.num_actions_arm)
+        n = len(env_ids)
+
+        if arm_dr.randomize_Kp_factor:
+            lo, hi = arm_dr.Kp_factor_range
+            self.Kp_factors[env_ids, arm_slice] = (
+                torch.rand(n, self.num_actions_arm, device=self.device) * (hi - lo) + lo
+            )
+        if arm_dr.randomize_Kd_factor:
+            lo, hi = arm_dr.Kd_factor_range
+            self.Kd_factors[env_ids, arm_slice] = (
+                torch.rand(n, self.num_actions_arm, device=self.device) * (hi - lo) + lo
+            )
+        if arm_dr.randomize_motor_strength:
+            lo, hi = arm_dr.motor_strength_range
+            self.motor_strengths[env_ids, arm_slice] = (
+                torch.rand(n, self.num_actions_arm, device=self.device) * (hi - lo) + lo
+            )
+        if arm_dr.randomize_motor_offset:
+            r = arm_dr.motor_offset_range
+            self.motor_offsets[env_ids, arm_slice] = torch_rand_float(
+                -r, r, (n, self.num_actions_arm), device=self.device
+            )
+
+    def _randomize_arm_rigid_body_props(self, env_ids):
+        """Randomize arm link masses and COM offsets; push to the physics engine."""
+        arm_dr = (
+            self.cfg.domain_rand.stage1_arm
+            if not global_switch.switch_open
+            else self.cfg.domain_rand.stage2_arm
+        )
+        if not self.arm_body_indices:
+            return
+        if not arm_dr.randomize_link_mass and not arm_dr.randomize_link_com:
+            return
+
+        n = len(env_ids)
+        n_arm = len(self.arm_body_indices)
+
+        if arm_dr.randomize_link_mass:
+            lo, hi = arm_dr.link_mass_range
+            self.arm_link_mass_scales[env_ids] = (
+                torch.rand(n, n_arm, device=self.device) * (hi - lo) + lo
+            )
+        if arm_dr.randomize_link_com:
+            r = arm_dr.link_com_range
+            self.arm_link_com_offsets[env_ids] = (
+                torch.rand(n, n_arm, 3, device=self.device) * 2 * r - r
+            )
+
+        for env_id in env_ids.tolist():
+            props = self.gym.get_actor_rigid_body_properties(
+                self.envs[env_id], self.actor_handles[env_id]
+            )
+            for k, body_idx in enumerate(self.arm_body_indices):
+                if arm_dr.randomize_link_mass:
+                    props[body_idx].mass = (
+                        self.arm_default_link_masses[k].item()
+                        * self.arm_link_mass_scales[env_id, k].item()
+                    )
+                if arm_dr.randomize_link_com:
+                    dx, dy, dz = self.arm_link_com_offsets[env_id, k].tolist()
+                    props[body_idx].com = gymapi.Vec3(dx, dy, dz)
+            self.gym.set_actor_rigid_body_properties(
+                self.envs[env_id], self.actor_handles[env_id], props, recomputeInertia=True
+            )
 
     def _arm_resample_commands_train_hook(self, env_ids):
         if self.cfg.arm.trajectory.enabled and global_switch.switch_open:

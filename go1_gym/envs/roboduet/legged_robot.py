@@ -1141,12 +1141,24 @@ class LeggedRobot(BaseTask):
             self.root_states[env_ids] = self.base_init_state
             self.root_states[env_ids, :3] += self.env_origins[env_ids]
 
-        # base yaws
+        # base orientation: yaw / pitch / roll each randomized independently
         init_yaws = torch_rand_float(
             -cfg.terrain.yaw_init_range, cfg.terrain.yaw_init_range, (len(env_ids), 1), device=self.device
         )
-        quat = quat_from_angle_axis(init_yaws, torch.Tensor([0, 0, 1]).to(self.device))[:, 0, :]
-        self.root_states[env_ids, 3:7] = quat
+        init_pitches = torch_rand_float(
+            -getattr(cfg.terrain, "pitch_init_range", 0.0),
+            getattr(cfg.terrain, "pitch_init_range", 0.0),
+            (len(env_ids), 1), device=self.device,
+        )
+        init_rolls = torch_rand_float(
+            -getattr(cfg.terrain, "roll_init_range", 0.0),
+            getattr(cfg.terrain, "roll_init_range", 0.0),
+            (len(env_ids), 1), device=self.device,
+        )
+        q_yaw = quat_from_angle_axis(init_yaws, torch.Tensor([0, 0, 1]).to(self.device))[:, 0, :]
+        q_pitch = quat_from_angle_axis(init_pitches, torch.Tensor([0, 1, 0]).to(self.device))[:, 0, :]
+        q_roll = quat_from_angle_axis(init_rolls, torch.Tensor([1, 0, 0]).to(self.device))[:, 0, :]
+        self.root_states[env_ids, 3:7] = quat_mul(q_yaw, quat_mul(q_pitch, q_roll))
 
         # base velocities
         self.root_states[env_ids, 7:13] = torch_rand_float(
