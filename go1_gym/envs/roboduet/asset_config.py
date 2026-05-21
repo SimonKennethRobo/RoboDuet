@@ -11,6 +11,7 @@ def config_asset(Cnfg: Any):
         "gripper", "thigh", "calf",
         "Head"
     ]
+    Cnfg.asset.arm_contact_bodies = ["zarx_body"]
 
     Cnfg.asset.terminate_after_contacts_on = ['']
 

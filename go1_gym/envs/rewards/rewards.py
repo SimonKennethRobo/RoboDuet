@@ -187,6 +187,12 @@ class Rewards:
         return torch.sum(1. * (torch.norm(self.env.contact_forces[:, self.env.penalised_contact_indices, :], dim=-1) > 0.1),
                          dim=1)
 
+    def _reward_arm_contact(self):
+        return torch.sum(
+            1.0 * (torch.norm(self.env.contact_forces[:, self.env.arm_contact_indices, :], dim=-1) > 0.1),
+            dim=1,
+        )
+
     def _reward_dof_pos_limits(self):
         # Penalize dof positions too close to the limit
         out_of_limits = -(self.env.dof_pos - self.env.dof_pos_limits[:, 0]).clip(max=0.)  # lower limit

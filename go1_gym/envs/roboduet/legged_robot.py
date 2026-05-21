@@ -1094,7 +1094,7 @@ class LeggedRobot(BaseTask):
             self.measured_heights = self._get_heights(torch.arange(self.num_envs, device=self.device), self.cfg)
 
         # push robots
-        # self._push_robots(torch.arange(self.num_envs, device=self.device), self.cfg)
+        self._push_robots(torch.arange(self.num_envs, device=self.device), self.cfg)
 
         # randomize dof properties
         env_ids = (
@@ -1207,13 +1207,20 @@ class LeggedRobot(BaseTask):
     def _push_robots(self, env_ids, cfg):
         """Random pushes the robots. Emulates an impulse by setting a randomized base velocity."""
         if cfg.domain_rand.push_robots:
-            env_ids = env_ids[self.episode_length_buf[env_ids] % int(cfg.domain_rand.push_interval) == 0]
+            push_env_ids = env_ids[self.episode_length_buf[env_ids] % int(cfg.domain_rand.push_interval) == 0]
+            if len(push_env_ids) == 0:
+                return
 
             max_vel = cfg.domain_rand.max_push_vel_xy
-            self.root_states[env_ids, 7:9] = torch_rand_float(
-                -max_vel, max_vel, (len(env_ids), 2), device=self.device
-            )  # lin vel x/y
-            self.gym.set_actor_root_state_tensor(self.sim, gymtorch.unwrap_tensor(self.root_states))
+            max_push_ang = cfg.domain_rand.max_push_ang_vel
+            self.root_states[:, 7:9] = torch_rand_float(-max_vel, max_vel, (self.num_envs, 2), device=self.device)
+            self.root_states[:, 10:13] = torch_rand_float(-max_push_ang, max_push_ang, (self.num_envs, 3), device=self.device)
+
+            env_ids_int32 = push_env_ids.to(dtype=torch.int32)
+            self.gym.set_actor_root_state_tensor_indexed(
+                self.sim, gymtorch.unwrap_tensor(self.root_states),
+                gymtorch.unwrap_tensor(env_ids_int32), len(env_ids_int32)
+            )
 
     def _teleport_robots(self, env_ids, cfg):
         """Teleports any robots that are too close to the edge to the other side"""
@@ -1777,6 +1784,10 @@ class LeggedRobot(BaseTask):
         penalized_contact_names = []
         for name in self.cfg.asset.penalize_contacts_on:
             penalized_contact_names.extend([s for s in body_names if name in s])
+        arm_contact_names = []
+        for name in getattr(self.cfg.asset, "arm_contact_bodies", []):
+            arm_contact_names.extend([s for s in body_names if name in s])
+        arm_contact_names = list(dict.fromkeys(arm_contact_names))
         termination_contact_names = []
         for name in self.cfg.asset.terminate_after_contacts_on:
             termination_contact_names.extend([s for s in body_names if name in s])
@@ -1857,6 +1868,14 @@ class LeggedRobot(BaseTask):
                 self.envs[0], self.actor_handles[0], penalized_contact_names[i]
             )
 
+        self.arm_contact_indices = torch.zeros(
+            len(arm_contact_names), dtype=torch.long, device=self.device, requires_grad=False
+        )
+        for i in range(len(arm_contact_names)):
+            self.arm_contact_indices[i] = self.gym.find_actor_rigid_body_handle(
+                self.envs[0], self.actor_handles[0], arm_contact_names[i]
+            )
+
         self.termination_contact_indices = torch.zeros(
             len(termination_contact_names), dtype=torch.long, device=self.device, requires_grad=False
         )
@@ -1875,6 +1894,7 @@ class LeggedRobot(BaseTask):
 
         print("self.body_names: ", body_names)
         print("self.dof_names: ", self.dof_names)
+        print("self.arm_contact_indices", self.arm_contact_indices)
         print("self.termination_contact_indices", self.termination_contact_indices)
         print("self.hip_joints_indices", self.hip_body_indices)
 

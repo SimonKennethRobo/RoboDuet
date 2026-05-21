@@ -45,6 +45,7 @@ class HybridRewardScaleConfig:
     trajectory_completion_time: float = 0.0
     arm_delta_vel_cmd: float = 0.0
     ee_smoothness: float = 0.0
+    arm_contact: float = -1.0
 
 
 @dataclass(frozen=True)
@@ -419,6 +420,7 @@ class RoboDuetCfg(LeggedRobotCfg):
             trajectory_completion_time = ROBODUET_DEFAULTS.hybrid.reward_scales.trajectory_completion_time
             arm_delta_vel_cmd = ROBODUET_DEFAULTS.hybrid.reward_scales.arm_delta_vel_cmd
             ee_smoothness = ROBODUET_DEFAULTS.hybrid.reward_scales.ee_smoothness
+            arm_contact = ROBODUET_DEFAULTS.hybrid.reward_scales.arm_contact
 
     class arm(PrefixProto, cli=False):
         num_actions_arm = ROBODUET_DEFAULTS.arm.num_actions_arm
