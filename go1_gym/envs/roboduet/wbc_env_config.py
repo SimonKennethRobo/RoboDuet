@@ -4,7 +4,7 @@ This module is the source of truth for RoboDuet-specific defaults. The
 `legged_robot_config.py` module only provides the base Cfg schema.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import math
 
 from params_proto import PrefixProto
@@ -73,17 +73,20 @@ class ArmCommandConfig:
 @dataclass(frozen=True)
 class ArmTrajectoryConfig:
     enabled: bool = False
+    traj_type: list = field(default_factory=lambda: ["line", "s_curve"])
     window_offsets: tuple = (0, 1, 2, 4, 8, 16, 32, 64)
     num_waypoints: int = 96
-    start_radius: float = 0.05
-    length: float = 0.35
-    s_curve_amplitude: float = 0.08
+    start_radius: float = 0.0
+    length_range: tuple = (0.10, 0.45)
+    s_curve_amplitude_range: tuple = (0.02, 0.12)
     s_curve_frequency: float = 1.0
-    circle_radius: float = 0.15
+    circle_radius: float = 0.5
     circle_turns: float = 1.0
-    completion_time_range: tuple = (2.0, 3.0)
+    completion_time_range: tuple = (2.0, 5.0)
     completion_pos_threshold: float = 0.05
     completion_rot_threshold: float = 0.25
+    curriculum_levels: int = 6
+    curriculum_success_threshold: float = 0.6
     delta_vel_limit: tuple = (0.4, 0.25, 0.6)
     user_cmd_mode: str = "zero"
     user_lin_vel_x: tuple = (-0.3, 0.3)
@@ -207,8 +210,8 @@ class HybridRewardScaleOverrideConfig:
 class Stage1ArmDisturbanceConfig:
     fixed_fraction: float = 0.1
     accel_resample_time_s: float = 0.5
-    max_accel: float = 2.0
-    max_vel: float = 1.0
+    max_accel: float = 5.0
+    max_vel: float = 5.0
     max_offset: float = 0.35
 
 
@@ -405,11 +408,12 @@ class RoboDuetCfg(LeggedRobotCfg):
 
         class trajectory(PrefixProto, cli=False):
             enabled = ROBODUET_DEFAULTS.arm.trajectory.enabled
+            traj_type = list(ROBODUET_DEFAULTS.arm.trajectory.traj_type)
             window_offsets = list(ROBODUET_DEFAULTS.arm.trajectory.window_offsets)
             num_waypoints = ROBODUET_DEFAULTS.arm.trajectory.num_waypoints
             start_radius = ROBODUET_DEFAULTS.arm.trajectory.start_radius
-            length = ROBODUET_DEFAULTS.arm.trajectory.length
-            s_curve_amplitude = ROBODUET_DEFAULTS.arm.trajectory.s_curve_amplitude
+            length_range = list(ROBODUET_DEFAULTS.arm.trajectory.length_range)
+            s_curve_amplitude_range = list(ROBODUET_DEFAULTS.arm.trajectory.s_curve_amplitude_range)
             s_curve_frequency = ROBODUET_DEFAULTS.arm.trajectory.s_curve_frequency
             circle_radius = ROBODUET_DEFAULTS.arm.trajectory.circle_radius
             circle_turns = ROBODUET_DEFAULTS.arm.trajectory.circle_turns
@@ -424,6 +428,8 @@ class RoboDuetCfg(LeggedRobotCfg):
             pos_error_scale = ROBODUET_DEFAULTS.arm.trajectory.pos_error_scale
             rot_error_scale = ROBODUET_DEFAULTS.arm.trajectory.rot_error_scale
             completion_time_sigma = ROBODUET_DEFAULTS.arm.trajectory.completion_time_sigma
+            curriculum_levels = ROBODUET_DEFAULTS.arm.trajectory.curriculum_levels
+            curriculum_success_threshold = ROBODUET_DEFAULTS.arm.trajectory.curriculum_success_threshold
 
         class obs_scales(PrefixProto, cli=False):
             l = 1.0

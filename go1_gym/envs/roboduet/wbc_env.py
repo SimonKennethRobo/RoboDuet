@@ -186,8 +186,22 @@ class WBCEnv(LeggedRobot):
         else:
             self.user_vel_cmd[env_ids] = 0.0
 
+    def _traj_curriculum_params(self, env_ids):
+        """Interpolate length and s_curve_amplitude from curriculum level."""
+        max_level = max(1, self.cfg.arm.trajectory.curriculum_levels - 1)
+        difficulty = self.traj_curriculum_level[env_ids].float() / max_level  # (n,)
+
+        lo, hi = self.cfg.arm.trajectory.length_range
+        length = lo + (hi - lo) * difficulty
+
+        lo_a, hi_a = self.cfg.arm.trajectory.s_curve_amplitude_range
+        s_amplitude = lo_a + (hi_a - lo_a) * difficulty
+
+        return length, s_amplitude
+
     def _resample_trajectory_commands(self, env_ids):
         self._resample_user_commands(env_ids)
+        length, s_amplitude = self._traj_curriculum_params(env_ids)
         traj_pos, traj_quat, target_time = sample_trajectory_commands(
             self.cfg,
             self.end_effector_state,
@@ -195,6 +209,8 @@ class WBCEnv(LeggedRobot):
             env_ids,
             self.traj_num_waypoints,
             self.device,
+            length=length,
+            s_curve_amplitude=s_amplitude,
         )
         self.traj_pos_world[env_ids] = traj_pos
         self.traj_quat_world[env_ids] = traj_quat
@@ -543,6 +559,17 @@ class WBCEnv(LeggedRobot):
         self.arm_delta_vel_cmd = torch.zeros(self.num_envs, 3, dtype=torch.float, device=self.device, requires_grad=False)
         self.prev_ee_twist_body = torch.zeros(self.num_envs, 6, dtype=torch.float, device=self.device, requires_grad=False)
 
+        # Deferred resample: set at episode reset, cleared after first post-simulate step.
+        # Avoids using stale FK state (set_dof_state_tensor_indexed does not propagate FK
+        # until the next gym.simulate() call).
+        self.traj_deferred_resample = torch.ones(
+            self.num_envs, dtype=torch.bool, device=self.device, requires_grad=False
+        )
+
+        self.traj_curriculum_level = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device, requires_grad=False
+        )
+
     def _arm_pre_step_hook(self):
         self._apply_stage1_arm_curriculum_actions()
 
@@ -591,22 +618,35 @@ class WBCEnv(LeggedRobot):
             self.reverse_buf = self.reverse_buf & time_exceed_half
 
     def _arm_reset_hook(self, env_ids):
-        if not self.cfg.arm.trajectory.enabled:
+        if self.cfg.arm.trajectory.enabled and global_switch.switch_open:
+            self._update_traj_curriculum(env_ids)
+        elif not self.cfg.arm.trajectory.enabled:
             self._resample_arm_commands(env_ids)
         self.stage1_arm_target_offset[env_ids] = 0.0
         self.stage1_arm_target_vel[env_ids] = 0.0
         self.stage1_arm_target_accel[env_ids] = 0.0
         self.prev_ee_twist_body[env_ids] = 0.0
 
+    def _update_traj_curriculum(self, env_ids):
+        if len(env_ids) == 0:
+            return
+        max_level = self.cfg.arm.trajectory.curriculum_levels - 1
+        completed = self.traj_complete_buf[env_ids]
+        advance_ids = env_ids[completed]
+        if len(advance_ids) > 0:
+            self.traj_curriculum_level[advance_ids] = torch.clamp(
+                self.traj_curriculum_level[advance_ids] + 1, max=max_level
+            )
+
     def _arm_post_reset_refresh_hook(self, env_ids):
         if not self.cfg.arm.trajectory.enabled:
             return
-        self.gym.refresh_actor_root_state_tensor(self.sim)
-        self.gym.refresh_rigid_body_state_tensor(self.sim)
-        self.base_pos[:] = self.root_states[: self.num_envs, 0:3]
-        self.base_quat[:] = self.root_states[: self.num_envs, 3:7]
-        self.end_effector_state[:] = self.rigid_body_state.view(self.num_envs, self.num_bodies, 13)[:, self.ee_idx]
-        self._resample_arm_commands(env_ids)
+        # Do NOT resample here: set_dof_state_tensor_indexed does not propagate FK until
+        # the next gym.simulate() call, so end_effector_state is still the end-of-episode
+        # position.  Mark these envs for deferred resample in _arm_post_callback_hook, which
+        # runs AFTER the first physics step of the new episode.
+        if len(env_ids) > 0:
+            self.traj_deferred_resample[env_ids] = True
 
     def _arm_resample_commands_train_hook(self, env_ids):
         if self.cfg.arm.trajectory.enabled and global_switch.switch_open:
@@ -615,6 +655,15 @@ class WBCEnv(LeggedRobot):
 
     def _arm_post_callback_hook(self):
         if global_switch.switch_open:
+            # Deferred resample: FK is now valid (after gym.simulate()), sample trajectory
+            # from the correct post-reset EE position.
+            deferred_ids = self.traj_deferred_resample.nonzero(as_tuple=False).flatten()
+            if len(deferred_ids) > 0:
+                self._resample_arm_commands(deferred_ids)
+                self.traj_deferred_resample[deferred_ids] = False
+
+            # Periodic resample: arm_time_buf is reset to 0 on resample, then incremented
+            # by _arm_post_physics_hook, so this triggers exactly once per T_trajs seconds.
             traj_period = torch.clamp((self.T_trajs / self.dt).long(), min=1)
             traj_ids = (self.arm_time_buf % traj_period == 0).nonzero(as_tuple=False).flatten()
             self._resample_arm_commands(traj_ids)
@@ -836,8 +885,15 @@ class WBCEnv(LeggedRobot):
             t_tgt = self.traj_target_time[env_id].item()
             pos_err = self.traj_final_pos_error[env_id].item()
             rot_err = self.traj_final_rot_error[env_id].item()
+            cur_lvl = int(self.traj_curriculum_level[env_id].item())
+            max_lvl = self.cfg.arm.trajectory.curriculum_levels - 1
+            max_level = max(1, max_lvl)
+            difficulty = cur_lvl / max_level
+            lo, hi = self.cfg.arm.trajectory.length_range
+            cur_len = lo + (hi - lo) * difficulty
             right.append(f"traj {traj_step}/{self.traj_num_waypoints - 1}  t={t_el:.1f}/{t_tgt:.1f}s")
             right.append(f"err pos={pos_err:.3f}  rot={rot_err:.3f}")
+            right.append(f"curriculum lv={cur_lvl}/{max_lvl}  len={cur_len:.2f}")
 
         if arm_open:
             arm_action = vals(

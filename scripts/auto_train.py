@@ -87,7 +87,13 @@ def main(arg):
         dir=f"{MINI_GYM_ROOT_DIR}",
     )
 
-    args.log_dir = osp.join(f"{MINI_GYM_ROOT_DIR}/runs", wandb.run.name)
+    if args.debug:
+        args.log_dir = osp.join(
+            f"{MINI_GYM_ROOT_DIR}/runs",
+            f"{now.strftime('%Y-%m-%d')}/debug_{args.run_name}_{now.strftime('%H%M%S')}",
+        )
+    else:
+        args.log_dir = osp.join(f"{MINI_GYM_ROOT_DIR}/runs", wandb.run.name)
     print(f"Logging to {args.log_dir}")
     args.log_dir += f"_seed{args.seed}"
 
@@ -111,23 +117,12 @@ def main(arg):
                 f"{args.log_dir}/scripts/legged_robot_config.py",
             )
             shutil.copyfile(
-                f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet/__init__.py", f"{args.log_dir}/scripts/env__init__.py"
-            )
-            shutil.copyfile(
                 f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet/wbc_env.py",
                 f"{args.log_dir}/scripts/wbc_env.py",
             )
             shutil.copyfile(
-                f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet/observation_builder.py",
-                f"{args.log_dir}/scripts/observation_builder.py",
-            )
-            shutil.copyfile(
                 f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet/trajectory_geometry.py",
                 f"{args.log_dir}/scripts/trajectory_geometry.py",
-            )
-            shutil.copyfile(
-                f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet/stage_schedule.py",
-                f"{args.log_dir}/scripts/stage_schedule.py",
             )
             shutil.copyfile(
                 f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet/wbc_env_config.py",
@@ -142,21 +137,11 @@ def main(arg):
             shutil.copyfile(
                 f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/go1/wtw_config.py", f"{args.log_dir}/scripts/wtw_config.py"
             )
-
-            shutil.copyfile(
-                f"{MINI_GYM_ROOT_DIR}/go1_gym_learn/ppo_cse_automatic/__init__.py",
-                f"{args.log_dir}/scripts/ppo_cse_automatic__init__.py",
-            )
             shutil.copyfile(
                 f"{MINI_GYM_ROOT_DIR}/go1_gym_learn/ppo_cse_automatic/arm_ac.py", f"{args.log_dir}/scripts/arm_ac.py"
             )
             shutil.copyfile(
                 f"{MINI_GYM_ROOT_DIR}/go1_gym_learn/ppo_cse_automatic/dog_ac.py", f"{args.log_dir}/scripts/dog_ac.py"
-            )
-            shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/go1_gym_learn/ppo_cse_automatic/ppo.py", f"{args.log_dir}/scripts/ppo.py")
-            shutil.copyfile(
-                f"{MINI_GYM_ROOT_DIR}/go1_gym_learn/ppo_cse_automatic/rollout_storage.py",
-                f"{args.log_dir}/scripts/rollout_storage.py",
             )
 
         wandb.run.log_code(f"{args.log_dir}/scripts")
