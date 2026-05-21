@@ -4,9 +4,8 @@ assert isaacgym
 import torch
 import argparse
 
-from go1_gym.envs.roboduet.legged_robot_config import Cfg
 from go1_gym.envs.roboduet.stage_schedule import StageSchedule, apply_hybrid_reward_settings
-from go1_gym.envs.roboduet.wbc_env_config import configure_task_from_args
+from go1_gym.envs.roboduet.wbc_env_config import RoboDuetCfg as Cfg, configure_task_from_args
 
 import wandb
 import os

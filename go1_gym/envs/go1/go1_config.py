@@ -1,7 +1,7 @@
 from typing import Any
 
 
-def config_go1(Cnfg: Any):
+def config_robot(Cnfg: Any):
     _ = Cnfg.init_state
 
     _.pos = [0.0, 0.0, 0.34]  # x,y,z [m]

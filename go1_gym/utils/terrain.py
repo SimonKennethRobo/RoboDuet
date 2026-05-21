@@ -6,11 +6,8 @@ import numpy as np
 from isaacgym import terrain_utils
 from numpy.random import choice
 
-from go1_gym.envs.roboduet.legged_robot_config import Cfg
-
-
 class Terrain:
-    def __init__(self, cfg: Cfg.terrain, num_robots, eval_cfg=None, num_eval_robots=0) -> None:
+    def __init__(self, cfg, num_robots, eval_cfg=None, num_eval_robots=0) -> None:
 
         self.cfg = cfg
         self.eval_cfg = eval_cfg
@@ -177,4 +174,3 @@ class Terrain:
         env_origin_z = np.max(self.height_field_raw[start_x: end_x, start_y:end_y]) * terrain.vertical_scale
 
         cfg.env_origins[i, j] = [env_origin_x, env_origin_y, env_origin_z]
-

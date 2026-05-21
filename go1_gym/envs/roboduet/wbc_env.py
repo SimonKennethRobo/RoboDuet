@@ -15,8 +15,8 @@ from go1_gym.utils.math_utils import get_scale_shift, quat_apply_yaw, wrap_to_pi
 
 from .joy_wrapper import JoyController
 from .legged_robot import LeggedRobot, quaternion_to_rpy
-from .legged_robot_config import Cfg
 from .observation_builder import ObservationBuilder, clip_observation
+from .wbc_env_config import RoboDuetCfg as Cfg
 
 
 class WBCEnv(LeggedRobot):

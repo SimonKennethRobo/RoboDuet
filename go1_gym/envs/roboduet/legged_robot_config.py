@@ -1,126 +1,18 @@
 # License: see [LICENSE, LICENSES/legged_gym/LICENSE]
+"""Common legged robot ParamsProto schema.
+
+RoboDuet/WBC-specific schema and defaults live in `wbc_env_config.py`.
+"""
 
 from params_proto import PrefixProto, ParamsProto
-import torch
 
-class Cfg(PrefixProto, cli=False):
-    use_rot6d = False
-
-    class hybrid(PrefixProto, cli=False):
-        num_actions = 18
-        plan_vel = False
-        use_vision = False
-
-        class rewards(PrefixProto, cli=False):
-            terminal_body_height = 0.28
-            use_terminal_body_height = True
-            use_terminal_roll = False
-            use_terminal_pitch = True
-            use_terminal_roll_pitch = False # TODO
-            terminal_body_roll = 0.10
-            terminal_body_pitch = 0.2
-            terminal_body_pitch_roll = 80./180.*torch.pi
-            headupdown_thres = 0.1
-
-        class reward_scales(PrefixProto, cli=False):
-            jump = -0.00
-            # hip_joint_penality = -0.
-            arm_manip_commands_tracking_combine = 1.
-            vis_manip_commands_tracking_lpy = 1.
-            vis_manip_commands_tracking_rpy = 1.
-            orientation_heuristic = -2.0
-            orientation_control = -10.
-            # penalize_yaw = -0.5
-            # penalize_pitch = -0.5
-            # action_smoothness_1 = -0.
-            # action_smoothness_2 = -0.
-            hip_action_l2 = -0.05
-            raibert_heuristic = -0.0
-            arm_control_smoothness_1 = -0.1
-            # arm_control_smoothness_2 = -0.1
-            arm_control_limits = -5.
-            traj_track = 0.0
-            trajectory_current_tracking = 0.0
-            trajectory_completion_time = 0.0
-            arm_delta_vel_cmd = 0.0
-            ee_smoothness = 0.0
-
-    class arm(PrefixProto, cli=False):
-        num_actions_arm = 6
-        arm_num_privileged_obs = 9
-        arm_num_observation_history = 30
-        arm_num_observations = 26 - 6
-        arm_num_obs_history = arm_num_observations * arm_num_observation_history
-        arm_num_commands = 6
-        num_actions_arm_cd = 8
-
-        class commands(PrefixProto, cli=False):
-            angle75 = torch.deg2rad(torch.tensor(75))
-            angle60 = torch.deg2rad(torch.tensor(60))
-            l = [0.3, 0.77]
-            p = [-torch.pi*0.45 , torch.pi*0.45]  # 75
-            y = [-torch.pi/2 , torch.pi/2]
-            roll_ee = [-torch.pi * 0.45, torch.pi * 0.45]
-            pitch_ee = [-angle60 , angle60]
-            yaw_ee = [-angle75 , angle75]
-
-            T_traj = [2, 3.]
-            T_force_range = [1, 4.]
-            add_force_thres = 0.3
-
-        class trajectory(PrefixProto, cli=False):
-            enabled = False
-            window_offsets = [0, 1, 2, 4, 8, 16, 32, 64]
-            num_waypoints = 96
-            start_radius = 0.05
-            length = 0.35
-            s_curve_amplitude = 0.08
-            s_curve_frequency = 1.0
-            circle_radius = 0.15
-            circle_turns = 1.0
-            completion_time_range = [2.0, 3.0]
-            completion_pos_threshold = 0.05
-            completion_rot_threshold = 0.25
-            delta_vel_limit = [0.4, 0.25, 0.6]
-            user_cmd_mode = "zero"
-            user_lin_vel_x = [-0.3, 0.3]
-            user_lin_vel_y = [-0.2, 0.2]
-            user_ang_vel_yaw = [-0.4, 0.4]
-            pos_error_scale = 4.0
-            rot_error_scale = 1.0
-            completion_time_sigma = 0.35
-
-        class obs_scales(PrefixProto, cli=False):
-            l = 1.
-            p = 1.
-            y = 1.
-            wx = 1.
-            wy = 1.
-            wz = 1.
-
-        class control(PrefixProto, cli=False):
-            stiffness_arm = {'joint': 5., 'widow': 5.}  # [N*m/rad]
-            damping_arm = {'joint': 1, 'widow': 1,}  # [N*m*s/rad]
-
-    class dog(PrefixProto, cli=False):
-        num_actions_loco = 12
-        dog_num_privileged_obs = 2
-        dog_num_observation_history = 30
-        dog_num_observations = 56
-        dog_num_obs_history = dog_num_observations * dog_num_observation_history
-        dog_num_commands = 5
-        dog_actions = 12
-
-        class control(PrefixProto, cli=False):
-            stiffness_leg = {'joint': 35.}
-            damping_leg = {'joint': 1.}
-
+class LeggedRobotCfg(PrefixProto, cli=False):
     class env(PrefixProto, cli=False):
         num_envs = 4096
-        num_observations = 235
+        num_observations = 48
         num_scalar_observations = 42
         # if not None a privilige_obs_buf will be returned by step() (critic obs for assymetric training). None is returned otherwise
-        num_privileged_obs = 18
+        num_privileged_obs = None
         privileged_future_horizon = 1
         num_actions = 12
         num_observation_history = 15
@@ -139,19 +31,6 @@ class Cfg(PrefixProto, cli=False):
         observe_clock_inputs = False
         observe_two_prev_actions = False
         observe_imu = False
-        record_video = True
-        recording_width_px = 360
-        recording_height_px = 240
-        recording_mode = "COLOR"
-        num_recording_envs = 1
-        debug_viz = False
-        all_agents_share = False
-        stage1_arm_curriculum = False
-        stage1_arm_fixed_fraction = 0.1
-        stage1_arm_accel_resample_time_s = 0.5
-        stage1_arm_max_accel = 2.0  # rad / s^2
-        stage1_arm_max_vel = 1.0  # rad / s
-        stage1_arm_max_offset = 0.35  # rad from default joint position
 
         priv_observe_friction = True
         priv_observe_friction_indep = True

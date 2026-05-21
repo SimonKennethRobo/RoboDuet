@@ -19,13 +19,13 @@ from go1_gym.utils import global_switch, quaternion_to_rpy
 from go1_gym.utils.math_utils import get_scale_shift, quat_apply_yaw, wrap_to_pi
 from go1_gym.utils.terrain import Terrain
 
-from .legged_robot_config import Cfg
 from .trajectory_geometry import (
     ee_twist_body_6d,
     pose_world_to_body_9d,
     quat_xyzw_to_rot6d,
     sample_trajectory_commands,
 )
+from .wbc_env_config import RoboDuetCfg as Cfg
 import pytorch3d.transforms as pt3d
 
 

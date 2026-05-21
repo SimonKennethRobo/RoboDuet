@@ -1,7 +1,7 @@
 """Public RoboDuet env API.
 
 The heavy IsaacGym environment is imported lazily so config-only imports such
-as `go1_gym.envs.roboduet.legged_robot_config` do not initialize simulator
+as `go1_gym.envs.roboduet.wbc_env_config` do not initialize simulator
 dependencies.
 """
 

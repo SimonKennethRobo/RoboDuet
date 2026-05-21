@@ -57,8 +57,8 @@ def load_isaac_modules():
 
     from go1_gym.envs.roboduet import HistoryWrapper as _HistoryWrapper
     from go1_gym.envs.roboduet import WBCEnv as _WBCEnv
-    from go1_gym.envs.roboduet.legged_robot_config import Cfg as _Cfg
     from go1_gym.envs.roboduet.stage_schedule import StageSchedule as _StageSchedule
+    from go1_gym.envs.roboduet.wbc_env_config import RoboDuetCfg as _Cfg
     from go1_gym.envs.roboduet.wbc_env_config import configure_task_from_args as _configure_task_from_args
     from go1_gym.utils import global_switch as _global_switch
 
@@ -484,18 +484,6 @@ def child_args_for(parent_args, num_envs):
         child.append("--no_stage1_arm_curriculum")
     if parent_args.randomize_materials:
         child.append("--randomize_materials")
-    child += [
-        "--stage1_arm_fixed_fraction",
-        str(parent_args.stage1_arm_fixed_fraction),
-        "--stage1_arm_max_accel",
-        str(parent_args.stage1_arm_max_accel),
-        "--stage1_arm_max_vel",
-        str(parent_args.stage1_arm_max_vel),
-        "--stage1_arm_max_offset",
-        str(parent_args.stage1_arm_max_offset),
-        "--stage1_arm_accel_resample_time_s",
-        str(parent_args.stage1_arm_accel_resample_time_s),
-    ]
     return child
 
 
@@ -593,11 +581,6 @@ def parse_args():
     parser.add_argument("--use_rot6d", action="store_true", default=False)
     parser.add_argument("--no_stage1_arm_curriculum", action="store_true", default=False)
     parser.add_argument("--randomize_materials", action="store_true", default=False)
-    parser.add_argument("--stage1_arm_fixed_fraction", type=float, default=0.1)
-    parser.add_argument("--stage1_arm_max_accel", type=float, default=2.0)
-    parser.add_argument("--stage1_arm_max_vel", type=float, default=1.0)
-    parser.add_argument("--stage1_arm_max_offset", type=float, default=0.35)
-    parser.add_argument("--stage1_arm_accel_resample_time_s", type=float, default=0.5)
     parser.add_argument("--dyna_gait_min_frequency", type=float, default=0.0)
     return parser.parse_args()
 
