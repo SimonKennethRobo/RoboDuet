@@ -18,11 +18,10 @@ from .legged_robot_config import LeggedRobotCfg
 
 @dataclass(frozen=True)
 class HybridRewardTerminationConfig:
-    terminal_body_height: float = 0.28
+    terminal_body_height: float = 0.1
     use_terminal_body_height: bool = True
     use_terminal_roll: bool = False
-    use_terminal_pitch: bool = True
-    use_terminal_roll_pitch: bool = False
+    use_terminal_pitch: bool = False
     terminal_body_roll: float = 0.10
     terminal_body_pitch: float = 0.2
     terminal_body_pitch_roll: float = 80.0 / 180.0 * math.pi
@@ -117,7 +116,7 @@ class DogConfig:
     num_actions_loco: int = 12
     dog_num_privileged_obs: int = 2
     dog_num_observation_history: int = 30
-    dog_num_observations: int = 56
+    dog_num_observations: int = 68  # +12 vs old 56: arm joint pos (6) + vel (6)
     dog_num_commands: int = 5
     dog_actions: int = 12
     stiffness_leg: dict = None
@@ -182,7 +181,7 @@ class DomainRandConfig:
 
 @dataclass(frozen=True)
 class RewardConfig:
-    terminal_body_height: float = 0.28
+    terminal_body_height: float = 0.1
     use_terminal_body_height: bool = True
     manip_weight_lpy: float = 3
     manip_weight_rpy: float = 1
@@ -209,10 +208,10 @@ class HybridRewardScaleOverrideConfig:
 @dataclass(frozen=True)
 class Stage1ArmDisturbanceConfig:
     fixed_fraction: float = 0.1
-    accel_resample_time_s: float = 0.5
-    max_accel: float = 5.0
+    accel_resample_time_s: float = 0.01 # 100 Hz, larger than actual ctrl freq
+    max_accel: float = 10.0
     max_vel: float = 5.0
-    max_offset: float = 0.35
+    max_offset: float = 999
 
 
 @dataclass(frozen=True)
@@ -361,7 +360,6 @@ class RoboDuetCfg(LeggedRobotCfg):
             use_terminal_body_height = ROBODUET_DEFAULTS.hybrid.rewards.use_terminal_body_height
             use_terminal_roll = ROBODUET_DEFAULTS.hybrid.rewards.use_terminal_roll
             use_terminal_pitch = ROBODUET_DEFAULTS.hybrid.rewards.use_terminal_pitch
-            use_terminal_roll_pitch = ROBODUET_DEFAULTS.hybrid.rewards.use_terminal_roll_pitch
             terminal_body_roll = ROBODUET_DEFAULTS.hybrid.rewards.terminal_body_roll
             terminal_body_pitch = ROBODUET_DEFAULTS.hybrid.rewards.terminal_body_pitch
             terminal_body_pitch_roll = ROBODUET_DEFAULTS.hybrid.rewards.terminal_body_pitch_roll

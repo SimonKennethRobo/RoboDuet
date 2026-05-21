@@ -3,6 +3,7 @@ from typing import Any
 def config_asset(Cnfg: Any):
 
     Cnfg.asset.file = '{MINI_GYM_ROOT_DIR}/resources/robots/arx5p2Go1/urdf/arx5p2Go1.urdf'
+    Cnfg.asset.self_collisions = 1  # disable self-collision (overrides go1_config default of 0)
 
     Cnfg.asset.penalize_contacts_on = [
         'base', 'trunk',

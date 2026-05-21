@@ -224,7 +224,7 @@ class LeggedRobotCfg(PrefixProto, cli=False):
         collapse_fixed_joints = True
         fix_base_link = False  # fixe the base of the robot
         default_dof_drive_mode = 3  # see GymDofDriveModeFlags (0 is none, 1 is pos tgt, 2 is vel tgt, 3 effort)
-        self_collisions = 0  # 1 to disable, 0 to enable...bitwise filter
+        self_collisions = 1  # 1 to disable, 0 to enable...bitwise filter
         # replace collision cylinders with capsules, leads to faster/more stable simulation
         replace_cylinder_with_capsule = True
         flip_visual_attachments = True  # Some .obj meshes must be flipped from y-up to z-up

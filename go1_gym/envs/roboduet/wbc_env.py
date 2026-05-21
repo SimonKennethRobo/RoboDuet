@@ -443,9 +443,9 @@ class WBCEnv(LeggedRobot):
         hit_upper = self.stage1_arm_target_offset > max_offset
         hit_lower = self.stage1_arm_target_offset < -max_offset
         self.stage1_arm_target_offset[:] = torch.clamp(self.stage1_arm_target_offset, -max_offset, max_offset)
-        self.stage1_arm_target_vel[hit_upper | hit_lower] *= -0.5
+        self.stage1_arm_target_vel[hit_upper | hit_lower] *= -1 # bounce back with some damping when hitting limits
 
-        self.actions[:, arm_slice] = self.stage1_arm_target_offset / self.cfg.control.action_scale
+        self.actions[:, arm_slice] = self.stage1_arm_target_offset / self.cfg.control.action_scale # scale back since it will be multiplied by action_scale later
 
     def _keep_arm_fixed(self):
         if global_switch.switch_open:
@@ -1360,6 +1360,11 @@ class WBCEnv(LeggedRobot):
 
         if self.cfg.arm.trajectory.enabled:
             obs_buf = torch.cat((obs_buf, self.get_ee_pose_body_9d()), dim=-1)
+
+        arm_slice = slice(self.num_actions_loco, self.num_actions_loco + self.num_actions_arm)
+        arm_pos = (self.dof_pos[:, arm_slice] - self.default_dof_pos[:, arm_slice]) * self.obs_scales.dof_pos
+        arm_vel = self.dof_vel[:, arm_slice] * self.obs_scales.dof_vel
+        obs_buf = torch.cat((obs_buf, arm_pos, arm_vel), dim=-1)
 
         # add noise if needed
         # if self.add_noise:
