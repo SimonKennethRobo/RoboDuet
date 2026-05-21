@@ -172,6 +172,7 @@ class TerrainConfig:
 @dataclass(frozen=True)
 class ArmDomainRandConfig:
     """Per-stage arm domain randomization (applied every episode reset)."""
+
     randomize_Kp_factor: bool = True
     Kp_factor_range: tuple = (0.9, 1.1)
     randomize_Kd_factor: bool = True
@@ -184,8 +185,6 @@ class ArmDomainRandConfig:
     link_mass_range: tuple = (0.85, 1.15)
     randomize_link_com: bool = True
     link_com_range: float = 0.01
-    randomize_mount_pos: bool = True
-    mount_pos_range: tuple = ((-0.02, 0.02), (-0.02, 0.02), (-0.01, 0.01))
 
 
 @dataclass(frozen=True)
@@ -196,6 +195,11 @@ class DomainRandConfig:
     randomize_end_effector_force: bool = False
     max_force: float = 15
     max_force_offset: float = 0.01
+    randomize_mount_pos: bool = True
+    mount_pos_range: tuple = ((-0.05, 0.05), (-0.02, 0.02), (-0.05, 0.05))
+    mount_pos_buckets: int = 32
+    mount_pos_bucket_seed: int = 1234
+    mount_joint_name: str = "zarx5p2_mount"
 
     stage1_arm: ArmDomainRandConfig = ArmDomainRandConfig(
         Kp_factor_range=(0.5, 1.5),
@@ -204,7 +208,6 @@ class DomainRandConfig:
         motor_offset_range=0.05,
         link_mass_range=(0.1, 2),
         link_com_range=0.1,
-        mount_pos_range=((-0.03, 0.03), (-0.03, 0.03), (-0.02, 0.02)),
     )
     stage2_arm: ArmDomainRandConfig = ArmDomainRandConfig()
 
@@ -239,7 +242,7 @@ class HybridRewardScaleOverrideConfig:
 class Stage1ArmDisturbanceConfig:
     fixed_fraction: float = 0.1
     saturation_fraction: float = 0.8
-    accel_resample_time_s: float = 0.01 # 100 Hz, larger than actual ctrl freq
+    accel_resample_time_s: float = 0.01  # 100 Hz, larger than actual ctrl freq
     max_accel: float = 10.0
     max_vel: float = 5.0
     max_offset: float = 999

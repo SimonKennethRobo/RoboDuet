@@ -68,6 +68,7 @@ docker/rsc
 *.jit
 tmp
 *.tar
+resources/robots/**/urdf/*_mount_bucket_*.urdf
 
 wandb/*
 
