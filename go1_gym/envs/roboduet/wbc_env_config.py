@@ -133,8 +133,8 @@ class EnvConfig:
     priv_observe_high_freq_goal: bool = False
     observe_two_prev_actions: bool = False
     record_video: bool = False
-    recording_width_px: int = 360
-    recording_height_px: int = 240
+    recording_width_px: int = 500
+    recording_height_px: int = 320
     recording_mode: str = "COLOR"
     num_recording_envs: int = 1
     recording_frame_stride: int = 1

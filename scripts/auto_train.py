@@ -41,6 +41,7 @@ def main(arg):
     if args.debug:
         mode = "disabled"
         args.num_envs = 4
+        args.video = True
     else:
         mode = "online"
 
@@ -73,9 +74,6 @@ def main(arg):
 
     if args.train_stage == "stage2":
         apply_hybrid_reward_settings(Cfg)
-
-    # if args.headless:
-    #     RunnerArgs.log_video = False
 
     now = datetime.now()
     wandb.init(

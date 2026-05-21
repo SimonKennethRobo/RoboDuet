@@ -287,7 +287,7 @@ class WBCEnv(LeggedRobot):
         self._resample_T_traj(env_ids)
 
     def _step_traj_track(self):
-        if not self.cfg.arm.trajectory.enabled:
+        if not self.cfg.arm.trajectory.enabled or not global_switch.switch_open:
             return
         self.traj_elapsed_time[:] = self.arm_time_buf.float() * self.dt
         progress = self.traj_elapsed_time / torch.clamp(self.traj_target_time, min=self.dt)
@@ -558,7 +558,7 @@ class WBCEnv(LeggedRobot):
         self.force_time_buf += 1
         self.end_effector_state[:] = self.rigid_body_state.view(self.num_envs, self.num_bodies, 13)[:, self.ee_idx]
         self._step_traj_track()
-        if self.cfg.arm.trajectory.enabled:
+        if self.cfg.arm.trajectory.enabled and global_switch.switch_open:
             self.prev_ee_twist_body[:] = self.get_ee_twist_body()
 
     def _arm_check_termination_hook(self):
@@ -790,72 +790,106 @@ class WBCEnv(LeggedRobot):
         self._draw_command_ori_coord()
         self._draw_policy_trajectory()
 
-    def _policy_command_overlay_lines(self, env_id=0):
+    def _policy_command_overlay_panels(self, env_id=0):
+        """Return (left_lines, right_lines) for two-panel overlay."""
         def vals(tensor, count):
             return tensor[env_id, : min(count, tensor.shape[1])].detach().cpu().tolist()
 
-        lines = []
+        arm_open = global_switch.switch_open
         dog = vals(self.commands_dog, min(10, self.commands_dog.shape[1]))
-        lines.append(f"loco cmd final: vx={dog[0]:+.2f} vy={dog[1]:+.2f} yaw={dog[2]:+.2f}")
 
-        if self.cfg.arm.trajectory.enabled:
-            user = vals(self.user_vel_cmd, 3)
-            extra = vals(self.arm_delta_vel_cmd, 3)
-            traj_status = torch.stack(
-                (
-                    self.traj_progress_idx[env_id].float(),
-                    self.traj_elapsed_time[env_id],
-                    self.traj_target_time[env_id],
-                    self.traj_final_pos_error[env_id],
-                    self.traj_final_rot_error[env_id],
-                )
-            ).detach().cpu().tolist()
-            lines.append(f"user cmd:       vx={user[0]:+.2f} vy={user[1]:+.2f} yaw={user[2]:+.2f}")
-            lines.append(f"arm->loco:      dvx={extra[0]:+.2f} dvy={extra[1]:+.2f} dyaw={extra[2]:+.2f}")
-            lines.append(
-                f"traj: step={int(traj_status[0])}/{self.traj_num_waypoints - 1} "
-                f"t={traj_status[1]:.2f}/{traj_status[2]:.2f}s"
-            )
-            lines.append(f"traj final err: pos={traj_status[3]:.3f} rot6d={traj_status[4]:.3f}")
-        else:
-            arm_cmd = vals(self.commands_arm_obs, min(6, self.commands_arm_obs.shape[1]))
-            lines.append(
-                "arm cmd target: "
-                + " ".join(f"{name}={value:+.2f}" for name, value in zip(["l", "p", "y", "r", "p", "y"], arm_cmd))
-            )
+        # ---- LEFT: commands ----
+        left = []
+        left.append(f"vx={dog[0]:+.2f}  vy={dog[1]:+.2f}  yaw={dog[2]:+.2f}")
 
         if self.cfg.commands.use_dynamic_gait and self.commands_dog.shape[1] >= 10:
-            lines.append(
-                f"gait/body extra: pitch={dog[3]:+.2f} roll={dog[4]:+.2f} "
-                f"freq={dog[5]:.2f} swing={dog[6]:.2f} width={dog[7]:.2f} "
-                f"len={dog[8]:.2f} dur={dog[9]:.2f}"
-            )
+            left.append(f"pitch={dog[3]:+.2f}  roll={dog[4]:+.2f}")
+            left.append(f"freq={dog[5]:.2f}  swing={dog[6]:.2f}")
+            left.append(f"width={dog[7]:.2f}  len={dog[8]:.2f}")
         elif self.commands_dog.shape[1] >= 5:
-            lines.append(f"body extra: pitch={dog[3]:+.2f} roll={dog[4]:+.2f}")
+            left.append(f"pitch={dog[3]:+.2f}  roll={dog[4]:+.2f}")
 
-        arm_action = vals(
-            self.actions[:, self.num_actions_loco : self.num_actions_loco + self.num_actions_arm],
-            self.num_actions_arm,
+        if arm_open:
+            if self.cfg.arm.trajectory.enabled:
+                user = vals(self.user_vel_cmd, 3)
+                extra = vals(self.arm_delta_vel_cmd, 3)
+                left.append(f"user vx={user[0]:+.2f} vy={user[1]:+.2f} yaw={user[2]:+.2f}")
+                left.append(f"arm dvx={extra[0]:+.2f} dvy={extra[1]:+.2f} dyaw={extra[2]:+.2f}")
+            else:
+                arm_cmd = vals(self.commands_arm_obs, min(6, self.commands_arm_obs.shape[1]))
+                left.append(f"arm l={arm_cmd[0]:+.2f} p={arm_cmd[1]:+.2f} y={arm_cmd[2]:+.2f}")
+                if len(arm_cmd) >= 6:
+                    left.append(f"    r={arm_cmd[3]:+.2f} p={arm_cmd[4]:+.2f} y={arm_cmd[5]:+.2f}")
+
+        # ---- RIGHT: status ----
+        right = []
+        base_z = self.root_states[env_id, 2].item()
+        right.append(f"z={base_z:.2f}  pitch={self.pitch[env_id].item():+.2f}  roll={self.roll[env_id].item():+.2f}")
+
+        # contact = (self.contact_forces[env_id, self.feet_indices, 2] > 1.0).cpu().tolist()
+        # contact_str = "".join("█" if c else "░" for c in contact)
+        # right.append(f"feet: {contact_str}  (FL FR RL RR)")
+
+        if arm_open and self.cfg.arm.trajectory.enabled:
+            traj_step = int(self.traj_progress_idx[env_id].item())
+            t_el = self.traj_elapsed_time[env_id].item()
+            t_tgt = self.traj_target_time[env_id].item()
+            pos_err = self.traj_final_pos_error[env_id].item()
+            rot_err = self.traj_final_rot_error[env_id].item()
+            right.append(f"traj {traj_step}/{self.traj_num_waypoints - 1}  t={t_el:.1f}/{t_tgt:.1f}s")
+            right.append(f"err pos={pos_err:.3f}  rot={rot_err:.3f}")
+
+        if arm_open:
+            arm_action = vals(
+                self.actions[:, self.num_actions_loco : self.num_actions_loco + self.num_actions_arm],
+                self.num_actions_arm,
+            )
+            right.append("arm: " + " ".join(f"{v:+.2f}" for v in arm_action))
+
+        stage = "hybrid" if arm_open else "stage1"
+        right.append(f"[{stage}]")
+
+        return left, right
+
+    @staticmethod
+    def _draw_panel(frame, lines, x0, y0, font, font_scale, line_height, alpha=0.55):
+        """Draw a semi-transparent panel and text on a RGBA frame."""
+        if not lines:
+            return
+        (tw, th), _ = cv2.getTextSize(
+            max(lines, key=len), font, font_scale, 1
         )
-        lines.append("arm action: " + " ".join(f"a{i}={value:+.2f}" for i, value in enumerate(arm_action)))
-        base_status = torch.stack(
-            (self.root_states[env_id, 2], self.pitch[env_id], self.roll[env_id])
-        ).detach().cpu().tolist()
-        lines.append(f"base: z={base_status[0]:.2f} pitch={base_status[1]:+.2f} roll={base_status[2]:+.2f}")
-        return lines
+        pad = 6
+        w = tw + pad * 2
+        h = line_height * len(lines) + pad
+        x1, y1 = x0 + w, y0 + h
+
+        # alpha blend dark background
+        roi = frame[y0:y1, x0:x1]
+        bg = np.zeros_like(roi)
+        bg[:, :, 3] = 255
+        frame[y0:y1, x0:x1] = (roi * (1 - alpha) + bg * alpha).astype(np.uint8)
+
+        for i, text in enumerate(lines):
+            y = y0 + pad + i * line_height + line_height - 4
+            cv2.putText(frame, text, (x0 + pad, y), font, font_scale, (0, 0, 0, 255), 2, cv2.LINE_AA)
+            cv2.putText(frame, text, (x0 + pad, y), font, font_scale, (230, 230, 230, 255), 1, cv2.LINE_AA)
 
     def _overlay_policy_text(self, frame, env_id=0):
-        lines = self._policy_command_overlay_lines(env_id)
+        left_lines, right_lines = self._policy_command_overlay_panels(env_id)
         font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 0.42
-        line_height = 18
-        x, y0 = 10, 18
-        box_height = line_height * len(lines) + 12
-        cv2.rectangle(frame, (4, 4), (635, box_height), (0, 0, 0, 180), -1)
-        for i, text in enumerate(lines):
-            y = y0 + i * line_height
-            cv2.putText(frame, text, (x, y), font, font_scale, (0, 0, 0, 255), 2, cv2.LINE_AA)
-            cv2.putText(frame, text, (x, y), font, font_scale, (255, 255, 255, 255), 1, cv2.LINE_AA)
+        font_scale = 0.32
+        line_height = 13
+        W = frame.shape[1]
+
+        # left panel: top-left
+        self._draw_panel(frame, left_lines, 4, 4, font, font_scale, line_height)
+
+        # right panel: top-right (estimate width from longest line)
+        if right_lines:
+            (tw, _), _ = cv2.getTextSize(max(right_lines, key=len), font, font_scale, 1)
+            x0_right = max(W // 2, W - tw - 20)
+            self._draw_panel(frame, right_lines, x0_right, 4, font, font_scale, line_height)
 
     def _project_world_points_to_camera(self, points_world, env_handle, camera_handle):
         view = np.asarray(self.gym.get_camera_view_matrix(self.sim, env_handle, camera_handle), dtype=np.float32).reshape(4, 4)
