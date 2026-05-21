@@ -71,7 +71,7 @@ class BaseTask(gym.Env):
         self.gym.prepare_sim(self.sim)
 
         # todo: read from config
-        self.enable_viewer_sync = False
+        self.enable_viewer_sync = True
         self.viewer = None
 
         # if running with a viewer, set up keyboard shortcuts and camera
@@ -97,9 +97,9 @@ class BaseTask(gym.Env):
     def reset(self):
         """ Reset all robots"""
         self.reset_idx(torch.arange(self.num_envs, device=self.device))
-        rwd_dog, rwd_arm, _, _ = self.step(
+        obs, privileged_obs, _, _, _ = self.step(
             torch.zeros(self.num_envs, self.num_actions, device=self.device, requires_grad=False))
-        return
+        return obs, privileged_obs
 
     def step(self, actions):
         raise NotImplementedError

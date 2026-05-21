@@ -1,29 +1,24 @@
-"""Geometry helpers for task-space trajectory tracking."""
+"""Trajectory sampling helpers for task-space trajectory tracking.
 
-import pytorch3d.transforms as pt3d
+Geometry primitives live in :mod:`go1_gym.utils.math_utils`; this module
+keeps only the trajectory-shape sampler which is RoboDuet specific.
+"""
+
 import torch
-from isaacgym.torch_utils import quat_conjugate, quat_mul, quat_rotate, quat_rotate_inverse, torch_rand_float
+from isaacgym.torch_utils import quat_rotate, torch_rand_float
 
+from go1_gym.utils.math_utils import (  # re-export for backward compatibility
+    ee_twist_body_6d,
+    pose_world_to_body_9d,
+    quat_xyzw_to_rot6d,
+)
 
-def quat_xyzw_to_rot6d(quat):
-    quat_wxyz = quat[:, [3, 0, 1, 2]]
-    return pt3d.matrix_to_rotation_6d(pt3d.quaternion_to_matrix(quat_wxyz))
-
-
-def pose_world_to_body_9d(pos_world, quat_world, base_pos, base_quat):
-    pos_body = quat_rotate_inverse(base_quat, pos_world - base_pos)
-    quat_body = quat_mul(quat_conjugate(base_quat), quat_world)
-    return torch.cat((pos_body, quat_xyzw_to_rot6d(quat_body)), dim=-1)
-
-
-def ee_twist_body_6d(end_effector_state, root_states, base_quat, num_envs):
-    ee_lin_vel_world = end_effector_state[:, 7:10]
-    ee_ang_vel_world = end_effector_state[:, 10:13]
-    base_lin_vel_world = root_states[:num_envs, 7:10]
-    base_ang_vel_world = root_states[:num_envs, 10:13]
-    rel_lin_vel_body = quat_rotate_inverse(base_quat, ee_lin_vel_world - base_lin_vel_world)
-    rel_ang_vel_body = quat_rotate_inverse(base_quat, ee_ang_vel_world - base_ang_vel_world)
-    return torch.cat((rel_lin_vel_body, rel_ang_vel_body), dim=-1)
+__all__ = [
+    "ee_twist_body_6d",
+    "pose_world_to_body_9d",
+    "quat_xyzw_to_rot6d",
+    "sample_trajectory_commands",
+]
 
 
 def sample_trajectory_commands(cfg, end_effector_state, base_quat, env_ids, num_waypoints, device):
