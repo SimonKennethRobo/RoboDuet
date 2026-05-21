@@ -1,5 +1,6 @@
 # License: see [LICENSE, LICENSES/legged_gym/LICENSE]
 
+import copy
 import os
 import sys
 import xml.etree.ElementTree as ET
@@ -210,7 +211,8 @@ class LeggedRobot(BaseTask):
         self.prev_foot_velocities = self.foot_velocities.clone()
         if not self.headless:
             self.render_gui()
-        if getattr(self.cfg.domain_rand, "randomize_action_delay", False):
+        randomize_action_delay = getattr(self.cfg.domain_rand, "randomize_action_delay", False)
+        if randomize_action_delay:
             actions_start_decimation = torch.randint(
                 0,
                 self.cfg.control.decimation + 1,
@@ -219,9 +221,8 @@ class LeggedRobot(BaseTask):
             )
         for i in range(self.cfg.control.decimation):
             self._arm_decimation_hook()
-            if getattr(self.cfg.domain_rand, "randomize_action_delay", False):
-                use_actions = (i >= actions_start_decimation).float()
-                input_actions = (1.0 - use_actions) * self.last_actions + use_actions * self.actions
+            if randomize_action_delay:
+                input_actions = torch.where(i >= actions_start_decimation, self.actions, self.last_actions)
             else:
                 input_actions = self.actions
             self.torques = self._compute_torques(input_actions).view(self.torques.shape)
@@ -1213,8 +1214,9 @@ class LeggedRobot(BaseTask):
 
             max_vel = cfg.domain_rand.max_push_vel_xy
             max_push_ang = cfg.domain_rand.max_push_ang_vel
-            self.root_states[:, 7:9] = torch_rand_float(-max_vel, max_vel, (self.num_envs, 2), device=self.device)
-            self.root_states[:, 10:13] = torch_rand_float(-max_push_ang, max_push_ang, (self.num_envs, 3), device=self.device)
+            n = len(push_env_ids)
+            self.root_states[push_env_ids, 7:9] = torch_rand_float(-max_vel, max_vel, (n, 2), device=self.device)
+            self.root_states[push_env_ids, 10:13] = torch_rand_float(-max_push_ang, max_push_ang, (n, 3), device=self.device)
 
             env_ids_int32 = push_env_ids.to(dtype=torch.int32)
             self.gym.set_actor_root_state_tensor_indexed(
@@ -1654,13 +1656,12 @@ class LeggedRobot(BaseTask):
             torch.tensor(self.terrain.heightsamples).view(self.terrain.tot_rows, self.terrain.tot_cols).to(self.device)
         )
 
-    def _arm_mount_randomization_cfg(self):
-        return self.cfg.domain_rand
-
-    def _format_xyz(self, xyz):
+    @staticmethod
+    def _format_xyz(xyz):
         return " ".join(f"{float(v):.8g}" for v in xyz)
 
-    def _write_xml_if_changed(self, tree, path):
+    @staticmethod
+    def _write_xml_if_changed(tree, path):
         xml_bytes = ET.tostring(tree.getroot(), encoding="utf-8", xml_declaration=True)
         if os.path.exists(path):
             with open(path, "rb") as f:
@@ -1671,18 +1672,18 @@ class LeggedRobot(BaseTask):
         return True
 
     def _generate_arm_mount_asset_files(self, asset_root, asset_file):
-        arm_dr = self._arm_mount_randomization_cfg()
+        arm_dr = self.cfg.domain_rand
         if arm_dr is None or not getattr(arm_dr, "randomize_mount_pos", False):
             self.arm_mount_bucket_offsets = np.zeros((1, 3), dtype=np.float32)
             return [asset_file]
 
-        num_buckets = int(getattr(self.cfg.domain_rand, "mount_pos_buckets", 32))
+        num_buckets = int(getattr(arm_dr, "mount_pos_buckets", 32))
         if num_buckets <= 1 or not asset_file.lower().endswith(".urdf"):
             self.arm_mount_bucket_offsets = np.zeros((1, 3), dtype=np.float32)
             return [asset_file]
 
         source_path = os.path.join(asset_root, asset_file)
-        mount_joint_name = getattr(self.cfg.domain_rand, "mount_joint_name", "zarx5p2_mount")
+        mount_joint_name = getattr(arm_dr, "mount_joint_name", "zarx5p2_mount")
         source_tree = ET.parse(source_path)
         source_joint = source_tree.getroot().find(f"./joint[@name='{mount_joint_name}']")
         if source_joint is None:
@@ -1699,7 +1700,7 @@ class LeggedRobot(BaseTask):
         if ranges.shape != (3, 2):
             raise ValueError(f"mount_pos_range must have shape (3, 2), got {ranges.shape}")
 
-        rng = np.random.default_rng(int(getattr(self.cfg.domain_rand, "mount_pos_bucket_seed", 1234)))
+        rng = np.random.default_rng(int(getattr(arm_dr, "mount_pos_bucket_seed", 1234)))
         offsets = rng.uniform(ranges[:, 0], ranges[:, 1], size=(num_buckets, 3)).astype(np.float32)
         offsets[0] = 0.0
 
@@ -1707,7 +1708,7 @@ class LeggedRobot(BaseTask):
         generated_files = []
         updated_files = 0
         for bucket_id, offset in enumerate(offsets):
-            tree = ET.parse(source_path)
+            tree = copy.deepcopy(source_tree)
             joint = tree.getroot().find(f"./joint[@name='{mount_joint_name}']")
             origin = joint.find("origin")
             if origin is None:

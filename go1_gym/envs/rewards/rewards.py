@@ -182,16 +182,18 @@ class Rewards:
         # Penalize changes in actions
         return torch.sum(torch.square(self.env.last_actions - self.env.actions)[..., :self.env.num_actions_loco], dim=1)
 
+    def _count_contacts(self, indices):
+        return torch.sum(
+            torch.norm(self.env.contact_forces[:, indices, :], dim=-1) > 0.1,
+            dim=1,
+        ).float()
+
     def _reward_collision(self):
         # Penalize collisions on selected bodies
-        return torch.sum(1. * (torch.norm(self.env.contact_forces[:, self.env.penalised_contact_indices, :], dim=-1) > 0.1),
-                         dim=1)
+        return self._count_contacts(self.env.penalised_contact_indices)
 
     def _reward_arm_contact(self):
-        return torch.sum(
-            1.0 * (torch.norm(self.env.contact_forces[:, self.env.arm_contact_indices, :], dim=-1) > 0.1),
-            dim=1,
-        )
+        return self._count_contacts(self.env.arm_contact_indices)
 
     def _reward_dof_pos_limits(self):
         # Penalize dof positions too close to the limit
@@ -276,10 +278,6 @@ class Rewards:
         rew_foot_impact_vel = contact_states * torch.square(torch.clip(prev_foot_velocities, -100, 0))
 
         return torch.sum(rew_foot_impact_vel, dim=1)
-
-    def _reward_collision(self):
-        # Penalize collisions on selected bodies
-        return torch.sum(1. * (torch.norm(self.env.contact_forces[:, self.env.penalised_contact_indices, :], dim=-1) > 0.1), dim=1)
 
     def _reward_orientation_heuristic(self):
         guide = torch.zeros_like(self.env.pitch)
