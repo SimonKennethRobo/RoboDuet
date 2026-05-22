@@ -348,7 +348,7 @@ class RoboDuetDefaults:
 class RoboDuetRuntimeOptions:
     num_envs: int
     robot: str
-    use_rot6d: bool = False
+    use_rot6d: bool = True
     traj_track: bool = False
     dyna_gait: bool = False
     dyna_gait_min_frequency: float = 0.0
@@ -359,7 +359,7 @@ class RoboDuetRuntimeOptions:
         return cls(
             num_envs=args.num_envs,
             robot=args.robot,
-            use_rot6d=getattr(args, "use_rot6d", False),
+            use_rot6d=getattr(args, "use_rot6d", True),
             traj_track=getattr(args, "traj_track", False),
             dyna_gait=getattr(args, "dyna_gait", False),
             dyna_gait_min_frequency=getattr(args, "dyna_gait_min_frequency", 0.0),
@@ -398,7 +398,7 @@ ROBODUET_DEFAULTS = RoboDuetDefaults()
 
 
 class RoboDuetCfg(LeggedRobotCfg):
-    use_rot6d = False
+    use_rot6d = True
 
     class hybrid(PrefixProto, cli=False):
         num_actions = ROBODUET_DEFAULTS.hybrid.num_actions
