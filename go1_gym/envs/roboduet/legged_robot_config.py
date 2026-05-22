@@ -348,6 +348,7 @@ class LeggedRobotCfg(PrefixProto, cli=False):
         Kp_factor_range = [0.9, 1.1]
         Kd_factor_range = [0.9, 1.1]
         joint_friction_range = [0.0, 0.7]
+        dof_damping_range = [0.0, 10.0]
         contact_force_range = [0.0, 50.0]
         contact_state_range = [0.0, 1.0]
         body_velocity_range = [-6.0, 6.0]

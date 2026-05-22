@@ -758,6 +758,13 @@ class LeggedRobot(BaseTask):
                     props[joint_idx]["stiffness"] = self.cfg.arm.control.stiffness_arm[joint_name]
                     props[joint_idx]["damping"] = self.cfg.arm.control.damping_arm[joint_name]
 
+            if env_id == 0:
+                dof_frictions = props["friction"] if "friction" in props.dtype.names else np.zeros(len(props))
+                self.default_dof_frictions = to_torch(dof_frictions, device=self.device, dtype=torch.float)
+                self.default_dof_dampings = to_torch(props["damping"], device=self.device, dtype=torch.float)
+                self.dof_frictions[:] = self.default_dof_frictions
+                self.dof_dampings[:] = self.default_dof_dampings
+
             print(props)
 
         return props
@@ -1512,6 +1519,8 @@ class LeggedRobot(BaseTask):
         self.Kd_factors = torch.ones(
             self.num_envs, self.num_dof, dtype=torch.float, device=self.device, requires_grad=False
         )
+        self.dof_frictions = self.default_dof_frictions.unsqueeze(0).repeat(self.num_envs, 1)
+        self.dof_dampings = self.default_dof_dampings.unsqueeze(0).repeat(self.num_envs, 1)
         self.gravities = torch.zeros(self.num_envs, 3, dtype=torch.float, device=self.device, requires_grad=False)
         self.gravity_vec = to_torch(get_axis_params(-1.0, self.up_axis_idx), device=self.device).repeat(
             (self.num_envs, 1)
@@ -1526,6 +1535,8 @@ class LeggedRobot(BaseTask):
             "motor_strengths",
             "Kp_factors",
             "Kd_factors",
+            "dof_frictions",
+            "dof_dampings",
         ]
         if self.initial_dynamics_dict is not None:
             for k, v in self.initial_dynamics_dict.items():
@@ -1673,17 +1684,38 @@ class LeggedRobot(BaseTask):
 
     def _generate_arm_mount_asset_files(self, asset_root, asset_file):
         arm_dr = self.cfg.domain_rand
+        source_path = os.path.join(asset_root, asset_file)
+        mount_joint_name = getattr(arm_dr, "mount_joint_name", "zarx5p2_mount") if arm_dr is not None else "zarx5p2_mount"
+
+        def read_source_mount_tf():
+            if not asset_file.lower().endswith(".urdf"):
+                return np.zeros((1, 6), dtype=np.float32)
+            source_tree_local = ET.parse(source_path)
+            source_joint_local = source_tree_local.getroot().find(f"./joint[@name='{mount_joint_name}']")
+            if source_joint_local is None:
+                raise ValueError(f"Cannot find fixed mount joint '{mount_joint_name}' in {source_path}")
+            source_origin_local = source_joint_local.find("origin")
+            if source_origin_local is None:
+                source_origin_local = ET.SubElement(source_joint_local, "origin")
+            xyz = np.fromstring(source_origin_local.get("xyz", "0 0 0"), sep=" ", dtype=np.float32)
+            rpy = np.fromstring(source_origin_local.get("rpy", "0 0 0"), sep=" ", dtype=np.float32)
+            if xyz.shape != (3,):
+                raise ValueError(f"Invalid xyz on joint '{mount_joint_name}': {source_origin_local.get('xyz')}")
+            if rpy.shape != (3,):
+                raise ValueError(f"Invalid rpy on joint '{mount_joint_name}': {source_origin_local.get('rpy')}")
+            return np.concatenate((xyz, rpy)).reshape(1, 6).astype(np.float32)
+
         if arm_dr is None or not getattr(arm_dr, "randomize_mount_pos", False):
             self.arm_mount_bucket_offsets = np.zeros((1, 3), dtype=np.float32)
+            self.arm_mount_bucket_tfs = read_source_mount_tf()
             return [asset_file]
 
         num_buckets = int(getattr(arm_dr, "mount_pos_buckets", 32))
         if num_buckets <= 1 or not asset_file.lower().endswith(".urdf"):
             self.arm_mount_bucket_offsets = np.zeros((1, 3), dtype=np.float32)
+            self.arm_mount_bucket_tfs = read_source_mount_tf()
             return [asset_file]
 
-        source_path = os.path.join(asset_root, asset_file)
-        mount_joint_name = getattr(arm_dr, "mount_joint_name", "zarx5p2_mount")
         source_tree = ET.parse(source_path)
         source_joint = source_tree.getroot().find(f"./joint[@name='{mount_joint_name}']")
         if source_joint is None:
@@ -1695,6 +1727,9 @@ class LeggedRobot(BaseTask):
         base_xyz = np.fromstring(source_origin.get("xyz", "0 0 0"), sep=" ", dtype=np.float32)
         if base_xyz.shape != (3,):
             raise ValueError(f"Invalid xyz on joint '{mount_joint_name}': {source_origin.get('xyz')}")
+        base_rpy = np.fromstring(source_origin.get("rpy", "0 0 0"), sep=" ", dtype=np.float32)
+        if base_rpy.shape != (3,):
+            raise ValueError(f"Invalid rpy on joint '{mount_joint_name}': {source_origin.get('rpy')}")
 
         ranges = np.asarray(arm_dr.mount_pos_range, dtype=np.float32)
         if ranges.shape != (3, 2):
@@ -1722,6 +1757,10 @@ class LeggedRobot(BaseTask):
             generated_files.append(generated_file)
 
         self.arm_mount_bucket_offsets = offsets
+        self.arm_mount_bucket_tfs = np.concatenate(
+            (base_xyz.reshape(1, 3) + offsets, np.repeat(base_rpy.reshape(1, 3), num_buckets, axis=0)),
+            axis=1,
+        ).astype(np.float32)
         print(
             f"[RoboDuet] mount position URDF buckets ready: {len(generated_files)} "
             f"({updated_files} updated)",
@@ -1774,6 +1813,12 @@ class LeggedRobot(BaseTask):
         self.num_bodies = self.gym.get_asset_rigid_body_count(self.robot_asset)
         dof_props_asset = self.gym.get_asset_dof_properties(self.robot_asset)
         rigid_shape_props_asset = self.gym.get_asset_rigid_shape_properties(self.robot_asset)
+        self.default_dof_frictions = to_torch(
+            dof_props_asset["friction"] if "friction" in dof_props_asset.dtype.names else np.zeros(self.num_dof),
+            device=self.device,
+            dtype=torch.float,
+        )
+        self.default_dof_dampings = to_torch(dof_props_asset["damping"], device=self.device, dtype=torch.float)
 
         # save body names from the asset
         body_names = self.gym.get_asset_rigid_body_names(self.robot_asset)
@@ -1815,6 +1860,7 @@ class LeggedRobot(BaseTask):
         env_upper = gymapi.Vec3(0.0, 0.0, 0.0)
         self.actor_handles = []
         self.arm_mount_bucket_ids = []
+        self.arm_mount_tfs = torch.zeros(self.num_envs, 6, dtype=torch.float, device=self.device, requires_grad=False)
         self.imu_sensor_handles = []
         self.envs = []
 
@@ -1854,6 +1900,7 @@ class LeggedRobot(BaseTask):
             self.envs.append(env_handle)
             self.actor_handles.append(anymal_handle)
             self.arm_mount_bucket_ids.append(bucket_id)
+            self.arm_mount_tfs[i] = to_torch(self.arm_mount_bucket_tfs[bucket_id], device=self.device, dtype=torch.float)
 
         self.feet_indices = torch.zeros(len(feet_names), dtype=torch.long, device=self.device, requires_grad=False)
         for i in range(len(feet_names)):

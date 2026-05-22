@@ -16,7 +16,7 @@ class StageSchedule:
         num_learning_iterations,
         default_switch_iteration,
         debug=False,
-        debug_switch_iteration=50,
+        debug_switch_iteration=20,
     ):
         self.train_stage = train_stage
         self.num_learning_iterations = num_learning_iterations

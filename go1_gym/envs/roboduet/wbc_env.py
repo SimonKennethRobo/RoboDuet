@@ -342,6 +342,11 @@ class WBCEnv(LeggedRobot):
         )
         return self._trajectory_points_body_9d(waypoint_ids)
 
+    def get_full_trajectory_privileged_obs(self):
+        waypoint_ids = torch.arange(self.traj_num_waypoints, device=self.device, dtype=torch.long)
+        waypoint_ids = waypoint_ids.unsqueeze(0).expand(self.num_envs, -1)
+        return self._trajectory_points_body_9d(waypoint_ids)
+
     def get_trajectory_error_sum(self):
         pos_error = torch.sum(
             torch.square(self.traj_ee_pose_body_history[..., :3] - self.traj_target_body_history[..., :3]), dim=-1
@@ -840,6 +845,140 @@ class WBCEnv(LeggedRobot):
             self._resample_user_commands(env_ids)
             self.commands_dog[env_ids, :3] = self.user_vel_cmd[env_ids] + self.arm_delta_vel_cmd[env_ids]
 
+    def _get_privileged_dof_slice(self, policy):
+        if policy == "dog":
+            return slice(0, self.num_actions_loco)
+        if policy == "arm":
+            return slice(self.num_actions_loco, self.num_actions_loco + self.cfg.arm.num_actions_arm_cd)
+        raise ValueError(f"Unknown privileged observation policy: {policy}")
+
+    def _get_physics_privileged_observations(self, policy):
+        privileged_obs_buf = torch.empty(self.num_envs, 0, device=self.device)
+        dof_slice = self._get_privileged_dof_slice(policy)
+
+        if self.cfg.env.priv_observe_friction:
+            scale, shift = get_scale_shift(self.cfg.normalization.friction_range)
+            privileged_obs_buf = torch.cat(
+                (privileged_obs_buf, (self.friction_coeffs[:, 0].unsqueeze(1) - shift) * scale),
+                dim=1,
+            )
+
+        if self.cfg.env.priv_observe_ground_friction:
+            self.ground_friction_coeffs = self._get_ground_frictions(range(self.num_envs))
+            scale, shift = get_scale_shift(self.cfg.normalization.ground_friction_range)
+            privileged_obs_buf = torch.cat(
+                (privileged_obs_buf, (self.ground_friction_coeffs.unsqueeze(1) - shift) * scale),
+                dim=1,
+            )
+
+        if self.cfg.env.priv_observe_restitution:
+            scale, shift = get_scale_shift(self.cfg.normalization.restitution_range)
+            privileged_obs_buf = torch.cat(
+                (privileged_obs_buf, (self.restitutions[:, 0].unsqueeze(1) - shift) * scale),
+                dim=1,
+            )
+
+        if self.cfg.env.priv_observe_base_mass:
+            scale, shift = get_scale_shift(self.cfg.normalization.added_mass_range)
+            privileged_obs_buf = torch.cat(
+                (privileged_obs_buf, (self.payloads.unsqueeze(1) - shift) * scale),
+                dim=1,
+            )
+
+        if self.cfg.env.priv_observe_com_displacement:
+            scale, shift = get_scale_shift(self.cfg.normalization.com_displacement_range)
+            privileged_obs_buf = torch.cat(
+                (privileged_obs_buf, (self.com_displacements - shift) * scale),
+                dim=1,
+            )
+
+        if self.cfg.env.priv_observe_motor_strength:
+            scale, shift = get_scale_shift(self.cfg.normalization.motor_strength_range)
+            privileged_obs_buf = torch.cat(
+                (privileged_obs_buf, (self.motor_strengths[:, dof_slice] - shift) * scale),
+                dim=1,
+            )
+
+        if self.cfg.env.priv_observe_motor_offset:
+            scale, shift = get_scale_shift(self.cfg.normalization.motor_offset_range)
+            privileged_obs_buf = torch.cat(
+                (privileged_obs_buf, (self.motor_offsets[:, dof_slice] - shift) * scale),
+                dim=1,
+            )
+
+        if self.cfg.env.priv_observe_Kp_factor:
+            scale, shift = get_scale_shift(self.cfg.normalization.Kp_factor_range)
+            privileged_obs_buf = torch.cat(
+                (privileged_obs_buf, (self.Kp_factors[:, dof_slice] - shift) * scale),
+                dim=1,
+            )
+
+        if self.cfg.env.priv_observe_Kd_factor:
+            scale, shift = get_scale_shift(self.cfg.normalization.Kd_factor_range)
+            privileged_obs_buf = torch.cat(
+                (privileged_obs_buf, (self.Kd_factors[:, dof_slice] - shift) * scale),
+                dim=1,
+            )
+
+        if self.cfg.env.priv_observe_joint_friction:
+            scale, shift = get_scale_shift(self.cfg.normalization.joint_friction_range)
+            privileged_obs_buf = torch.cat(
+                (privileged_obs_buf, (self.dof_frictions[:, dof_slice] - shift) * scale),
+                dim=1,
+            )
+
+        if getattr(self.cfg.env, "priv_observe_dof_damping", False):
+            scale, shift = get_scale_shift(self.cfg.normalization.dof_damping_range)
+            privileged_obs_buf = torch.cat(
+                (privileged_obs_buf, (self.dof_dampings[:, dof_slice] - shift) * scale),
+                dim=1,
+            )
+
+        if self.cfg.env.priv_observe_body_height:
+            scale, shift = get_scale_shift(self.cfg.normalization.body_height_range)
+            privileged_obs_buf = torch.cat(
+                (privileged_obs_buf, ((self.root_states[: self.num_envs, 2]).view(self.num_envs, -1) - shift) * scale),
+                dim=1,
+            )
+
+        if self.cfg.env.priv_observe_gravity:
+            scale, shift = get_scale_shift(self.cfg.normalization.gravity_range)
+            privileged_obs_buf = torch.cat((privileged_obs_buf, (self.gravities - shift) / scale), dim=1)
+
+        if self.cfg.env.priv_observe_body_velocity or self.cfg.env.priv_observe_vel:
+            if self.cfg.commands.global_reference:
+                lin_vel = self.root_states[: self.num_envs, 7:10]
+            else:
+                lin_vel = self.base_lin_vel
+            privileged_obs_buf = torch.cat(
+                (
+                    privileged_obs_buf,
+                    lin_vel * self.obs_scales.lin_vel,
+                    self.base_ang_vel * self.obs_scales.ang_vel,
+                ),
+                dim=1,
+            )
+
+        if self.cfg.env.priv_observe_clock_inputs:
+            privileged_obs_buf = torch.cat((privileged_obs_buf, self.clock_inputs), dim=1)
+
+        if self.cfg.env.priv_observe_desired_contact_states:
+            privileged_obs_buf = torch.cat((privileged_obs_buf, self.desired_contact_states), dim=1)
+
+        if self.cfg.env.priv_observe_high_freq_goal:
+            privileged_obs_buf = torch.cat(
+                (privileged_obs_buf, self.obj_pose_in_ee.clone(), self.obj_abg_in_ee.clone()),
+                dim=1,
+            )
+
+        if getattr(self.cfg.env, "priv_observe_arm_mount_tf", False):
+            privileged_obs_buf = torch.cat((privileged_obs_buf, self.arm_mount_tfs), dim=1)
+
+        if policy == "arm" and self.cfg.arm.trajectory.enabled:
+            privileged_obs_buf = torch.cat((privileged_obs_buf, self.get_full_trajectory_privileged_obs()), dim=1)
+
+        return privileged_obs_buf
+
     def _arm_post_callback_hook(self):
         if global_switch.switch_open:
             # Deferred resample: FK is now valid (after gym.simulate()), sample trajectory
@@ -933,18 +1072,7 @@ class WBCEnv(LeggedRobot):
             self.prev_ee_twist_body[:] = self.get_ee_twist_body()
 
     def _arm_privileged_obs_hook(self, privileged_obs_buf):
-        if self.cfg.env.priv_observe_high_freq_goal:
-            privileged_obs_buf = torch.cat(
-                (privileged_obs_buf, self.obj_pose_in_ee.clone(), self.obj_abg_in_ee.clone()), dim=1
-            )
-
-        lpy = self.get_lpy_in_base_coord(torch.arange(self.num_envs, device=self.device))
-        forward = quat_apply(self.base_quat, self.forward_vec)
-        yaw = torch.atan2(forward[:, 1], forward[:, 0])
-        quat_base = quat_from_euler_xyz(torch.zeros_like(yaw), torch.zeros_like(yaw), yaw)
-        quat_ee_in_base = quat_mul(quat_base, self.end_effector_state[:, 3:7])
-        privileged_obs_buf = torch.cat((privileged_obs_buf, lpy, quat_ee_in_base), dim=1)
-        return privileged_obs_buf
+        return self._get_physics_privileged_observations("dog")
 
     # ------------------------------------------------------------------
     # Viewer / video overlays
@@ -1305,12 +1433,13 @@ class WBCEnv(LeggedRobot):
             obs_builder = ObservationBuilder(self, "arm", self.cfg.arm.arm_num_observations)
             obs_builder.add(obs_buf)
             obs_buf = obs_builder.build()
-            privileged_obs_buf = torch.zeros(
-                self.num_envs,
-                self.cfg.arm.arm_num_privileged_obs,
-                dtype=torch.float,
-                device=self.device,
+            privileged_obs_buf = self._get_physics_privileged_observations("arm")
+            assert privileged_obs_buf.shape[1] == self.cfg.arm.arm_num_privileged_obs, (
+                f"arm num_privileged_obs ({self.cfg.arm.arm_num_privileged_obs}) \
+                           != the number of privileged observations ({privileged_obs_buf.shape[1]}),\
+                               you will discard data from the student!"
             )
+            privileged_obs_buf = clip_observation(self, privileged_obs_buf)
             return obs_buf, privileged_obs_buf
 
         if self.cfg.hybrid.use_vision:
@@ -1355,95 +1484,7 @@ class WBCEnv(LeggedRobot):
         # if self.add_noise:
         #     obs_buf += (2 * torch.rand_like(obs_buf) - 1) * self.noise_scale_vec
 
-        privileged_obs_buf = torch.empty(self.num_envs, 0).to(self.device)
-
-        if self.cfg.env.priv_observe_friction:
-            friction_coeffs_scale, friction_coeffs_shift = get_scale_shift(self.cfg.normalization.friction_range)
-            privileged_obs_buf = torch.cat(
-                (
-                    privileged_obs_buf,
-                    (self.friction_coeffs[:, 0].unsqueeze(1) - friction_coeffs_shift) * friction_coeffs_scale,
-                ),
-                dim=1,
-            )
-
-        if self.cfg.env.priv_observe_ground_friction:
-            self.ground_friction_coeffs = self._get_ground_frictions(range(self.num_envs))
-            ground_friction_coeffs_scale, ground_friction_coeffs_shift = get_scale_shift(
-                self.cfg.normalization.ground_friction_range
-            )
-            privileged_obs_buf = torch.cat(
-                (
-                    privileged_obs_buf,
-                    (self.ground_friction_coeffs.unsqueeze(1) - ground_friction_coeffs_shift)
-                    * ground_friction_coeffs_scale,
-                ),
-                dim=1,
-            )
-
-        if self.cfg.env.priv_observe_restitution:
-            restitutions_scale, restitutions_shift = get_scale_shift(self.cfg.normalization.restitution_range)
-            privileged_obs_buf = torch.cat(
-                (privileged_obs_buf, (self.restitutions[:, 0].unsqueeze(1) - restitutions_shift) * restitutions_scale),
-                dim=1,
-            )
-
-        if self.cfg.env.priv_observe_base_mass:
-            payloads_scale, payloads_shift = get_scale_shift(self.cfg.normalization.added_mass_range)
-            privileged_obs_buf = torch.cat(
-                (privileged_obs_buf, (self.payloads.unsqueeze(1) - payloads_shift) * payloads_scale), dim=1
-            )
-
-        if self.cfg.env.priv_observe_com_displacement:
-            com_displacements_scale, com_displacements_shift = get_scale_shift(
-                self.cfg.normalization.com_displacement_range
-            )
-            privileged_obs_buf = torch.cat(
-                (privileged_obs_buf, (self.com_displacements - com_displacements_shift) * com_displacements_scale),
-                dim=1,
-            )
-
-        if self.cfg.env.priv_observe_motor_strength:
-            motor_strengths_scale, motor_strengths_shift = get_scale_shift(self.cfg.normalization.motor_strength_range)
-            privileged_obs_buf = torch.cat(
-                (privileged_obs_buf, (self.motor_strengths - motor_strengths_shift) * motor_strengths_scale), dim=1
-            )
-
-        if self.cfg.env.priv_observe_motor_offset:
-            motor_offset_scale, motor_offset_shift = get_scale_shift(self.cfg.normalization.motor_offset_range)
-            privileged_obs_buf = torch.cat(
-                (privileged_obs_buf, (self.motor_offsets - motor_offset_shift) * motor_offset_scale), dim=1
-            )
-
-        if self.cfg.env.priv_observe_body_height:
-            body_height_scale, body_height_shift = get_scale_shift(self.cfg.normalization.body_height_range)
-            privileged_obs_buf = torch.cat(
-                (
-                    privileged_obs_buf,
-                    ((self.root_states[: self.num_envs, 2]).view(self.num_envs, -1) - body_height_shift)
-                    * body_height_scale,
-                ),
-                dim=1,
-            )
-
-        if self.cfg.env.priv_observe_gravity:
-            gravity_scale, gravity_shift = get_scale_shift(self.cfg.normalization.gravity_range)
-            privileged_obs_buf = torch.cat(
-                (privileged_obs_buf, (self.gravities - gravity_shift) / gravity_scale), dim=1
-            )
-
-        if self.cfg.env.priv_observe_high_freq_goal:
-            privileged_obs_buf = torch.cat(
-                (privileged_obs_buf, self.obj_pose_in_ee.clone(), self.obj_abg_in_ee.clone()), dim=1
-            )
-
-        # locol privileged obs
-        lpy = self.get_lpy_in_base_coord(torch.arange(self.num_envs, device=self.device))
-        forward = quat_apply(self.base_quat, self.forward_vec)
-        yaw = torch.atan2(forward[:, 1], forward[:, 0])
-        quat_base = quat_from_euler_xyz(torch.zeros_like(yaw), torch.zeros_like(yaw), yaw)
-        quat_ee_in_base = quat_mul(quat_base, self.end_effector_state[:, 3:7])
-        privileged_obs_buf = torch.cat((privileged_obs_buf, lpy, quat_ee_in_base), dim=1)
+        privileged_obs_buf = self._get_physics_privileged_observations("arm")
 
         assert privileged_obs_buf.shape[1] == self.cfg.arm.arm_num_privileged_obs, (
             f"arm num_privileged_obs ({self.cfg.arm.arm_num_privileged_obs}) \
@@ -1561,111 +1602,7 @@ class WBCEnv(LeggedRobot):
         # if self.add_noise:
         #     obs_buf += (2 * torch.rand_like(obs_buf) - 1) * self.noise_scale_vec
 
-        privileged_obs_buf = torch.empty(self.num_envs, 0).to(self.device)
-
-        if self.cfg.env.priv_observe_friction:
-            friction_coeffs_scale, friction_coeffs_shift = get_scale_shift(self.cfg.normalization.friction_range)
-            privileged_obs_buf = torch.cat(
-                (
-                    privileged_obs_buf,
-                    (self.friction_coeffs[:, 0].unsqueeze(1) - friction_coeffs_shift) * friction_coeffs_scale,
-                ),
-                dim=1,
-            )
-
-        if self.cfg.env.priv_observe_ground_friction:
-            self.ground_friction_coeffs = self._get_ground_frictions(range(self.num_envs))
-            ground_friction_coeffs_scale, ground_friction_coeffs_shift = get_scale_shift(
-                self.cfg.normalization.ground_friction_range
-            )
-            privileged_obs_buf = torch.cat(
-                (
-                    privileged_obs_buf,
-                    (self.ground_friction_coeffs.unsqueeze(1) - ground_friction_coeffs_shift)
-                    * ground_friction_coeffs_scale,
-                ),
-                dim=1,
-            )
-
-        if self.cfg.env.priv_observe_restitution:
-            restitutions_scale, restitutions_shift = get_scale_shift(self.cfg.normalization.restitution_range)
-            privileged_obs_buf = torch.cat(
-                (privileged_obs_buf, (self.restitutions[:, 0].unsqueeze(1) - restitutions_shift) * restitutions_scale),
-                dim=1,
-            )
-
-        if self.cfg.env.priv_observe_base_mass:
-            payloads_scale, payloads_shift = get_scale_shift(self.cfg.normalization.added_mass_range)
-            privileged_obs_buf = torch.cat(
-                (privileged_obs_buf, (self.payloads.unsqueeze(1) - payloads_shift) * payloads_scale), dim=1
-            )
-
-        if self.cfg.env.priv_observe_com_displacement:
-            com_displacements_scale, com_displacements_shift = get_scale_shift(
-                self.cfg.normalization.com_displacement_range
-            )
-            privileged_obs_buf = torch.cat(
-                (privileged_obs_buf, (self.com_displacements - com_displacements_shift) * com_displacements_scale),
-                dim=1,
-            )
-
-        if self.cfg.env.priv_observe_motor_strength:
-            motor_strengths_scale, motor_strengths_shift = get_scale_shift(self.cfg.normalization.motor_strength_range)
-            privileged_obs_buf = torch.cat(
-                (privileged_obs_buf, (self.motor_strengths - motor_strengths_shift) * motor_strengths_scale), dim=1
-            )
-
-        if self.cfg.env.priv_observe_motor_offset:
-            motor_offset_scale, motor_offset_shift = get_scale_shift(self.cfg.normalization.motor_offset_range)
-            privileged_obs_buf = torch.cat(
-                (privileged_obs_buf, (self.motor_offsets - motor_offset_shift) * motor_offset_scale), dim=1
-            )
-
-        if self.cfg.env.priv_observe_body_height:
-            body_height_scale, body_height_shift = get_scale_shift(self.cfg.normalization.body_height_range)
-            privileged_obs_buf = torch.cat(
-                (
-                    privileged_obs_buf,
-                    ((self.root_states[: self.num_envs, 2]).view(self.num_envs, -1) - body_height_shift)
-                    * body_height_scale,
-                ),
-                dim=1,
-            )
-
-        if self.cfg.env.priv_observe_body_velocity:
-            body_velocity_scale, body_velocity_shift = get_scale_shift(self.cfg.normalization.body_velocity_range)
-            privileged_obs_buf = torch.cat(
-                (
-                    privileged_obs_buf,
-                    ((self.base_lin_vel).view(self.num_envs, -1) - body_velocity_shift) * body_velocity_scale,
-                ),
-                dim=1,
-            )
-
-        if self.cfg.env.priv_observe_gravity:
-            gravity_scale, gravity_shift = get_scale_shift(self.cfg.normalization.gravity_range)
-            privileged_obs_buf = torch.cat(
-                (privileged_obs_buf, (self.gravities - gravity_shift) / gravity_scale), dim=1
-            )
-
-        if self.cfg.env.priv_observe_clock_inputs:
-            privileged_obs_buf = torch.cat((privileged_obs_buf, self.clock_inputs), dim=-1)
-
-        if self.cfg.env.priv_observe_desired_contact_states:
-            privileged_obs_buf = torch.cat((privileged_obs_buf, self.desired_contact_states), dim=-1)
-
-        if self.cfg.env.priv_observe_desired_contact_states:
-            privileged_obs_buf = torch.cat((privileged_obs_buf, self.desired_contact_states), dim=-1)
-
-        if self.cfg.env.priv_observe_vel:
-            if self.cfg.commands.global_reference:
-                privileged_obs_buf = torch.cat(
-                    (privileged_obs_buf, self.root_states[: self.num_envs, 7:10] * self.obs_scales.lin_vel), dim=-1
-                )
-            else:
-                privileged_obs_buf = torch.cat(
-                    (privileged_obs_buf, self.base_lin_vel * self.obs_scales.lin_vel), dim=-1
-                )
+        privileged_obs_buf = self._get_physics_privileged_observations("dog")
 
         assert privileged_obs_buf.shape[1] == self.cfg.dog.dog_num_privileged_obs, (
             f"dog num_privileged_obs ({self.cfg.dog.dog_num_privileged_obs}) \

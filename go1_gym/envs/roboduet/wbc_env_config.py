@@ -100,7 +100,7 @@ class ArmTrajectoryConfig:
 @dataclass(frozen=True)
 class ArmConfig:
     num_actions_arm: int = 6
-    arm_num_privileged_obs: int = 9
+    arm_num_privileged_obs: int = 50
     arm_num_observation_history: int = 30
     arm_num_observations: int = 20
     arm_num_commands: int = 6
@@ -116,7 +116,7 @@ class ArmConfig:
 @dataclass(frozen=True)
 class DogConfig:
     num_actions_loco: int = 12
-    dog_num_privileged_obs: int = 2
+    dog_num_privileged_obs: int = 66
     dog_num_observation_history: int = 30
     dog_num_observations: int = 68  # +12 vs old 56: arm joint pos (6) + vel (6)
     dog_num_commands: int = 5
@@ -131,10 +131,27 @@ class EnvConfig:
     keep_arm_fixed: bool = True
     num_actions: int = 18
     num_observations: int = 63
-    num_privileged_obs: int = 9
-    dog_num_privileged_obs: int = 2
-    arm_num_privileged_obs: int = 9
-    priv_observe_vel: bool = False
+    num_privileged_obs: int = 66
+    dog_num_privileged_obs: int = 66
+    arm_num_privileged_obs: int = 50
+    priv_observe_arm_mount_tf: bool = True
+    priv_observe_friction: bool = True
+    priv_observe_ground_friction: bool = False
+    priv_observe_restitution: bool = True
+    priv_observe_base_mass: bool = True
+    priv_observe_com_displacement: bool = True
+    priv_observe_motor_strength: bool = False
+    priv_observe_motor_offset: bool = False
+    priv_observe_joint_friction: bool = True
+    priv_observe_Kp_factor: bool = True
+    priv_observe_Kd_factor: bool = True
+    priv_observe_dof_damping: bool = True
+    priv_observe_body_height: bool = False
+    priv_observe_gravity: bool = False
+    priv_observe_body_velocity: bool = False
+    priv_observe_clock_inputs: bool = False
+    priv_observe_desired_contact_states: bool = False
+    priv_observe_vel: bool = True
     priv_observe_high_freq_goal: bool = False
     observe_two_prev_actions: bool = False
     record_video: bool = False
@@ -611,6 +628,9 @@ def materialize_base_cfg(cfg, defaults, options):
     _copy_dataclass_attrs(cfg.domain_rand, defaults.domain_rand)
     _copy_dataclass_attrs(cfg.rewards, defaults.rewards)
     _copy_dataclass_attrs(cfg.reward_scales, defaults.reward_scales)
+    cfg.normalization.Kp_factor_range = [0.5, 1.5]
+    cfg.normalization.Kd_factor_range = [0.2, 2.0]
+    cfg.normalization.dof_damping_range = [0.0, 10.0]
 
     cfg.terrain.mesh_type = defaults.terrain.mesh_type
     if cfg.terrain.mesh_type == "plane":
@@ -631,6 +651,61 @@ def materialize_base_cfg(cfg, defaults, options):
     cfg.hybrid.reward_scales.arm_action_smoothness_2 = (
         rewards.arm_action_smoothness_2_multiplier * cfg.reward_scales.action_smoothness_2
     )
+
+
+def _privileged_obs_dim(cfg, dof_dim):
+    dim = 0
+    if cfg.env.priv_observe_friction:
+        dim += 1
+    if cfg.env.priv_observe_ground_friction:
+        dim += 1
+    if cfg.env.priv_observe_restitution:
+        dim += 1
+    if cfg.env.priv_observe_base_mass:
+        dim += 1
+    if cfg.env.priv_observe_com_displacement:
+        dim += 3
+    if cfg.env.priv_observe_motor_strength:
+        dim += dof_dim
+    if cfg.env.priv_observe_motor_offset:
+        dim += dof_dim
+    if cfg.env.priv_observe_Kp_factor:
+        dim += dof_dim
+    if cfg.env.priv_observe_Kd_factor:
+        dim += dof_dim
+    if cfg.env.priv_observe_joint_friction:
+        dim += dof_dim
+    if getattr(cfg.env, "priv_observe_dof_damping", False):
+        dim += dof_dim
+    if cfg.env.priv_observe_body_height:
+        dim += 1
+    if cfg.env.priv_observe_gravity:
+        dim += 3
+    if cfg.env.priv_observe_body_velocity or cfg.env.priv_observe_vel:
+        dim += 6
+    if cfg.env.priv_observe_clock_inputs:
+        dim += 4
+    if cfg.env.priv_observe_desired_contact_states:
+        dim += 4
+    if cfg.env.priv_observe_high_freq_goal:
+        dim += 6
+    if getattr(cfg.env, "priv_observe_arm_mount_tf", False):
+        dim += 6
+
+    return dim
+
+
+def configure_privileged_obs_dims(cfg):
+    dog_dim = _privileged_obs_dim(cfg, cfg.dog.num_actions_loco)
+    arm_dim = _privileged_obs_dim(cfg, ROBODUET_DEFAULTS.arm.num_actions_arm_cd)
+    if cfg.arm.trajectory.enabled:
+        arm_dim += cfg.arm.trajectory.num_waypoints * 9
+
+    cfg.env.num_privileged_obs = dog_dim
+    cfg.env.arm_num_privileged_obs = arm_dim
+    cfg.env.dog_num_privileged_obs = dog_dim
+    cfg.arm.arm_num_privileged_obs = arm_dim
+    cfg.dog.dog_num_privileged_obs = dog_dim
 
 
 def enable_rot6d(cfg, layout):
@@ -745,5 +820,6 @@ def configure_task_from_args(cfg, args, traj_track_reward_scale=5.0):
         disable_dyna_gait(cfg)
 
     layout.finalize(cfg)
+    configure_privileged_obs_dims(cfg)
     configure_robot_asset(cfg, defaults, options.robot)
     validate_roboduet_cfg(cfg)
