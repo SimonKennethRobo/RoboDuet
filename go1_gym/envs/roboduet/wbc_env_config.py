@@ -30,7 +30,7 @@ class HybridRewardTerminationConfig:
 
 @dataclass(frozen=True)
 class HybridRewardScaleConfig:
-    jump: float = -0.0
+    jump: float = 5
     arm_manip_commands_tracking_combine: float = 1.0
     vis_manip_commands_tracking_lpy: float = 1.0
     vis_manip_commands_tracking_rpy: float = 1.0
@@ -224,7 +224,7 @@ class RewardConfig:
 
 @dataclass(frozen=True)
 class BaseRewardScaleConfig:
-    jump: float = -0.0
+    jump: float = 10
     loco_energy: float = -0.00004
 
 
