@@ -14,6 +14,7 @@ from go1_gym.envs.roboduet import HistoryWrapper, WBCEnv
 from go1_gym.envs.roboduet.stage_schedule import StageSchedule, apply_hybrid_reward_settings
 from go1_gym.envs.roboduet.wbc_env_config import RoboDuetCfg as Cfg, configure_task_from_args
 from go1_gym.utils import format_code, global_switch, set_seed
+from go1_gym.utils.wandb_config import build_wandb_config
 from go1_gym_learn.ppo_cse_automatic import ArmRunnerArgs, DogRunnerArgs, Runner, RunnerArgs
 from go1_gym_learn.ppo_cse_automatic.arm_ac import ArmAC_Args
 from go1_gym_learn.ppo_cse_automatic.dog_ac import DogAC_Args
@@ -78,6 +79,21 @@ def main(arg):
         apply_hybrid_reward_settings(Cfg)
 
     now = datetime.now()
+    wandb_config = build_wandb_config(
+        args=args,
+        Cfg=Cfg,
+        RunnerArgs=RunnerArgs,
+        ArmRunnerArgs=ArmRunnerArgs,
+        DogRunnerArgs=DogRunnerArgs,
+        ArmAC_Args=ArmAC_Args,
+        DogAC_Args=DogAC_Args,
+        PPO_Args=PPO_Args,
+        GlobalSwitch={
+            "pretrained_to_hybrid_start": global_switch.pretrained_to_hybrid_start,
+            "pretrained_to_hybrid_end": global_switch.pretrained_to_hybrid_end,
+            "stage1_arm_ramp_iterations": getattr(global_switch, "stage1_arm_ramp_iterations", None),
+        },
+    )
     wandb.init(
         entity="simon00715",
         project="roboduet",
@@ -87,6 +103,7 @@ def main(arg):
         name=f"{now.strftime('%Y-%m-%d')}/{args.run_name}_{now.strftime('%H%M%S')}",
         tags=args.tags,
         dir=f"{MINI_GYM_ROOT_DIR}",
+        config=wandb_config,
     )
 
     if args.debug:

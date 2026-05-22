@@ -24,6 +24,7 @@ from go1_gym_learn.ppo_cse_unified import UnifiedRunnerArgs
 from go1_gym_learn.ppo_cse_unified.unified2head_ac import Unified2AC_Args
 
 from go1_gym.utils import format_code, set_seed, global_switch
+from go1_gym.utils.wandb_config import build_wandb_config
 os.environ["WANDB_SILENT"] = "true"
 
 def configure_train_stage(args):
@@ -83,6 +84,18 @@ def train_go1(headless=True):
 
     now = datetime.now()
     stem = Path(__file__).stem
+    wandb_config = build_wandb_config(
+        args=args,
+        Cfg=Cfg,
+        UnifiedRunnerArgs=UnifiedRunnerArgs,
+        Unified2AC_Args=Unified2AC_Args,
+        UnifiedPPO_Args=UnifiedPPO_Args,
+        GlobalSwitch={
+            "pretrained_to_hybrid_start": global_switch.pretrained_to_hybrid_start,
+            "pretrained_to_hybrid_end": global_switch.pretrained_to_hybrid_end,
+            "stage1_arm_ramp_iterations": getattr(global_switch, "stage1_arm_ramp_iterations", None),
+        },
+    )
     wandb.init(entity="simon00715",
                project="roboduet",
                group=args.run_name,
@@ -90,7 +103,8 @@ def train_go1(headless=True):
                notes=args.notes,
                name=f'{now.strftime("%Y-%m-%d")}/{stem}/{now.strftime("%H%M%S.%f")}',
                tags=args.tags,
-               dir=f"{MINI_GYM_ROOT_DIR}")
+               dir=f"{MINI_GYM_ROOT_DIR}",
+               config=wandb_config)
 
     args.log_dir = osp.join(f"{MINI_GYM_ROOT_DIR}/runs/{args.run_name}", wandb.run.name)
     args.log_dir += f'_seed{args.seed}'
