@@ -250,7 +250,18 @@ class Runner:
                     ep_string += f"""{f'Mean episode {key}:':>{pad}} {mean:.4f}\n"""
 
                     if not self.debug:
-                        wandb_dict['Train_Reward_episode/' + key] = mean
+                        if key == "stage1_arm_curriculum_intensity":
+                            wandb_dict["Curriculum/arm_disturbance_intensity"] = mean
+                        elif key.startswith("curriculum_threshold_"):
+                            name = key.replace("curriculum_threshold_", "", 1)
+                            wandb_dict["Curriculum/threshold_" + name] = mean
+                        elif key == "command_curriculum_weight":
+                            wandb_dict["Curriculum/command_bin_weight"] = mean
+                        elif key.startswith("global_switch_"):
+                            name = key.replace("global_switch_", "", 1)
+                            wandb_dict["Global_Switch/" + name] = mean
+                        else:
+                            wandb_dict["Train_Reward_episode/" + key] = mean
 
                 dog_action_std = self.alg.actor_critic.std_dog.clone()
                 arm_action_std = self.alg.actor_critic.std_arm.clone()

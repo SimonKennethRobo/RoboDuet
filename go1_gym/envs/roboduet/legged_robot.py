@@ -407,6 +407,46 @@ class LeggedRobot(BaseTask):
             for key in self.episode_sums.keys():
                 self.extras["train/episode"]["rew_" + key] = torch.mean(self.episode_sums[key][train_env_ids])
                 self.episode_sums[key][train_env_ids] = 0.0
+            if hasattr(self, "stage1_arm_curriculum_intensity"):
+                self.extras["train/episode"]["stage1_arm_curriculum_intensity"] = torch.tensor(
+                    self.stage1_arm_curriculum_intensity,
+                    device=self.device,
+                )
+            self.extras["train/episode"]["global_switch_count"] = torch.tensor(
+                float(global_switch.count),
+                device=self.device,
+            )
+            self.extras["train/episode"]["global_switch_stage1_count"] = torch.tensor(
+                float(getattr(global_switch, "stage1_count", 0)),
+                device=self.device,
+            )
+            self.extras["train/episode"]["global_switch_stage1_ramp_iters"] = torch.tensor(
+                float(getattr(global_switch, "stage1_arm_ramp_iterations", 0)),
+                device=self.device,
+            )
+            self.extras["train/episode"]["global_switch_pretrained_start"] = torch.tensor(
+                float(global_switch.pretrained_to_hybrid_start),
+                device=self.device,
+            )
+            self.extras["train/episode"]["global_switch_pretrained_end"] = torch.tensor(
+                float(global_switch.pretrained_to_hybrid_end),
+                device=self.device,
+            )
+            self.extras["train/episode"]["global_switch_open"] = torch.tensor(
+                float(getattr(global_switch, "switch_open", False)),
+                device=self.device,
+            )
+            for name, value in self.curriculum_thresholds.items():
+                self.extras["train/episode"]["curriculum_threshold_" + name] = torch.tensor(
+                    float(value),
+                    device=self.device,
+                )
+            if getattr(self, "curricula", None):
+                curriculum = self.curricula[0]
+                bins = self.env_command_bins[train_env_ids.cpu().numpy()]
+                bin_weights = torch.tensor(curriculum.weights[bins], device=self.device, dtype=torch.float)
+                if bin_weights.numel() > 0:
+                    self.extras["train/episode"]["command_curriculum_weight"] = torch.mean(bin_weights)
 
         # log additional curriculum info
         if self.cfg.terrain.curriculum:
