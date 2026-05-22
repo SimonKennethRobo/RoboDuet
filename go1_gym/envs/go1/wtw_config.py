@@ -103,7 +103,6 @@ def config_wtw(Cnfg: Any):
     Cnfg.reward_scales.dof_vel = -1e-4
     Cnfg.reward_scales.dof_pos = -0.0
     Cnfg.reward_scales.jump = 10.0
-    Cnfg.reward_scales.base_height = 0.0
     Cnfg.rewards.base_height_target = 0.30
     Cnfg.reward_scales.estimation_bonus = 0.0
     Cnfg.reward_scales.raibert_heuristic = -10.0

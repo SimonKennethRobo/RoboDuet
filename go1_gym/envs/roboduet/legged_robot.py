@@ -606,7 +606,7 @@ class LeggedRobot(BaseTask):
         self.rew_buf_arm[:] = 0.0
         self.rew_buf_pos_arm[:] = 0.0
         self.rew_buf_neg_arm[:] = 0.0
-        for i in range(len(reward_scales)):
+        for i in range(len(self.reward_names)):
             name = self.reward_names[i]
             rew = self.reward_functions[i]() * reward_scales[name]
 
@@ -882,7 +882,7 @@ class LeggedRobot(BaseTask):
 
         old_bins = self.env_command_bins[env_ids.cpu().numpy()]
         if len(success_thresholds) > 0:
-            local_range = np.array([0.55, 0.55, 0.55, 1.0, 1.0])
+            local_range = np.array([0.55, 0.55, 0.55, 1.0, 1.0, 1.0])
             if self.cfg.commands.use_dynamic_gait:
                 local_range = np.concatenate([local_range, np.array([0.55, 0.55, 0.55, 0.55, 0.55])])
             curriculum.update(
@@ -940,16 +940,17 @@ class LeggedRobot(BaseTask):
         if not global_switch.switch_open:
             self.commands_dog[env_ids, 3] = new_commands[:, 3]
             self.commands_dog[env_ids, 4] = new_commands[:, 4]
+            self.commands_dog[env_ids, 5] = new_commands[:, 5]  # body_height_cmd
 
         if self.cfg.commands.use_dynamic_gait and not global_switch.switch_open:
-            self.commands_dog[env_ids, 5] = new_commands[:, 5]
             self.commands_dog[env_ids, 6] = new_commands[:, 6]
             self.commands_dog[env_ids, 7] = new_commands[:, 7]
             self.commands_dog[env_ids, 8] = new_commands[:, 8]
             self.commands_dog[env_ids, 9] = new_commands[:, 9]
+            self.commands_dog[env_ids, 10] = new_commands[:, 10]
             standing_mask = torch.norm(self.commands_dog[env_ids, :3], dim=1) < 0.1
             if len(standing_mask.nonzero()) > 0:
-                self.commands_dog[env_ids[standing_mask], 5] = 0.0
+                self.commands_dog[env_ids[standing_mask], 6] = 0.0
 
         # reset command sums
         for key in self.command_sums.keys():
@@ -991,6 +992,11 @@ class LeggedRobot(BaseTask):
                     self.cfg.commands.limit_body_roll[0],
                     self.cfg.commands.limit_body_roll[1],
                     self.cfg.commands.num_bins_body_roll,
+                ),
+                body_height=(
+                    self.cfg.commands.limit_body_height[0],
+                    self.cfg.commands.limit_body_height[1],
+                    self.cfg.commands.num_bins_body_height,
                 ),
             )
             if self.cfg.commands.use_dynamic_gait:
@@ -1038,6 +1044,7 @@ class LeggedRobot(BaseTask):
                 self.cfg.commands.ang_vel_yaw[0],
                 self.cfg.commands.body_pitch_range[0],
                 self.cfg.commands.body_roll_range[0],
+                self.cfg.commands.limit_body_height[0],
             ]
         )
         high = np.array(
@@ -1047,6 +1054,7 @@ class LeggedRobot(BaseTask):
                 self.cfg.commands.ang_vel_yaw[1],
                 self.cfg.commands.body_pitch_range[1],
                 self.cfg.commands.body_roll_range[1],
+                self.cfg.commands.limit_body_height[1],
             ]
         )
         if self.cfg.commands.use_dynamic_gait:
@@ -1466,7 +1474,7 @@ class LeggedRobot(BaseTask):
 
         self.commands_dog = torch.zeros(
             self.num_envs, self.cfg.dog.dog_num_commands, dtype=torch.float, device=self.device, requires_grad=False
-        )  # x vel, y vel, yaw vel, heading
+        )  # x vel, y vel, yaw vel, body_pitch, body_roll, body_height, [gait...]
         self.commands_scale_dog = torch.tensor(
             [
                 self.obs_scales.lin_vel,
@@ -1474,6 +1482,7 @@ class LeggedRobot(BaseTask):
                 self.obs_scales.ang_vel,
                 self.obs_scales.body_pitch_cmd,
                 self.obs_scales.body_roll_cmd,
+                self.obs_scales.body_height_cmd,
                 self.obs_scales.gait_freq_cmd,
                 self.obs_scales.footswing_height_cmd,
                 self.obs_scales.stance_width_cmd,
@@ -2230,9 +2239,9 @@ class LeggedRobot(BaseTask):
         phases, offsets, bounds = gaits["trotting"]
 
         if self.cfg.commands.use_dynamic_gait:
-            frequencies = self.commands_dog[:, 5]  # (num_envs,)
-            durations = self.commands_dog[:, 9]  # (num_envs,)
-            footswing_height_cmd = self.commands_dog[:, 6]  # (num_envs,)
+            frequencies = self.commands_dog[:, 6]  # (num_envs,)
+            durations = self.commands_dog[:, 10]  # (num_envs,)
+            footswing_height_cmd = self.commands_dog[:, 7]  # (num_envs,)
         else:
             frequencies = 3.0
             durations = 0.5

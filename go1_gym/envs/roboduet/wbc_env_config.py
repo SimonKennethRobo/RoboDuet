@@ -100,9 +100,9 @@ class ArmTrajectoryConfig:
 @dataclass(frozen=True)
 class ArmConfig:
     num_actions_arm: int = 6
-    arm_num_privileged_obs: int = 50
+    arm_num_privileged_obs: int = 0
     arm_num_observation_history: int = 30
-    arm_num_observations: int = 20
+    arm_num_observations: int = 0
     arm_num_commands: int = 6
     num_actions_arm_cd: int = 8
     use_adaptation_module: bool = False
@@ -116,12 +116,12 @@ class ArmConfig:
 @dataclass(frozen=True)
 class DogConfig:
     num_actions_loco: int = 12
-    dog_num_privileged_obs: int = 66
+    dog_num_privileged_obs: int = 0
     dog_num_observation_history: int = 30
-    dog_num_observations: int = 68  # +12 vs old 56: arm joint pos (6) + vel (6)
-    dog_num_commands: int = 5
+    dog_num_observations: int = 0
+    dog_num_commands: int = 6
     dog_actions: int = 12
-    use_adaptation_module: bool = False
+    use_adaptation_module: bool = True
     stiffness_leg: dict = None
     damping_leg: dict = None
 
@@ -130,10 +130,10 @@ class DogConfig:
 class EnvConfig:
     keep_arm_fixed: bool = True
     num_actions: int = 18
-    num_observations: int = 63
-    num_privileged_obs: int = 66
-    dog_num_privileged_obs: int = 66
-    arm_num_privileged_obs: int = 50
+    num_observations: int = 0
+    num_privileged_obs: int = 0
+    dog_num_privileged_obs: int = 0
+    arm_num_privileged_obs: int = 0
     priv_observe_arm_mount_tf: bool = True
     priv_observe_friction: bool = True
     priv_observe_ground_friction: bool = False
@@ -285,10 +285,7 @@ class DynaGaitFeatureConfig:
 
 @dataclass(frozen=True)
 class TrajTrackFeatureConfig:
-    dog_obs_dims: int = 9
     arm_delta_vel_action_dims: int = 3
-    env_extra_obs_without_window: int = 1 + 4 + 9 + 6 + 1
-    arm_obs_without_window: int = 12 + 1 + 4 + 3 + 3 + 9 + 6 + 1
     trajectory_current_tracking_scale: float = 1.0
     trajectory_completion_time_scale: float = 0.5
     arm_delta_vel_cmd_scale: float = -0.05
@@ -372,9 +369,6 @@ class RoboDuetRuntimeOptions:
 
 @dataclass
 class RoboDuetLayout:
-    env_obs: int
-    arm_obs: int
-    dog_obs: int
     arm_cmd: int
     dog_cmd: int
     arm_action_cd: int
@@ -382,24 +376,22 @@ class RoboDuetLayout:
     @classmethod
     def from_cfg(cls, cfg):
         return cls(
-            env_obs=cfg.env.num_observations,
-            arm_obs=cfg.arm.arm_num_observations,
-            dog_obs=cfg.dog.dog_num_observations,
             arm_cmd=cfg.arm.arm_num_commands,
             dog_cmd=cfg.dog.dog_num_commands,
             arm_action_cd=cfg.arm.num_actions_arm_cd,
         )
 
     def finalize(self, cfg):
-        cfg.env.num_observations = self.env_obs
-        cfg.env.num_obs_history = cfg.env.num_observation_history * self.env_obs
-        cfg.arm.arm_num_observations = self.arm_obs
-        cfg.arm.arm_num_obs_history = cfg.arm.arm_num_observation_history * self.arm_obs
         cfg.arm.arm_num_commands = self.arm_cmd
         cfg.arm.num_actions_arm_cd = self.arm_action_cd
-        cfg.dog.dog_num_observations = self.dog_obs
-        cfg.dog.dog_num_obs_history = cfg.dog.dog_num_observation_history * self.dog_obs
         cfg.dog.dog_num_commands = self.dog_cmd
+
+        cfg.env.num_observations = sum_dim_parts(env_obs_dim_parts(cfg))
+        cfg.env.num_obs_history = cfg.env.num_observation_history * cfg.env.num_observations
+        cfg.arm.arm_num_observations = sum_dim_parts(arm_obs_dim_parts(cfg))
+        cfg.arm.arm_num_obs_history = cfg.arm.arm_num_observation_history * cfg.arm.arm_num_observations
+        cfg.dog.dog_num_observations = sum_dim_parts(dog_obs_dim_parts(cfg))
+        cfg.dog.dog_num_obs_history = cfg.dog.dog_num_observation_history * cfg.dog.dog_num_observations
 
 
 ROBODUET_DEFAULTS = RoboDuetDefaults()
@@ -653,53 +645,164 @@ def materialize_base_cfg(cfg, defaults, options):
     )
 
 
-def _privileged_obs_dim(cfg, dof_dim):
-    dim = 0
-    if cfg.env.priv_observe_friction:
-        dim += 1
-    if cfg.env.priv_observe_ground_friction:
-        dim += 1
-    if cfg.env.priv_observe_restitution:
-        dim += 1
-    if cfg.env.priv_observe_base_mass:
-        dim += 1
-    if cfg.env.priv_observe_com_displacement:
-        dim += 3
-    if cfg.env.priv_observe_motor_strength:
-        dim += dof_dim
-    if cfg.env.priv_observe_motor_offset:
-        dim += dof_dim
-    if cfg.env.priv_observe_Kp_factor:
-        dim += dof_dim
-    if cfg.env.priv_observe_Kd_factor:
-        dim += dof_dim
-    if cfg.env.priv_observe_joint_friction:
-        dim += dof_dim
-    if getattr(cfg.env, "priv_observe_dof_damping", False):
-        dim += dof_dim
-    if cfg.env.priv_observe_body_height:
-        dim += 1
-    if cfg.env.priv_observe_gravity:
-        dim += 3
-    if cfg.env.priv_observe_body_velocity or cfg.env.priv_observe_vel:
-        dim += 6
-    if cfg.env.priv_observe_clock_inputs:
-        dim += 4
-    if cfg.env.priv_observe_desired_contact_states:
-        dim += 4
-    if cfg.env.priv_observe_high_freq_goal:
-        dim += 6
-    if getattr(cfg.env, "priv_observe_arm_mount_tf", False):
-        dim += 6
+def sum_dim_parts(parts):
+    return sum(parts.values())
 
-    return dim
+
+def env_obs_dim_parts(cfg):
+    parts = {
+        "dof_pos": cfg.env.num_actions,
+        "dog_dof_vel": cfg.dog.num_actions_loco,
+        "actions": cfg.env.num_actions,
+        "dog_velocity_commands": 3,
+        "arm_task": cfg.arm.arm_num_commands + 2,
+    }
+    if cfg.commands.use_dynamic_gait:
+        parts["dynamic_gait_commands"] = cfg.dog.dog_num_commands - 3
+    if cfg.env.observe_two_prev_actions:
+        parts["two_prev_actions"] = cfg.env.num_actions
+    if cfg.env.observe_timing_parameter:
+        parts["timing_parameter"] = 1
+    if cfg.env.observe_clock_inputs:
+        parts["clock_inputs"] = 4
+    if cfg.env.observe_vel:
+        parts["base_velocity"] = 6
+    if cfg.env.observe_only_ang_vel:
+        parts["base_ang_vel"] = 3
+    if cfg.env.observe_only_lin_vel:
+        parts["base_lin_vel"] = 3
+    if cfg.env.observe_yaw:
+        parts["heading"] = 1
+    if cfg.env.observe_contact_states:
+        parts["contact_states"] = 4
+    if cfg.arm.trajectory.enabled:
+        parts.update(
+            {
+                "base_height": 1,
+                "foot_contact_states": 4,
+                "ee_pose_body": 9,
+                "ee_twist_body": 6,
+                "trajectory_window": len(cfg.arm.trajectory.window_offsets) * 9,
+                "trajectory_remaining_time": 1,
+            }
+        )
+    return parts
+
+
+def arm_obs_dim_parts(cfg):
+    if cfg.arm.trajectory.enabled:
+        parts = {
+            "arm_dof_pos": cfg.arm.num_actions_arm,
+            "arm_actions": cfg.arm.num_actions_arm,
+            "base_height": 1,
+            "foot_contact_states": 4,
+            "base_ang_vel": 3,
+            "dog_velocity_commands": 3,
+            "ee_pose_body": 9,
+            "ee_twist_body": 6,
+            "trajectory_window": len(cfg.arm.trajectory.window_offsets) * 9,
+            "trajectory_remaining_time": 1,
+        }
+        if cfg.commands.use_dynamic_gait:
+            parts["dynamic_gait_commands"] = cfg.dog.dog_num_commands - 6
+        return parts
+
+    parts = {
+        "arm_dof_pos": cfg.arm.num_actions_arm,
+        "arm_actions": cfg.arm.num_actions_arm,
+        "arm_commands": cfg.arm.arm_num_commands,
+        "base_roll_pitch": 2,
+    }
+    if cfg.commands.use_dynamic_gait:
+        parts["dynamic_gait_commands"] = cfg.dog.dog_num_commands - 6
+    if cfg.env.observe_two_prev_actions:
+        parts["two_prev_actions"] = cfg.env.num_actions
+    return parts
+
+
+def dog_obs_dim_parts(cfg):
+    parts = {
+        "projected_gravity": 3,
+        "dog_dof_pos": cfg.dog.num_actions_loco,
+        "dog_dof_vel": cfg.dog.num_actions_loco,
+        "dog_actions": cfg.dog.num_actions_loco,
+        "dog_commands": cfg.dog.dog_num_commands,
+        "arm_commands": cfg.arm.arm_num_commands,
+        "base_roll_pitch": 2,
+        "arm_dof_pos": cfg.arm.num_actions_arm,
+        "arm_dof_vel": cfg.arm.num_actions_arm,
+    }
+    if cfg.env.observe_two_prev_actions:
+        parts["two_prev_actions"] = cfg.env.num_actions
+    if cfg.env.observe_timing_parameter:
+        parts["timing_parameter"] = 1
+    if cfg.env.observe_clock_inputs:
+        parts["clock_inputs"] = 4
+    if cfg.env.observe_vel:
+        parts["base_velocity"] = 6
+    if cfg.env.observe_only_ang_vel:
+        parts["base_ang_vel"] = 3
+    if cfg.env.observe_only_lin_vel:
+        parts["base_lin_vel"] = 3
+    if cfg.env.observe_yaw:
+        parts["heading"] = 1
+    if cfg.env.observe_contact_states:
+        parts["contact_states"] = 4
+    if cfg.arm.trajectory.enabled:
+        parts["ee_pose_body"] = 9
+    return parts
+
+
+def privileged_obs_dim_parts(cfg, dof_dim):
+    parts = {}
+    if cfg.env.priv_observe_friction:
+        parts["friction"] = 1
+    if cfg.env.priv_observe_ground_friction:
+        parts["ground_friction"] = 1
+    if cfg.env.priv_observe_restitution:
+        parts["restitution"] = 1
+    if cfg.env.priv_observe_base_mass:
+        parts["base_mass"] = 1
+    if cfg.env.priv_observe_com_displacement:
+        parts["com_displacement"] = 3
+    if cfg.env.priv_observe_motor_strength:
+        parts["motor_strength"] = dof_dim
+    if cfg.env.priv_observe_motor_offset:
+        parts["motor_offset"] = dof_dim
+    if cfg.env.priv_observe_Kp_factor:
+        parts["kp_factor"] = dof_dim
+    if cfg.env.priv_observe_Kd_factor:
+        parts["kd_factor"] = dof_dim
+    if cfg.env.priv_observe_joint_friction:
+        parts["dof_friction"] = dof_dim
+    if getattr(cfg.env, "priv_observe_dof_damping", False):
+        parts["dof_damping"] = dof_dim
+    if cfg.env.priv_observe_body_height:
+        parts["body_height"] = 1
+    if cfg.env.priv_observe_gravity:
+        parts["gravity"] = 3
+    if cfg.env.priv_observe_body_velocity or cfg.env.priv_observe_vel:
+        parts["base_velocity"] = 6
+    if cfg.env.priv_observe_clock_inputs:
+        parts["clock_inputs"] = 4
+    if cfg.env.priv_observe_desired_contact_states:
+        parts["desired_contact_states"] = 4
+    if cfg.env.priv_observe_high_freq_goal:
+        parts["high_freq_goal"] = 6
+    if getattr(cfg.env, "priv_observe_arm_mount_tf", False):
+        parts["arm_mount_tf"] = 6
+
+    return parts
 
 
 def configure_privileged_obs_dims(cfg):
-    dog_dim = _privileged_obs_dim(cfg, cfg.dog.num_actions_loco)
-    arm_dim = _privileged_obs_dim(cfg, ROBODUET_DEFAULTS.arm.num_actions_arm_cd)
+    dog_parts = privileged_obs_dim_parts(cfg, cfg.dog.num_actions_loco)
+    arm_parts = privileged_obs_dim_parts(cfg, ROBODUET_DEFAULTS.arm.num_actions_arm_cd)
     if cfg.arm.trajectory.enabled:
-        arm_dim += cfg.arm.trajectory.num_waypoints * 9
+        arm_parts["full_trajectory"] = cfg.arm.trajectory.num_waypoints * 9
+
+    dog_dim = sum_dim_parts(dog_parts)
+    arm_dim = sum_dim_parts(arm_parts)
 
     cfg.env.num_privileged_obs = dog_dim
     cfg.env.arm_num_privileged_obs = arm_dim
@@ -710,21 +813,14 @@ def configure_privileged_obs_dims(cfg):
 
 def enable_rot6d(cfg, layout):
     cfg.use_rot6d = True
-    layout.env_obs += 3
-    layout.arm_obs += 3
     layout.arm_cmd += 3
-    layout.dog_obs += 3
 
 
 def enable_traj_track(cfg, layout, defaults, traj_track_reward_scale=5.0):
     cfg.arm.trajectory.enabled = True
-    traj_window_dims = len(defaults.arm.trajectory.window_offsets) * 9
     feature = defaults.traj_track
 
     layout.arm_action_cd = defaults.arm.num_actions_arm + feature.arm_delta_vel_action_dims
-    layout.arm_obs = feature.arm_obs_without_window + traj_window_dims
-    layout.dog_obs += feature.dog_obs_dims
-    layout.env_obs += feature.env_extra_obs_without_window + traj_window_dims
 
     cfg.hybrid.reward_scales.arm_manip_commands_tracking_combine = 0.0
     cfg.hybrid.reward_scales.vis_manip_commands_tracking_lpy = 0.0
@@ -755,12 +851,9 @@ def enable_dyna_gait(cfg, layout, defaults, min_frequency=0.0):
     cfg.commands.limit_stance_length = cfg.commands.stance_length_range
 
     layout.dog_cmd += feature.num_gait_dims
-    layout.dog_obs += feature.num_gait_dims
     layout.arm_action_cd = defaults.arm.num_actions_arm + feature.plan_action_dims
     if cfg.arm.trajectory.enabled:
         layout.arm_action_cd += defaults.traj_track.arm_delta_vel_action_dims
-    layout.arm_obs += feature.num_gait_dims
-    layout.env_obs += feature.num_gait_dims + 2
     cfg.env.observe_gait_commands = True
 
     cfg.commands.num_bins_gait_frequency = feature.num_bins_gait_frequency

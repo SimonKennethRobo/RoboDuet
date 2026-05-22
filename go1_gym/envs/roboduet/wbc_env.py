@@ -1332,19 +1332,19 @@ class WBCEnv(LeggedRobot):
         )
 
     def _apply_dynamic_gait_plan(self, gait_plan):
-        self.commands_dog[:, 5] = self._map_unit_interval_to_command_range(
+        self.commands_dog[:, 6] = self._map_unit_interval_to_command_range(
             gait_plan[..., 0], self.cfg.commands.limit_gait_frequency
         )
-        self.commands_dog[:, 6] = self._map_unit_interval_to_command_range(
+        self.commands_dog[:, 7] = self._map_unit_interval_to_command_range(
             gait_plan[..., 1], self.cfg.commands.limit_footswing_height
         )
-        self.commands_dog[:, 7] = self._map_unit_interval_to_command_range(
+        self.commands_dog[:, 8] = self._map_unit_interval_to_command_range(
             gait_plan[..., 2], self.cfg.commands.limit_stance_width
         )
-        self.commands_dog[:, 8] = self._map_unit_interval_to_command_range(
+        self.commands_dog[:, 9] = self._map_unit_interval_to_command_range(
             gait_plan[..., 3], self.cfg.commands.limit_stance_length
         )
-        self.commands_dog[:, 9] = self._map_unit_interval_to_command_range(
+        self.commands_dog[:, 10] = self._map_unit_interval_to_command_range(
             gait_plan[..., 4], self.cfg.commands.limit_gait_duration
         )
 

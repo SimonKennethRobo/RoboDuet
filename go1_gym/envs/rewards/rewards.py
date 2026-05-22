@@ -204,7 +204,7 @@ class Rewards:
     def _reward_jump(self):
         reference_heights = 0
         body_height = self.env.base_pos[:, 2] - reference_heights
-        jump_height_target = 0. + self.env.cfg.rewards.base_height_target
+        jump_height_target = self.env.commands_dog[:, 5] + self.env.cfg.rewards.base_height_target
         reward = - torch.square(body_height - jump_height_target)
         return reward
 
@@ -264,7 +264,7 @@ class Rewards:
         phases = 1 - torch.abs(1.0 - torch.clip((self.env.foot_indices * 2.0) - 1.0, 0.0, 1.0) * 2.0)
         foot_height = (self.env.foot_positions[:, :, 2]).view(self.env.num_envs, -1)# - reference_heights
         if self.env.cfg.commands.use_dynamic_gait:
-            footswing_height = self.env.commands_dog[:, 6:7]  # (num_envs, 1)
+            footswing_height = self.env.commands_dog[:, 7:8]  # (num_envs, 1)
         else:
             footswing_height = 0.04
         target_height = footswing_height * phases + 0.02 # offset for foot radius 2cm
@@ -312,8 +312,8 @@ class Rewards:
 
         # nominal positions: [FR, FL, RR, RL]
         if self.env.cfg.commands.use_dynamic_gait:
-            desired_stance_width = self.env.commands_dog[:, 7]  # (num_envs,)
-            desired_stance_length = self.env.commands_dog[:, 8]  # (num_envs,)
+            desired_stance_width = self.env.commands_dog[:, 8]  # (num_envs,)
+            desired_stance_length = self.env.commands_dog[:, 9]  # (num_envs,)
         else:
             desired_stance_width = torch.full((self.env.num_envs,), 0.3, device=self.env.device)
             desired_stance_length = torch.full((self.env.num_envs,), 0.45, device=self.env.device)
@@ -324,7 +324,7 @@ class Rewards:
         # raibert offsets
         phases = torch.abs(1.0 - (self.env.foot_indices * 2.0)) * 1.0 - 0.5
         if self.env.cfg.commands.use_dynamic_gait:
-            frequencies = torch.clamp(self.env.commands_dog[:, 5:6], min=0.1)  # (num_envs, 1)
+            frequencies = torch.clamp(self.env.commands_dog[:, 6:7], min=0.1)  # (num_envs, 1)
         else:
             frequencies = 3.
         x_vel_des = self.env.commands_dog[:, 0:1]
