@@ -104,7 +104,6 @@ def config_wtw(Cnfg: Any):
     Cnfg.reward_scales.dof_pos = -0.0
     Cnfg.reward_scales.jump = 10.0
     Cnfg.rewards.base_height_target = 0.30
-    Cnfg.reward_scales.estimation_bonus = 0.0
     Cnfg.reward_scales.raibert_heuristic = -10.0
     Cnfg.reward_scales.feet_impact_vel = -0.0
     Cnfg.reward_scales.feet_clearance = -0.0
@@ -112,8 +111,6 @@ def config_wtw(Cnfg: Any):
     Cnfg.reward_scales.feet_clearance_cmd_linear = -30.0
     Cnfg.reward_scales.orientation = 0.0
     Cnfg.reward_scales.orientation_control = -5.0
-    Cnfg.reward_scales.tracking_stance_width = -0.0
-    Cnfg.reward_scales.tracking_stance_length = -0.0
     Cnfg.reward_scales.lin_vel_z = -0.02
     Cnfg.reward_scales.ang_vel_xy = -0.001
     Cnfg.reward_scales.feet_air_time = 0.0

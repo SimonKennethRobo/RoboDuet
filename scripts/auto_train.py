@@ -212,9 +212,6 @@ if __name__ == "__main__":
     parser.add_argument("--graphics_device_id", type=int, default=None)
     parser.add_argument("--num_learning_iterations", type=int, default=100000)
     parser.add_argument("--eval_freq", type=int, default=100)
-    parser.add_argument("--num_envs", type=int, default=4096)
-    parser.add_argument("--num_steps_per_env", type=int, default=RunnerArgs.num_steps_per_env)
-    parser.add_argument("--num_mini_batches", type=int, default=PPO_Args.num_mini_batches)
     parser.add_argument("--run_name", type=str, default="test")
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--offline", action="store_true")
@@ -224,13 +221,15 @@ if __name__ == "__main__":
     parser.add_argument("--notes", type=str, default=None)
     parser.add_argument("--seed", type=int, default=-1)
     parser.add_argument("--robot", type=str, default="go2", choices=["go1", "go2"])
-    parser.add_argument("--train_stage", type=str, default="two_stage", choices=["stage1", "stage2", "two_stage"])
-    parser.add_argument("--use_rot6d", action="store_true", default=False)
-    parser.add_argument("--dyna_gait", action="store_true", default=False)
-    parser.add_argument("--no_stage1_arm_curriculum", action="store_true", default=False)
-    parser.add_argument("--dyna_gait_min_frequency", type=float, default=0.0)
-    parser.add_argument("--traj_track", action="store_true", default=False)
     parser.add_argument("--video", action="store_true", default=False)
+
+    parser.add_argument("--num_envs", type=int, default=4096)
+    parser.add_argument("--num_steps_per_env", type=int, default=RunnerArgs.num_steps_per_env)
+    parser.add_argument("--num_mini_batches", type=int, default=PPO_Args.num_mini_batches)
+
+    parser.add_argument("--train_stage", type=str, default="two_stage", choices=["stage1", "stage2", "two_stage"])
+    parser.add_argument("--dyna_gait", action="store_true", default=False)
+    parser.add_argument("--traj_track", action="store_true", default=False)
 
     args = parser.parse_args()
 
