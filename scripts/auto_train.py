@@ -61,6 +61,8 @@ def main(arg):
     Cfg.env.record_video = args.video
     if not Cfg.env.record_video:
         RunnerArgs.log_video = False
+    RunnerArgs.num_steps_per_env = args.num_steps_per_env
+    PPO_Args.num_mini_batches = args.num_mini_batches
 
     DogRunnerArgs.resume = args.resume
     DogRunnerArgs.resume_path = "your_dog_ckpt_path"
@@ -194,6 +196,8 @@ if __name__ == "__main__":
     parser.add_argument("--num_learning_iterations", type=int, default=100000)
     parser.add_argument("--eval_freq", type=int, default=100)
     parser.add_argument("--num_envs", type=int, default=4096)
+    parser.add_argument("--num_steps_per_env", type=int, default=RunnerArgs.num_steps_per_env)
+    parser.add_argument("--num_mini_batches", type=int, default=PPO_Args.num_mini_batches)
     parser.add_argument("--run_name", type=str, default="test")
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--offline", action="store_true")

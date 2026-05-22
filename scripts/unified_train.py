@@ -69,6 +69,8 @@ def train_go1(headless=True):
     configure_task_from_args(Cfg, args, traj_track_reward_scale=1.0)
     Unified2AC_Args.num_actions_arm = Cfg.arm.num_actions_arm_cd
     configure_train_stage(args)
+    UnifiedRunnerArgs.num_steps_per_env = args.num_steps_per_env
+    UnifiedPPO_Args.num_mini_batches = args.num_mini_batches
 
     global_switch.init_sigmoid_lr()
     # global_switch.init_linear_lr()
@@ -158,6 +160,8 @@ if __name__ == '__main__':
     parser.add_argument('--num_learning_iterations', type=int, default=100000)
     parser.add_argument('--eval_freq', type=int, default=100)
     parser.add_argument('--num_envs', type=int, default=2048)
+    parser.add_argument('--num_steps_per_env', type=int, default=UnifiedRunnerArgs.num_steps_per_env)
+    parser.add_argument('--num_mini_batches', type=int, default=UnifiedPPO_Args.num_mini_batches)
     parser.add_argument('--run_name', type=str, default='test')
     parser.add_argument('--debug', action='store_true')
     parser.add_argument('--offline', action='store_true')
