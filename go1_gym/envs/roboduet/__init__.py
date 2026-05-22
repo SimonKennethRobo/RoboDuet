@@ -8,7 +8,6 @@ dependencies.
 __all__ = [
     "EvaluationWrapper",
     "HistoryWrapper",
-    "JoyWrapper",
     "KeyboardWrapper",
     "WBCEnv",
 ]

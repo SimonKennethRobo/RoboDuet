@@ -1,10 +1,75 @@
+from dataclasses import fields
+
 import torch
 from go1_gym_learn.ppo_cse_automatic.arm_ac import ArmActorCritic
 from go1_gym_learn.ppo_cse_automatic.dog_ac import DogActorCritic
 import os.path as osp
 import pickle as pkl
 from go1_gym.envs.roboduet import HistoryWrapper
-from go1_gym.envs.roboduet.wbc_env_config import RoboDuetCfg as Cfg
+from go1_gym.envs.roboduet.wbc_env_config import (
+    ROBODUET_DEFAULTS,
+    RoboDuetCfg as Cfg,
+    configure_external_recipes,
+    env_obs_dim_parts,
+    arm_obs_dim_parts,
+    dog_obs_dim_parts,
+    sum_dim_parts,
+)
+
+
+def _ensure_asset_file(cfg, robot=None, checkpoint_asset_file=None):
+    if checkpoint_asset_file:
+        return
+
+    asset_file = getattr(cfg.asset, "file", "")
+    robot = robot or "go2"
+    if robot == "go1":
+        cfg.asset.file = ROBODUET_DEFAULTS.asset.go1_file
+    elif robot == "go2":
+        cfg.asset.file = ROBODUET_DEFAULTS.asset.go2_file
+    else:
+        if asset_file:
+            return
+        raise ValueError(f"Unknown robot '{robot}', expected 'go1' or 'go2'")
+
+    print(f"[RoboDuet] checkpoint asset file was empty; using {robot} asset: {cfg.asset.file}")
+
+
+def _ensure_missing_dataclass_fields(target, defaults):
+    for field in fields(defaults):
+        try:
+            getattr(target, field.name)
+        except AttributeError:
+            setattr(target, field.name, getattr(defaults, field.name))
+
+
+def _ensure_play_cfg_defaults(cfg):
+    defaults = ROBODUET_DEFAULTS
+    for target, source in (
+        (cfg.hybrid, defaults.hybrid),
+        (cfg.hybrid.rewards, defaults.hybrid.rewards),
+        (cfg.hybrid.reward_scales, defaults.hybrid.reward_scales),
+        (cfg.arm, defaults.arm),
+        (cfg.arm.commands, defaults.arm.commands),
+        (cfg.arm.trajectory, defaults.arm.trajectory),
+        (cfg.dog, defaults.dog),
+        (cfg.env, defaults.env),
+        (cfg.commands, defaults.commands),
+        (cfg.control, defaults.control),
+        (cfg.domain_rand, defaults.domain_rand),
+        (cfg.rewards, defaults.rewards),
+        (cfg.reward_scales, defaults.reward_scales),
+    ):
+        _ensure_missing_dataclass_fields(target, source)
+
+
+def _recompute_play_dims(cfg):
+    cfg.env.num_observations = sum_dim_parts(env_obs_dim_parts(cfg))
+    cfg.env.num_obs_history = cfg.env.num_observation_history * cfg.env.num_observations
+    cfg.arm.arm_num_observations = sum_dim_parts(arm_obs_dim_parts(cfg))
+    cfg.arm.arm_num_obs_history = cfg.arm.arm_num_observation_history * cfg.arm.arm_num_observations
+    cfg.dog.dog_num_observations = sum_dim_parts(dog_obs_dim_parts(cfg))
+    cfg.dog.dog_num_obs_history = cfg.dog.dog_num_observation_history * cfg.dog.dog_num_observations
 
 def load_dog_policy(logdir, ckpt_id, Cfg):
     actor_critic = DogActorCritic(Cfg.dog.dog_num_observations,
@@ -74,9 +139,11 @@ def load_arm_policy(logdir, ckpt_id, Cfg):
 
     return policy
 
-def load_env(logdir, wrapper, headless=False, device='cuda:0'):
+def load_env(logdir, wrapper, headless=False, device='cuda:0', robot=None):
     print('*'*10, logdir)
+    configure_external_recipes(Cfg)
 
+    checkpoint_asset_file = None
     with open(logdir + "/parameters.pkl", 'rb') as file:
         pkl_cfg = pkl.load(file)
         cfg = pkl_cfg["Cfg"]
@@ -97,9 +164,15 @@ def load_env(logdir, wrapper, headless=False, device='cuda:0'):
                 else:
                     if isinstance(cfg[key], dict):
                         for key2, value2 in cfg[key].items():
+                            if key == "asset" and key2 == "file":
+                                checkpoint_asset_file = value2
                             setattr(getattr(Cfg, key), key2, value2)
                     else:
                         setattr(Cfg, key, cfg[key])
+
+    _ensure_play_cfg_defaults(Cfg)
+    _ensure_asset_file(Cfg, robot=robot, checkpoint_asset_file=checkpoint_asset_file)
+    _recompute_play_dims(Cfg)
 
     Cfg.terrain.mesh_type = "plane"
     if Cfg.terrain.mesh_type == "plane":
@@ -135,7 +208,7 @@ def load_env(logdir, wrapper, headless=False, device='cuda:0'):
     Cfg.commands.resampling_time = 10000
     # Cfg.domain_rand.lag_timesteps = 6
     # Cfg.domain_rand.randomize_lag_timesteps = True
-    # Cfg.control.control_type = "actuator_net"
+    Cfg.control.control_type = "M"
     Cfg.rewards.use_terminal_body_height = False
     Cfg.rewards.use_terminal_roll = False
     Cfg.rewards.use_terminal_pitch = False
