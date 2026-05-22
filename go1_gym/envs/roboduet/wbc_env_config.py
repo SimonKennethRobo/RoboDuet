@@ -245,6 +245,8 @@ class Stage1ArmDisturbanceConfig:
     fixed_fraction: float = 0.1
     saturation_fraction: float = 0.8
     accel_resample_time_s: float = 0.01  # 100 Hz, larger than actual ctrl freq
+    zero_accel_probability: float = 0.3
+    zero_vel_probability: float = 0.1
     max_accel: float = 10.0
     max_vel: float = 5.0
     max_offset: float = 999
@@ -517,6 +519,8 @@ class RoboDuetCfg(LeggedRobotCfg):
         stage1_arm_saturation_fraction = ROBODUET_DEFAULTS.stage1_arm_disturbance.saturation_fraction
         stage1_arm_init_dof_pos_noise = ROBODUET_DEFAULTS.stage1_arm_disturbance.init_dof_pos_noise
         stage1_arm_accel_resample_time_s = ROBODUET_DEFAULTS.stage1_arm_disturbance.accel_resample_time_s
+        stage1_arm_zero_accel_probability = ROBODUET_DEFAULTS.stage1_arm_disturbance.zero_accel_probability
+        stage1_arm_zero_vel_probability = ROBODUET_DEFAULTS.stage1_arm_disturbance.zero_vel_probability
         stage1_arm_max_accel = ROBODUET_DEFAULTS.stage1_arm_disturbance.max_accel
         stage1_arm_max_vel = ROBODUET_DEFAULTS.stage1_arm_disturbance.max_vel
         stage1_arm_max_offset = ROBODUET_DEFAULTS.stage1_arm_disturbance.max_offset
@@ -592,6 +596,8 @@ def materialize_base_cfg(cfg, defaults, options):
     cfg.env.stage1_arm_saturation_fraction = defaults.stage1_arm_disturbance.saturation_fraction
     cfg.env.stage1_arm_init_dof_pos_noise = defaults.stage1_arm_disturbance.init_dof_pos_noise
     cfg.env.stage1_arm_accel_resample_time_s = defaults.stage1_arm_disturbance.accel_resample_time_s
+    cfg.env.stage1_arm_zero_accel_probability = defaults.stage1_arm_disturbance.zero_accel_probability
+    cfg.env.stage1_arm_zero_vel_probability = defaults.stage1_arm_disturbance.zero_vel_probability
     cfg.env.stage1_arm_max_accel = defaults.stage1_arm_disturbance.max_accel
     cfg.env.stage1_arm_max_vel = defaults.stage1_arm_disturbance.max_vel
     cfg.env.stage1_arm_max_offset = defaults.stage1_arm_disturbance.max_offset

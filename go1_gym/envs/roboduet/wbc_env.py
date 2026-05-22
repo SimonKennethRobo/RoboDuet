@@ -446,9 +446,22 @@ class WBCEnv(LeggedRobot):
             accel = torch.rand_like(self.stage1_arm_target_accel) * 2.0 - 1.0
             self.stage1_arm_target_accel[:] = accel * self.cfg.env.stage1_arm_max_accel * intensity
 
-        self.stage1_arm_target_vel += self.stage1_arm_target_accel * self.dt
+        step_accel = self.stage1_arm_target_accel
+        zero_accel_prob = min(1.0, max(0.0, float(getattr(self.cfg.env, "stage1_arm_zero_accel_probability", 0.0))))
+        if zero_accel_prob > 0.0:
+            use_zero_accel = torch.rand(self.num_envs, 1, device=self.device) < zero_accel_prob
+            step_accel = torch.where(use_zero_accel, torch.zeros_like(step_accel), step_accel)
+
+        self.stage1_arm_target_vel += step_accel * self.dt
         max_vel = self.cfg.env.stage1_arm_max_vel * intensity
         self.stage1_arm_target_vel[:] = torch.clamp(self.stage1_arm_target_vel, -max_vel, max_vel)
+
+        zero_vel_prob = min(1.0, max(0.0, float(getattr(self.cfg.env, "stage1_arm_zero_vel_probability", 0.0))))
+        if zero_vel_prob > 0.0:
+            use_zero_vel = torch.rand(self.num_envs, 1, device=self.device) < zero_vel_prob
+            self.stage1_arm_target_vel[:] = torch.where(
+                use_zero_vel, torch.zeros_like(self.stage1_arm_target_vel), self.stage1_arm_target_vel
+            )
 
         self.stage1_arm_target_offset += self.stage1_arm_target_vel * self.dt
 
