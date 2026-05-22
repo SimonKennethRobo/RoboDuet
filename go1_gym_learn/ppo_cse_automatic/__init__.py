@@ -100,6 +100,7 @@ class Runner:
             num_privileged_obs=self.env.cfg.arm.arm_num_privileged_obs,
             num_obs_history=self.env.cfg.arm.arm_num_obs_history,
             num_actions=self.env.cfg.arm.num_actions_arm_cd,
+            use_adaptation_module=self.env.cfg.arm.use_adaptation_module,
             device=self.device,
         ).to(self.device)
 
@@ -108,6 +109,7 @@ class Runner:
             num_privileged_obs=self.env.cfg.dog.dog_num_privileged_obs,
             num_obs_history=self.env.cfg.dog.dog_num_obs_history,
             num_actions=self.env.cfg.dog.dog_actions,
+            use_adaptation_module=self.env.cfg.dog.use_adaptation_module,
         ).to(self.device)
 
         if DogRunnerArgs.resume:
@@ -313,7 +315,7 @@ class Runner:
                     mean_adaptation_module_test_loss,
                     mean_decoder_test_loss,
                     mean_decoder_test_loss_student,
-                ) = self.alg_arm.update(un_adapt=False)
+                ) = self.alg_arm.update(un_adapt=not self.arm_model.use_adaptation_module)
             (
                 mean_value_loss_dog,
                 mean_surrogate_loss_dog,
@@ -452,10 +454,11 @@ class Runner:
         )
 
         path = osp.join(self.log_dir, f"deploy_model")
-        adaptation_module_dog_path = f"{path}/adaptation_module_latest_dog.jit"
-        adaptation_module_dog = copy.deepcopy(self.alg_dog.actor_critic.adaptation_module).to("cpu")
-        traced_script_adaptation_module_dog = torch.jit.script(adaptation_module_dog)
-        traced_script_adaptation_module_dog.save(adaptation_module_dog_path)
+        if self.alg_dog.actor_critic.adaptation_module is not None:
+            adaptation_module_dog_path = f"{path}/adaptation_module_latest_dog.jit"
+            adaptation_module_dog = copy.deepcopy(self.alg_dog.actor_critic.adaptation_module).to("cpu")
+            traced_script_adaptation_module_dog = torch.jit.script(adaptation_module_dog)
+            traced_script_adaptation_module_dog.save(adaptation_module_dog_path)
         body_dog_path = f"{path}/body_latest_dog.jit"
         body_model_dog = copy.deepcopy(self.alg_dog.actor_critic.actor_body).to("cpu")
         traced_script_body_module_dog = torch.jit.script(body_model_dog)
@@ -471,10 +474,11 @@ class Runner:
         )
 
         path = osp.join(self.log_dir, f"deploy_model")
-        adaptation_module_path = f"{path}/adaptation_module_latest_arm.jit"
-        adaptation_module = copy.deepcopy(self.alg_arm.actor_critic.adaptation_module).to("cpu")
-        traced_script_adaptation_module = torch.jit.script(adaptation_module)
-        traced_script_adaptation_module.save(adaptation_module_path)
+        if self.alg_arm.actor_critic.adaptation_module is not None:
+            adaptation_module_path = f"{path}/adaptation_module_latest_arm.jit"
+            adaptation_module = copy.deepcopy(self.alg_arm.actor_critic.adaptation_module).to("cpu")
+            traced_script_adaptation_module = torch.jit.script(adaptation_module)
+            traced_script_adaptation_module.save(adaptation_module_path)
         body_path = f"{path}/body_latest_arm.jit"
         body_model = copy.deepcopy(self.alg_arm.actor_critic.actor_body).to("cpu")
         traced_script_body_module = torch.jit.script(body_model)

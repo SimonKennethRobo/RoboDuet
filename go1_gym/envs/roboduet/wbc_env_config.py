@@ -105,6 +105,7 @@ class ArmConfig:
     arm_num_observations: int = 20
     arm_num_commands: int = 6
     num_actions_arm_cd: int = 8
+    use_adaptation_module: bool = False
     commands: ArmCommandConfig = ArmCommandConfig()
     trajectory: ArmTrajectoryConfig = ArmTrajectoryConfig()
     obs_scales: tuple = (("l", 1.0), ("p", 1.0), ("y", 1.0), ("wx", 1.0), ("wy", 1.0), ("wz", 1.0))
@@ -120,6 +121,7 @@ class DogConfig:
     dog_num_observations: int = 68  # +12 vs old 56: arm joint pos (6) + vel (6)
     dog_num_commands: int = 5
     dog_actions: int = 12
+    use_adaptation_module: bool = False
     stiffness_leg: dict = None
     damping_leg: dict = None
 
@@ -565,6 +567,7 @@ def materialize_base_cfg(cfg, defaults, options):
             "arm_num_observations",
             "arm_num_commands",
             "num_actions_arm_cd",
+            "use_adaptation_module",
         ),
     )
     _copy_dataclass_attrs(cfg.arm.commands, defaults.arm.commands)
@@ -584,6 +587,7 @@ def materialize_base_cfg(cfg, defaults, options):
             "dog_num_observations",
             "dog_num_commands",
             "dog_actions",
+            "use_adaptation_module",
         ),
     )
     cfg.dog.control.stiffness_leg = dict(defaults.dog.stiffness_leg)

@@ -41,9 +41,11 @@ class PPO:
         self.actor_critic.to(device)
         self.storage = None  # initialized later
         self.optimizer = optim.Adam(self.actor_critic.parameters(), lr=PPO_Args.learning_rate)
-        self.adaptation_module_optimizer = optim.Adam(
-            self.actor_critic.parameters(), lr=PPO_Args.adaptation_module_learning_rate
-        )
+        self.adaptation_module_optimizer = None
+        if getattr(self.actor_critic, "adaptation_module", None) is not None:
+            self.adaptation_module_optimizer = optim.Adam(
+                self.actor_critic.parameters(), lr=PPO_Args.adaptation_module_learning_rate
+            )
         if self.actor_critic.decoder:
             self.decoder_optimizer = optim.Adam(
                 self.actor_critic.parameters(), lr=PPO_Args.adaptation_module_learning_rate
@@ -200,7 +202,7 @@ class PPO:
 
             # Adaptation module gradient step
 
-            if not un_adapt:
+            if not un_adapt and self.adaptation_module_optimizer is not None:
                 for epoch in range(PPO_Args.num_adaptation_module_substeps):
                     adaptation_pred = self.actor_critic.adaptation_module(obs_history_batch)
                     with torch.no_grad():

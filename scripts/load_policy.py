@@ -11,6 +11,7 @@ def load_dog_policy(logdir, ckpt_id, Cfg):
                                 Cfg.dog.dog_num_privileged_obs,
                                 Cfg.dog.dog_num_obs_history,
                                 Cfg.dog.dog_actions,
+                                use_adaptation_module=getattr(Cfg.dog, "use_adaptation_module", True),
                                 ).to("cpu")
     device = torch.device("cpu")
     if ckpt_id == 'last':
@@ -28,9 +29,12 @@ def load_dog_policy(logdir, ckpt_id, Cfg):
 
     def policy(obs, info={}):
         i = 0
-        latent = adaptation_module.forward(obs["obs_history"].to('cpu'))
-        action = body.forward(torch.cat((obs["obs_history"].to('cpu'), latent), dim=-1))
-        info['latent'] = latent
+        actor_input = (obs["obs_history"].to('cpu'),)
+        if adaptation_module is not None:
+            latent = adaptation_module.forward(obs["obs_history"].to('cpu'))
+            actor_input = (obs["obs_history"].to('cpu'), latent)
+            info['latent'] = latent
+        action = body.forward(torch.cat(actor_input, dim=-1))
         return action
 
     return policy
@@ -41,6 +45,7 @@ def load_arm_policy(logdir, ckpt_id, Cfg):
         Cfg.arm.arm_num_privileged_obs,
         Cfg.arm.arm_num_obs_history,
         Cfg.arm.num_actions_arm_cd,
+        use_adaptation_module=getattr(Cfg.arm, "use_adaptation_module", False),
         device='cpu'
     ).to('cpu')
 
@@ -59,9 +64,12 @@ def load_arm_policy(logdir, ckpt_id, Cfg):
 
     def policy(obs, info={}):
         hist = actor_his.forward(obs["obs_history"].to('cpu')[..., :-Cfg.arm.arm_num_observations])
-        latent = adaptation_module.forward(obs["obs_history"].to('cpu'))
-        action = body.forward(torch.cat((obs["obs"].to('cpu'), latent, hist), dim=-1))
-        info['latent'] = latent
+        actor_input = (obs["obs"].to('cpu'), hist)
+        if adaptation_module is not None:
+            latent = adaptation_module.forward(obs["obs_history"].to('cpu'))
+            actor_input = (obs["obs"].to('cpu'), latent, hist)
+            info['latent'] = latent
+        action = body.forward(torch.cat(actor_input, dim=-1))
         return action
 
     return policy
