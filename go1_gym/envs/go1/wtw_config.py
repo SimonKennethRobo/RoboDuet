@@ -1,5 +1,6 @@
 from typing import Any
 
+
 def config_wtw(Cnfg: Any):
     Cnfg.commands.num_lin_vel_bins = 30
     Cnfg.commands.num_ang_vel_bins = 30
@@ -98,6 +99,7 @@ def config_wtw(Cnfg: Any):
     Cnfg.commands.resampling_time = 10
 
     Cnfg.reward_scales.feet_slip = -0.04
+    Cnfg.reward_scales.action_rate = -0.001
     Cnfg.reward_scales.action_smoothness_1 = -0.1
     Cnfg.reward_scales.action_smoothness_2 = -0.1
     Cnfg.reward_scales.dof_vel = -1e-4
@@ -116,51 +118,49 @@ def config_wtw(Cnfg: Any):
     Cnfg.reward_scales.feet_air_time = 0.0
     Cnfg.reward_scales.hop_symmetry = 0.0
     Cnfg.rewards.kappa_gait_probs = 0.07
-    Cnfg.rewards.gait_force_sigma = 100.
-    Cnfg.rewards.gait_vel_sigma = 10.
+    Cnfg.rewards.gait_force_sigma = 100.0
+    Cnfg.rewards.gait_vel_sigma = 10.0
     Cnfg.reward_scales.tracking_contacts_shaped_force = 4.0
     Cnfg.reward_scales.tracking_contacts_shaped_vel = 4.0
-    Cnfg.reward_scales.collision = -5.0
+    Cnfg.reward_scales.collision = -10.0
 
     Cnfg.rewards.reward_container_name = "Rewards"
     Cnfg.rewards.only_positive_rewards = False
     Cnfg.rewards.only_positive_rewards_ji22_style = True
     Cnfg.rewards.sigma_rew_neg = 0.02
 
-
-
     Cnfg.commands.lin_vel_x = [-1.0, 1.0]
     Cnfg.commands.lin_vel_y = [-0.6, 0.6]
     Cnfg.commands.ang_vel_yaw = [-1.0, 1.0]
-    Cnfg.commands.body_height_cmd = [-0.25, 0.15]
-    Cnfg.commands.gait_frequency_cmd_range = [0.5, 4.0]
-    Cnfg.commands.gait_phase_cmd_range = [0.0, 1.0]
-    Cnfg.commands.gait_offset_cmd_range = [0.0, 1.0]
-    Cnfg.commands.gait_bound_cmd_range = [0.0, 1.0]
-    Cnfg.commands.gait_duration_cmd_range = [0.3, 0.7]
-    Cnfg.commands.footswing_height_range = [0.03, 0.35]
+    Cnfg.commands.body_height_cmd = [-0.15, 0.15]
+    Cnfg.commands.gait_frequency_cmd_range = [1.0, 8.0]
+    Cnfg.commands.gait_phase_cmd_range = [0.0, 0.01]
+    Cnfg.commands.gait_offset_cmd_range = [0.0, 0.01]
+    Cnfg.commands.gait_bound_cmd_range = [0.0, 0.01]
+    Cnfg.commands.gait_duration_cmd_range = [0.49, 0.5]
+    Cnfg.commands.footswing_height_range = [0.06, 0.061]
     Cnfg.commands.body_pitch_range = [-0.4, 0.4]
-    Cnfg.commands.body_roll_range = [-0.4, 0.4]
+    Cnfg.commands.body_roll_range = [-0.2, 0.2]
     Cnfg.commands.stance_width_range = [0.10, 0.45]
-    Cnfg.commands.stance_length_range = [0.1, 0.45]
+    Cnfg.commands.stance_length_range = [0.25, 0.45]
 
     Cnfg.commands.limit_vel_x = [-5.0, 5.0]
     Cnfg.commands.limit_vel_y = [-0.6, 0.6]
     Cnfg.commands.limit_vel_yaw = [-5.0, 5.0]
-    Cnfg.commands.limit_body_height = [-0.25, 0.15]
-    Cnfg.commands.limit_gait_frequency = [0, 4.0]
-    Cnfg.commands.limit_gait_phase = [0.0, 1.0]
-    Cnfg.commands.limit_gait_offset = [0.0, 1.0]
-    Cnfg.commands.limit_gait_bound = [0.0, 1.0]
-    Cnfg.commands.limit_gait_duration = [0.3, 0.7]
-    Cnfg.commands.limit_footswing_height = [0.03, 0.35]
+    Cnfg.commands.limit_body_height = [-0.15, 0.15]
+    Cnfg.commands.limit_gait_frequency = [1.0, 8.0]
+    Cnfg.commands.limit_gait_phase = [0.0, 0.01]
+    Cnfg.commands.limit_gait_offset = [0.0, 0.01]
+    Cnfg.commands.limit_gait_bound = [0.0, 0.01]
+    Cnfg.commands.limit_gait_duration = [0.49, 0.5]
+    Cnfg.commands.limit_footswing_height = [0.06, 0.061]
     Cnfg.commands.limit_body_pitch = [-0.4, 0.4]
-    Cnfg.commands.limit_body_roll = [-0.4, 0.4]
+    Cnfg.commands.limit_body_roll = [-0.2, 0.2]
     Cnfg.commands.limit_stance_width = [0.10, 0.45]
-    Cnfg.commands.limit_stance_length = [0.1, 0.45]
+    Cnfg.commands.limit_stance_length = [0.25, 0.45]
 
     Cnfg.commands.num_bins_vel_x = 21
-    Cnfg.commands.num_bins_vel_y = 1
+    Cnfg.commands.num_bins_vel_y = 3
     Cnfg.commands.num_bins_vel_yaw = 21
     Cnfg.commands.num_bins_body_height = 1
     Cnfg.commands.num_bins_gait_frequency = 1

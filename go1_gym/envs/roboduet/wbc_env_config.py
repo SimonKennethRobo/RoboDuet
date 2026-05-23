@@ -121,7 +121,7 @@ class DogConfig:
     dog_num_observations: int = 0
     dog_num_commands: int = 6
     dog_actions: int = 12
-    use_adaptation_module: bool = True
+    use_adaptation_module: bool = False
     stiffness_leg: dict = None
     damping_leg: dict = None
 
@@ -236,7 +236,7 @@ class DomainRandConfig:
 @dataclass(frozen=True)
 class RewardConfig:
     terminal_body_height: float = 0.17
-    use_terminal_body_height: bool = True
+    use_terminal_body_height: bool = False
     manip_weight_lpy: float = 3
     manip_weight_rpy: float = 1
 
