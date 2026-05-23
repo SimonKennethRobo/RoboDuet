@@ -9,6 +9,7 @@ __all__ = [
     "EvaluationWrapper",
     "HistoryWrapper",
     "KeyboardWrapper",
+    "KeyboardStage1Wrapper",
     "WBCEnv",
 ]
 

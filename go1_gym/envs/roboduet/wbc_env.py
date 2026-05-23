@@ -2025,3 +2025,170 @@ class HistoryWrapper(gym.Wrapper):
     def __getattr__(self, name):
         return getattr(self.env, name)
 
+
+class KeyboardStage1Wrapper(WBCEnv):
+    """Keyboard wrapper for stage-1 (dog-only) play.
+
+    Key layout
+    ----------
+    w / s  — x_vel  +/-
+    a / d  — y_vel  +/-
+    q / e  — yaw_vel +/-
+    j / l  — body_roll +/-
+    i / k  — body_pitch +/-
+    y / h  — body_height_delta +/-
+    r / f  — gait_frequency +/-   (no-op when use_dynamic_gait=False)
+    u / o  — stance_width +/-     (no-op when use_dynamic_gait=False)
+    SPACE  — reset vel to zero
+    """
+
+    _VEL_STEP = 0.1
+    _POSE_STEP = 0.05
+    _HEIGHT_STEP = 0.05
+    _GAIT_FREQ_STEP = 0.5
+    _STANCE_STEP = 0.05
+
+    def __init__(self, sim_device, headless, cfg):
+        super().__init__(sim_device, headless, cfg=cfg)
+
+        bindings = [
+            (gymapi.KEY_W, "dog_vx_up"),
+            (gymapi.KEY_S, "dog_vx_down"),
+            (gymapi.KEY_A, "dog_vy_up"),
+            (gymapi.KEY_D, "dog_vy_down"),
+            (gymapi.KEY_Q, "dog_yaw_up"),
+            (gymapi.KEY_E, "dog_yaw_down"),
+            (gymapi.KEY_J, "dog_roll_up"),
+            (gymapi.KEY_L, "dog_roll_down"),
+            (gymapi.KEY_I, "dog_pitch_up"),
+            (gymapi.KEY_K, "dog_pitch_down"),
+            (gymapi.KEY_Y, "dog_height_up"),
+            (gymapi.KEY_H, "dog_height_down"),
+            (gymapi.KEY_R, "dog_freq_up"),
+            (gymapi.KEY_F, "dog_freq_down"),
+            (gymapi.KEY_U, "dog_sw_up"),
+            (gymapi.KEY_O, "dog_sw_down"),
+            (gymapi.KEY_SPACE, "dog_vel_zero"),
+            (gymapi.KEY_M, "dog_reset"),
+        ]
+        for key, action in bindings:
+            self.gym.subscribe_viewer_keyboard_event(self.viewer, key, action)
+
+    def _n_cmd(self):
+        return self.commands_dog.shape[1]
+
+    def _add_dog(self, idx, delta, lo, hi):
+        if idx >= self._n_cmd():
+            return
+        val = float(self.commands_dog[0, idx]) + delta
+        self.commands_dog[:, idx] = max(lo, min(hi, val))
+
+    def _print_state(self):
+        c = self.commands_dog[0]
+        n = self._n_cmd()
+        parts = [
+            f"vx={float(c[0]):+.2f}",
+            f"vy={float(c[1]):+.2f}",
+            f"yaw={float(c[2]):+.2f}",
+        ]
+        if n > 5:
+            parts += [
+                f"pitch={float(c[3]):+.2f}",
+                f"roll={float(c[4]):+.2f}",
+                f"dh={float(c[5]):+.3f}",
+            ]
+        if n > 6:
+            parts.append(f"freq={float(c[6]):.2f}")
+        if n > 8:
+            parts.append(f"sw={float(c[8]):.3f}")
+        print("  ".join(parts), flush=True)
+
+    def render_gui(self, sync_frame_time=True):
+        if self.viewer:
+            if self.fixed_cam:
+                cam_target = gymapi.Vec3(self.root_states[0, 0], self.root_states[0, 1], self.root_states[0, 2])
+                cam_pos = cam_target + gymapi.Vec3(1, 1, 1)
+                self.gym.viewer_camera_look_at(self.viewer, self.envs[0], cam_pos, cam_target)
+
+            if self.gym.query_viewer_has_closed(self.viewer):
+                sys.exit()
+
+            _STAGE1_ACTIONS = {
+                "dog_vx_up", "dog_vx_down", "dog_vy_up", "dog_vy_down",
+                "dog_yaw_up", "dog_yaw_down", "dog_roll_up", "dog_roll_down",
+                "dog_pitch_up", "dog_pitch_down", "dog_height_up", "dog_height_down",
+                "dog_freq_up", "dog_freq_down", "dog_sw_up", "dog_sw_down",
+                "dog_vel_zero", "dog_reset",
+            }
+
+            for evt in self.gym.query_viewer_action_events(self.viewer):
+                if evt.action == "QUIT" and evt.value > 0:
+                    sys.exit()
+                elif evt.action == "toggle_viewer_sync" and evt.value > 0:
+                    self.enable_viewer_sync = not self.enable_viewer_sync
+                elif evt.action == "fixed_cam" and evt.value > 0:
+                    self.fixed_cam = not self.fixed_cam
+
+                elif evt.action not in _STAGE1_ACTIONS:
+                    continue
+
+                elif evt.value == 0:
+                    self._print_state()
+                    continue
+
+                # key-down handlers
+                elif evt.action == "dog_vx_up":
+                    self._add_dog(dog_cmd_idx["x_vel"], self._VEL_STEP, -1.5, 1.5)
+                elif evt.action == "dog_vx_down":
+                    self._add_dog(dog_cmd_idx["x_vel"], -self._VEL_STEP, -1.5, 1.5)
+                elif evt.action == "dog_vy_up":
+                    self._add_dog(dog_cmd_idx["y_vel"], self._VEL_STEP, -0.5, 0.5)
+                elif evt.action == "dog_vy_down":
+                    self._add_dog(dog_cmd_idx["y_vel"], -self._VEL_STEP, -0.5, 0.5)
+                elif evt.action == "dog_yaw_up":
+                    self._add_dog(dog_cmd_idx["yaw_vel"], self._VEL_STEP, -1.5, 1.5)
+                elif evt.action == "dog_yaw_down":
+                    self._add_dog(dog_cmd_idx["yaw_vel"], -self._VEL_STEP, -1.5, 1.5)
+                elif evt.action == "dog_roll_up":
+                    self._add_dog(dog_cmd_idx["body_roll"], self._POSE_STEP, -0.4, 0.4)
+                elif evt.action == "dog_roll_down":
+                    self._add_dog(dog_cmd_idx["body_roll"], -self._POSE_STEP, -0.4, 0.4)
+                elif evt.action == "dog_pitch_up":
+                    self._add_dog(dog_cmd_idx["body_pitch"], self._POSE_STEP, -0.4, 0.4)
+                elif evt.action == "dog_pitch_down":
+                    self._add_dog(dog_cmd_idx["body_pitch"], -self._POSE_STEP, -0.4, 0.4)
+                elif evt.action == "dog_height_up":
+                    self._add_dog(dog_cmd_idx["body_height"], self._HEIGHT_STEP, -0.3, 0.3)
+                elif evt.action == "dog_height_down":
+                    self._add_dog(dog_cmd_idx["body_height"], -self._HEIGHT_STEP, -0.3, 0.3)
+                elif evt.action == "dog_freq_up":
+                    self._add_dog(dog_cmd_idx["gait_frequency"], self._GAIT_FREQ_STEP, 1.0, 4.0)
+                elif evt.action == "dog_freq_down":
+                    self._add_dog(dog_cmd_idx["gait_frequency"], -self._GAIT_FREQ_STEP, 1.0, 4.0)
+                elif evt.action == "dog_sw_up":
+                    self._add_dog(dog_cmd_idx["stance_width"], self._STANCE_STEP, 0.2, 0.5)
+                elif evt.action == "dog_sw_down":
+                    self._add_dog(dog_cmd_idx["stance_width"], -self._STANCE_STEP, 0.2, 0.5)
+                elif evt.action == "dog_vel_zero":
+                    self.commands_dog[:, dog_cmd_idx["velocity"]] = 0.0
+                    self.commands_dog[:, dog_cmd_idx["body_pose"]] = 0.0
+                elif evt.action == "dog_reset":
+                    self.reset()
+                    self.commands_dog[:, dog_cmd_idx["velocity"]] = 0.0
+                    self.commands_dog[:, dog_cmd_idx["body_pose"]] = 0.0
+
+        if self.device != "cpu":
+            self.gym.fetch_results(self.sim, True)
+
+        if self.enable_viewer_sync:
+            self.gym.step_graphics(self.sim)
+            self._draw_viewer_overlays()
+            self.gym.draw_viewer(self.viewer, self.sim, True)
+            if sync_frame_time:
+                self.gym.sync_frame_time(self.sim)
+        else:
+            self._draw_viewer_overlays()
+            self.gym.poll_viewer_events(self.viewer)
+
+        # self.update_arm_commands()
+
