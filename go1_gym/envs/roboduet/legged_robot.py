@@ -1846,7 +1846,9 @@ class LeggedRobot(BaseTask):
         asset_options.disable_gravity = self.cfg.asset.disable_gravity
 
         asset_files = self._generate_arm_mount_asset_files(asset_root, asset_file)
-        asset_files = asset_files[: min(len(asset_files), self.num_envs)]
+        self.asset_bucket_cycle_length = int(getattr(self.cfg.env, "asset_bucket_cycle_length", 0) or 0)
+        num_asset_buckets = self.asset_bucket_cycle_length if self.asset_bucket_cycle_length > 0 else self.num_envs
+        asset_files = asset_files[: min(len(asset_files), num_asset_buckets)]
         self.robot_assets = []
         print(f"[RoboDuet] loading {len(asset_files)} robot asset bucket(s) from {asset_root}", flush=True)
         for bucket_id, mount_asset_file in enumerate(asset_files):
@@ -1934,7 +1936,8 @@ class LeggedRobot(BaseTask):
                 pos[2:3] += self.cfg.init_state.pos[2]
             start_pose.p = gymapi.Vec3(*pos)
 
-            bucket_id = i % len(self.robot_assets)
+            bucket_index = i % self.asset_bucket_cycle_length if self.asset_bucket_cycle_length > 0 else i
+            bucket_id = bucket_index % len(self.robot_assets)
             robot_asset = self.robot_assets[bucket_id]
             rigid_shape_props = self._process_rigid_shape_props(rigid_shape_props_asset, i)
             self.gym.set_asset_rigid_shape_properties(robot_asset, rigid_shape_props)

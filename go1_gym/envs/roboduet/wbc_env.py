@@ -1181,7 +1181,7 @@ class WBCEnv(LeggedRobot):
             return tensor[env_id, : min(count, tensor.shape[1])].detach().cpu().tolist()
 
         arm_open = global_switch.switch_open
-        dog = vals(self.commands_dog, min(10, self.commands_dog.shape[1]))
+        dog = vals(self.commands_dog, min(11, self.commands_dog.shape[1]))
 
         # ---- LEFT: commands ----
         left = []
