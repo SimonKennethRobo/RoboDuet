@@ -28,6 +28,24 @@ from .observation_builder import ObservationBuilder, clip_observation
 from .trajectory_geometry import sample_trajectory_commands
 from .wbc_env_config import RoboDuetCfg as Cfg
 
+dog_cmd_idx = {
+    "x_vel": 0,
+    "y_vel": 1,
+    "yaw_vel": 2,
+    "body_pitch": 3,
+    "body_roll": 4,
+    "body_height": 5,
+    "gait_frequency": 6,
+    "footswing_height": 7,
+    "stance_width": 8,
+    "stance_length": 9,
+    "gait_duration": 10,
+    # named slices
+    "velocity": slice(0, 3),
+    "body_pose": slice(3, 6),
+    "gait_params": slice(6, 11),
+}
+
 
 class WBCEnv(LeggedRobot):
     def __init__(
@@ -225,7 +243,7 @@ class WBCEnv(LeggedRobot):
         self.traj_target_body_history[env_ids] = 0.0
         self.traj_visited_mask[env_ids] = False
         self.arm_delta_vel_cmd[env_ids] = 0.0
-        self.commands_dog[env_ids, :3] = self.user_vel_cmd[env_ids]
+        self.commands_dog[env_ids, dog_cmd_idx["velocity"]] = self.user_vel_cmd[env_ids]
 
     def _resample_T_traj(self, env_ids):
         time_range = (self.cfg.arm.commands.T_traj[1] - self.cfg.arm.commands.T_traj[0]) / self.dt
@@ -842,7 +860,7 @@ class WBCEnv(LeggedRobot):
     def _arm_resample_commands_train_hook(self, env_ids):
         if self.cfg.arm.trajectory.enabled and global_switch.switch_open:
             self._resample_user_commands(env_ids)
-            self.commands_dog[env_ids, :3] = self.user_vel_cmd[env_ids] + self.arm_delta_vel_cmd[env_ids]
+            self.commands_dog[env_ids, dog_cmd_idx["velocity"]] = self.user_vel_cmd[env_ids] + self.arm_delta_vel_cmd[env_ids]
 
     def _get_privileged_dof_slice(self, policy):
         if policy == "dog":
@@ -1167,14 +1185,14 @@ class WBCEnv(LeggedRobot):
 
         # ---- LEFT: commands ----
         left = []
-        left.append(f"vx={dog[0]:+.2f}  vy={dog[1]:+.2f}  yaw={dog[2]:+.2f}")
+        left.append(f'vx={dog[dog_cmd_idx["x_vel"]]:+.2f}  vy={dog[dog_cmd_idx["y_vel"]]:+.2f}  yaw={dog[dog_cmd_idx["yaw_vel"]]:+.2f}')
 
-        if self.cfg.commands.use_dynamic_gait and self.commands_dog.shape[1] >= 10:
-            left.append(f"pitch={dog[3]:+.2f}  roll={dog[4]:+.2f}")
-            left.append(f"freq={dog[5]:.2f}  swing={dog[6]:.2f}")
-            left.append(f"width={dog[7]:.2f}  len={dog[8]:.2f}")
-        elif self.commands_dog.shape[1] >= 5:
-            left.append(f"pitch={dog[3]:+.2f}  roll={dog[4]:+.2f}")
+        if self.cfg.commands.use_dynamic_gait and self.commands_dog.shape[1] >= 11:
+            left.append(f'pitch={dog[dog_cmd_idx["body_pitch"]]:+.2f}  roll={dog[dog_cmd_idx["body_roll"]]:+.2f}  h_cmd={dog[dog_cmd_idx["body_height"]]:+.2f}')
+            left.append(f'freq={dog[dog_cmd_idx["gait_frequency"]]:.2f}  swing={dog[dog_cmd_idx["footswing_height"]]:.2f}')
+            left.append(f'width={dog[dog_cmd_idx["stance_width"]]:.2f}  len={dog[dog_cmd_idx["stance_length"]]:.2f}  dur={dog[dog_cmd_idx["gait_duration"]]:.2f}')
+        elif self.commands_dog.shape[1] >= 6:
+            left.append(f'pitch={dog[dog_cmd_idx["body_pitch"]]:+.2f}  roll={dog[dog_cmd_idx["body_roll"]]:+.2f}  h_cmd={dog[dog_cmd_idx["body_height"]]:+.2f}')
 
         if arm_open:
             if self.cfg.arm.trajectory.enabled:
@@ -1319,31 +1337,31 @@ class WBCEnv(LeggedRobot):
         return torch.clip(center + half * value, lo, hi)
 
     def _apply_body_attitude_plan(self, scaled_plan):
-        self.commands_dog[:, 3] = torch.clip(
+        self.commands_dog[:, dog_cmd_idx["body_pitch"]] = torch.clip(
             scaled_plan[..., 0],
             self.cfg.commands.limit_body_pitch[0],
             self.cfg.commands.limit_body_pitch[1] / 4 * 3.0,
         )
-        self.commands_dog[:, 4] = torch.clip(
+        self.commands_dog[:, dog_cmd_idx["body_roll"]] = torch.clip(
             scaled_plan[..., 1],
             self.cfg.commands.limit_body_roll[0],
             self.cfg.commands.limit_body_roll[1],
         )
 
     def _apply_dynamic_gait_plan(self, gait_plan):
-        self.commands_dog[:, 6] = self._map_unit_interval_to_command_range(
+        self.commands_dog[:, dog_cmd_idx["gait_frequency"]] = self._map_unit_interval_to_command_range(
             gait_plan[..., 0], self.cfg.commands.limit_gait_frequency
         )
-        self.commands_dog[:, 7] = self._map_unit_interval_to_command_range(
+        self.commands_dog[:, dog_cmd_idx["footswing_height"]] = self._map_unit_interval_to_command_range(
             gait_plan[..., 1], self.cfg.commands.limit_footswing_height
         )
-        self.commands_dog[:, 8] = self._map_unit_interval_to_command_range(
+        self.commands_dog[:, dog_cmd_idx["stance_width"]] = self._map_unit_interval_to_command_range(
             gait_plan[..., 2], self.cfg.commands.limit_stance_width
         )
-        self.commands_dog[:, 9] = self._map_unit_interval_to_command_range(
+        self.commands_dog[:, dog_cmd_idx["stance_length"]] = self._map_unit_interval_to_command_range(
             gait_plan[..., 3], self.cfg.commands.limit_stance_length
         )
-        self.commands_dog[:, 10] = self._map_unit_interval_to_command_range(
+        self.commands_dog[:, dog_cmd_idx["gait_duration"]] = self._map_unit_interval_to_command_range(
             gait_plan[..., 4], self.cfg.commands.limit_gait_duration
         )
 
@@ -1355,7 +1373,7 @@ class WBCEnv(LeggedRobot):
         ).view(1, 3)
         delta_vel = torch.clip(obs[..., :3], -1.0, 1.0) * limits
         self.arm_delta_vel_cmd[:] = delta_vel
-        self.commands_dog[:, :3] = self.user_vel_cmd + delta_vel
+        self.commands_dog[:, dog_cmd_idx["velocity"]] = self.user_vel_cmd + delta_vel
         self.plan_actions[:, :3] = delta_vel
 
         if self.cfg.commands.use_dynamic_gait and obs.shape[-1] >= 10:
@@ -1373,8 +1391,8 @@ class WBCEnv(LeggedRobot):
             self._apply_dynamic_gait_plan(obs[..., 2:7])
 
         if self.cfg.hybrid.plan_vel and not self.cfg.commands.use_dynamic_gait:
-            self.commands_dog[:, 0] = torch.clip(rescaled_obs[..., 2], -2, 2)  # lin_vel
-            self.commands_dog[:, 2] = torch.clip(rescaled_obs[..., 3], -2, 2)  # ang_vel
+            self.commands_dog[:, dog_cmd_idx["x_vel"]] = torch.clip(rescaled_obs[..., 2], -2, 2)  # lin_vel
+            self.commands_dog[:, dog_cmd_idx["yaw_vel"]] = torch.clip(rescaled_obs[..., 3], -2, 2)  # ang_vel
         self.plan_actions[:] = rescaled_obs
 
     def plan(self, obs):
@@ -1418,8 +1436,8 @@ class WBCEnv(LeggedRobot):
                     self.base_pos[:, 2:3],
                     contact_states,
                     self.base_ang_vel * self.obs_scales.ang_vel,
-                    self.commands_dog[:, :3],
-                    (self.commands_dog * self.commands_scale_dog)[:, 5:10]
+                    self.commands_dog[:, dog_cmd_idx["velocity"]],
+                    (self.commands_dog * self.commands_scale_dog)[:, dog_cmd_idx["gait_params"]]
                     if self.cfg.commands.use_dynamic_gait
                     else torch.empty(self.num_envs, 0, device=self.device),
                     self.get_ee_pose_body_9d(),
@@ -1473,7 +1491,7 @@ class WBCEnv(LeggedRobot):
 
         if self.cfg.commands.use_dynamic_gait:
             obs_buf = torch.cat(
-                (obs_buf, (self.commands_dog * self.commands_scale_dog)[:, 5:10]), dim=-1
+                (obs_buf, (self.commands_dog * self.commands_scale_dog)[:, dog_cmd_idx["gait_params"]]), dim=-1
             )
 
         if self.cfg.env.observe_two_prev_actions:
@@ -1760,19 +1778,19 @@ class KeyboardWrapper(WBCEnv):
                     plt.imsave("now.png", video_frame)
 
                 elif evt.action == "move forward" and evt.value > 0:
-                    self.commands_dog[0, 0] += 0.1
+                    self.commands_dog[0, dog_cmd_idx["x_vel"]] += 0.1
                 elif evt.action == "move backward" and evt.value > 0:
-                    self.commands_dog[0, 0] -= 0.1
+                    self.commands_dog[0, dog_cmd_idx["x_vel"]] -= 0.1
                 elif evt.action == "move left" and evt.value > 0:
-                    self.commands_dog[0, 1] += 0.1
-                    self.commands_dog[0, 1] = torch.clip(self.commands_dog[0, 1], -0.5, 0.5)
+                    self.commands_dog[0, dog_cmd_idx["y_vel"]] += 0.1
+                    self.commands_dog[0, dog_cmd_idx["y_vel"]] = torch.clip(self.commands_dog[0, dog_cmd_idx["y_vel"]], -0.5, 0.5)
                 elif evt.action == "move right" and evt.value > 0:
-                    self.commands_dog[0, 1] -= 0.1
-                    self.commands_dog[0, 1] = torch.clip(self.commands_dog[0, 1], -0.5, 0.5)
+                    self.commands_dog[0, dog_cmd_idx["y_vel"]] -= 0.1
+                    self.commands_dog[0, dog_cmd_idx["y_vel"]] = torch.clip(self.commands_dog[0, dog_cmd_idx["y_vel"]], -0.5, 0.5)
                 elif evt.action == "turn left" and evt.value > 0:
-                    self.commands_dog[0, 2] += 0.1
+                    self.commands_dog[0, dog_cmd_idx["yaw_vel"]] += 0.1
                 elif evt.action == "turn right" and evt.value > 0:
-                    self.commands_dog[0, 2] -= 0.1
+                    self.commands_dog[0, dog_cmd_idx["yaw_vel"]] -= 0.1
                 elif evt.action == "arm up" and evt.value > 0:
                     self.commands_arm[0, 1] += 0.1
                 elif evt.action == "arm down" and evt.value > 0:
@@ -1802,7 +1820,7 @@ class KeyboardWrapper(WBCEnv):
 
                 elif evt.action == "reset" and evt.value > 0:
                     self.reset()
-                    self.commands_dog[0, :3] = 0
+                    self.commands_dog[0, dog_cmd_idx["velocity"]] = 0
 
                 elif (
                     evt.action
@@ -1829,15 +1847,15 @@ class KeyboardWrapper(WBCEnv):
                     and evt.value == 0
                 ):
                     print(
-                        f"x_vel: {self.commands_dog[0, 0]:.2f}, \
-                          y_vel: {self.commands_dog[0, 1]:.2f}, \
-                          z_vel: {self.commands_dog[0, 2]:.2f}, \
-                          l: {self.commands_arm[0, 0]:.2f}, \
-                          p: {self.commands_arm[0, 1]:.2f}, \
-                          yaw: {self.commands_arm[0, 2]:.2f}, \
-                          roll: {self.commands_arm[0, 3]:.2f}, \
-                          pitch: {self.commands_arm[0, 4]:.2f}, \
-                          yaw: {self.commands_arm[0, 5]:.2f}"
+                        f'x_vel: {self.commands_dog[0, dog_cmd_idx["x_vel"]]:.2f}, '
+                        f'y_vel: {self.commands_dog[0, dog_cmd_idx["y_vel"]]:.2f}, '
+                        f'yaw_vel: {self.commands_dog[0, dog_cmd_idx["yaw_vel"]]:.2f}, '
+                        f'l: {self.commands_arm[0, 0]:.2f}, '
+                        f'p: {self.commands_arm[0, 1]:.2f}, '
+                        f'yaw: {self.commands_arm[0, 2]:.2f}, '
+                        f'roll: {self.commands_arm[0, 3]:.2f}, '
+                        f'pitch: {self.commands_arm[0, 4]:.2f}, '
+                        f'yaw: {self.commands_arm[0, 5]:.2f}'
                     )
 
         # fetch results
