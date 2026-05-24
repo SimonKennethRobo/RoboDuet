@@ -97,7 +97,6 @@ def main(arg):
         },
     )
     wandb.init(
-        entity="simon00715",
         project="roboduet",
         group=args.run_name,
         mode=mode,
