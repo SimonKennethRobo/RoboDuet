@@ -153,8 +153,8 @@ def load_dog_policy_for_benchmark(
     ]
     if mismatches:
         raise ValueError(
-            f"{logdir}: checkpoint dog policy dimensions are incompatible with the shared env. "
-            "This benchmark only compares policies with the same observation/action layout. " + "; ".join(mismatches)
+            f"{logdir}: checkpoint dog policy obs/action dimensions are incompatible with the shared env "
+            "(use_adaptation_module differences are allowed). " + "; ".join(mismatches)
         )
 
     actor_critic = DogActorCritic(
@@ -327,7 +327,6 @@ CRITICAL_COMPAT_CFG_PATHS = [
     "dog.dog_num_privileged_obs",
     "dog.dog_actions",
     "dog.num_actions_loco",
-    "dog.use_adaptation_module",
     "arm.arm_num_commands",
     "arm.num_actions_arm",
     "arm.trajectory.enabled",
@@ -923,7 +922,7 @@ def save_markdown_report(
             lines.extend(["Plots: " + " · ".join(plot_links), ""])
 
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-    with open(output_path, "w") as f:
+    with open(output_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
     print(f"[Benchmark] Markdown report saved → {output_path}")
 

@@ -505,11 +505,15 @@ def main():
 
     print_comparison_table(all_results)
 
-    run_tag = "_vs_".join(names[:3]) + (f"_+{n_runs - 3}" if n_runs > 3 else "")
-    os.makedirs(args.output_dir, exist_ok=True)
-    json_path = os.path.join(args.output_dir, f"stage1_{run_tag}.json")
-    markdown_path = os.path.join(args.output_dir, f"stage1_{run_tag}.md")
-    plots_dir = os.path.join(args.output_dir, f"stage1_{run_tag}_plots")
+    import datetime
+
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = os.path.join(args.output_dir, timestamp)
+    os.makedirs(run_dir, exist_ok=True)
+
+    json_path = os.path.join(run_dir, "results.json")
+    markdown_path = os.path.join(run_dir, "report.md")
+    plots_dir = os.path.join(run_dir, "plots")
     metadata = {
         "runs": ", ".join(names),
         "num_envs_per_policy": args.num_envs_per_policy,
@@ -524,6 +528,7 @@ def main():
     save_results(all_results, json_path)
     save_visualizations(all_results, plots_dir)
     save_markdown_report(all_results, markdown_path, metadata=metadata, plot_dir=plots_dir)
+    print(f"[Benchmark] Output directory → {run_dir}")
 
 
 if __name__ == "__main__":
