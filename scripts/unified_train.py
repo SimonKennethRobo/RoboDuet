@@ -125,7 +125,7 @@ def train_go1(headless=True):
         )
         shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet/observation_builder.py", f"{args.log_dir}/scripts/observation_builder.py")
         shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet/trajectory_geometry.py", f"{args.log_dir}/scripts/trajectory_geometry.py")
-        shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet/stage_schedule.py", f"{args.log_dir}/scripts/stage_schedule.py")
+        shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet/utils.py", f"{args.log_dir}/scripts/utils.py")
         shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet/wbc_env_config.py", f"{args.log_dir}/scripts/wbc_env_config.py")
         shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet/asset_config.py", f"{args.log_dir}/scripts/asset_config.py")
         shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/go1/go1_config.py", f"{args.log_dir}/scripts/go1_config.py")
