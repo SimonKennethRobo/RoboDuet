@@ -5,13 +5,10 @@ from dataclasses import dataclass
 
 import isaacgym  # noqa: F401 – must be imported before torch
 import joylink_client
-import pytorch3d.transforms as pt3d
 import torch
-from isaacgym.torch_utils import quat_from_euler_xyz, quat_mul
 
 from go1_gym.envs import *  # noqa: F403
 from go1_gym.envs.roboduet import WBCEnv
-from go1_gym.envs.roboduet.legged_robot import quaternion_to_rpy
 from go1_gym.envs.roboduet.wbc_env_config import configure_privileged_obs_dims
 from scripts.load_policy import load_arm_policy, load_dog_policy, load_env
 
@@ -266,39 +263,6 @@ def add_mapped_command(env, mapping, delta):
         add_arm_command(env, idx, delta, limits)
 
 
-def sync_arm_command_obs(env):
-    base_env = env.env
-    base_env.commands_arm_obs[0:1, 0] = base_env.commands_arm[0:1, 0]
-    base_env.commands_arm_obs[0:1, 1] = base_env.commands_arm[0:1, 1]
-    base_env.commands_arm_obs[0:1, 2] = base_env.commands_arm[0:1, 2]
-
-    roll = base_env.commands_arm[0:1, 3]
-    pitch = base_env.commands_arm[0:1, 4]
-    yaw = base_env.commands_arm[0:1, 5]
-
-    zero_vec = torch.zeros_like(roll)
-    q1 = quat_from_euler_xyz(zero_vec, zero_vec, yaw)
-    q2 = quat_from_euler_xyz(zero_vec, pitch, zero_vec)
-    q3 = quat_from_euler_xyz(roll, zero_vec, zero_vec)
-    quats = quat_mul(q1, quat_mul(q2, q3))
-
-    base_env.obj_quats[0:1] = quats.reshape(-1, 4)
-
-    if base_env.cfg.hybrid.use_vision:
-        base_env._get_object_pose_in_ee()
-        base_env._get_object_abg_in_ee()
-
-    base_env.visual_rpy[0:1] = quaternion_to_rpy(base_env.obj_quats[0:1]).to(base_env.device)
-    if base_env.cfg.use_rot6d:
-        r6d = pt3d.matrix_to_rotation_6d(pt3d.quaternion_to_matrix(quats[:, [3, 0, 1, 2]]))
-        base_env.commands_arm_obs[0:1, 3:9] = r6d.to(base_env.device)
-    else:
-        rpy = base_env.quat_to_angle(base_env.obj_quats[0:1]).to(base_env.device)
-        base_env.commands_arm_obs[0:1, 3] = rpy[:, 0]
-        base_env.commands_arm_obs[0:1, 4] = rpy[:, 1]
-        base_env.commands_arm_obs[0:1, 5] = rpy[:, 2]
-
-
 def apply_all_dog_commands(env, cfg, cmd: DogInitCmd):
     """Write DogInitCmd values to env.commands_dog (respects n_cmd and use_dynamic_gait)."""
     n_cmd = env.commands_dog.shape[1]
@@ -315,33 +279,6 @@ def apply_all_dog_commands(env, cfg, cmd: DogInitCmd):
         env.commands_dog[:, 8] = cmd.stance_width
         env.commands_dog[:, 9] = cmd.stance_length
         env.commands_dog[:, 10] = cmd.gait_duration
-
-
-def format_dog_commands(env, cfg):
-    """Return a one-line human-readable string of the active dog commands."""
-    c = env.commands_dog[0]
-    n_cmd = env.commands_dog.shape[1]
-    parts = [
-        f"vx={float(c[0]):+.2f}",
-        f"vy={float(c[1]):+.2f}",
-        f"wz={float(c[2]):+.2f}",
-    ]
-    if n_cmd > 5:
-        parts += [
-            f"pitch={float(c[3]):+.2f}",
-            f"roll={float(c[4]):+.2f}",
-            f"dh={float(c[5]):+.3f}",
-        ]
-    if n_cmd > 6:
-        parts.append(f"freq={float(c[6]):.2f}")
-    if n_cmd > 10:
-        parts += [
-            f"swing={float(c[7]):.3f}",
-            f"sw={float(c[8]):.3f}",
-            f"sl={float(c[9]):.3f}",
-            f"dur={float(c[10]):.2f}",
-        ]
-    return "  ".join(parts)
 
 
 def format_robot_state(env):
@@ -500,7 +437,7 @@ class JoystickController:
             for m in JOYSTICK_COMMAND_MAP.values()
             if m["source"] == "axis_combo"
         }
-        sync_arm_command_obs(env)
+        env.env.sync_arm_commands_to_obs(env_ids=slice(0, 1))
 
 
 def command_key(target, key):
@@ -558,12 +495,12 @@ def main(args):
     env.commands_arm[:, 3] = arm_cmd.roll
     env.commands_arm[:, 4] = arm_cmd.pitch
     env.commands_arm[:, 5] = arm_cmd.yaw
-    sync_arm_command_obs(env)
+    env.env.sync_arm_commands_to_obs(env_ids=slice(0, 1))
 
     if lock_arm:
         print("[arm] LOCKED — zero actions sent every step", flush=True)
     # Reserve two lines that the periodic printer will overwrite in place
-    print(f"[cmd]   {format_dog_commands(env, cfg)}")
+    print(f"[cmd]   {env.env.format_dog_commands()}")
     print(f"[state] {format_robot_state(env)}", flush=True)
 
     _CMD_PRINT_INTERVAL = 0.1  # seconds
@@ -574,7 +511,7 @@ def main(args):
 
         now = time.monotonic()
         if now - _last_print >= _CMD_PRINT_INTERVAL:
-            cmd_line = f"[cmd]   {format_dog_commands(env, cfg)}"
+            cmd_line = f"[cmd]   {env.env.format_dog_commands()}"
             state_line = f"[state] {format_robot_state(env)}"
             # \033[2A moves cursor up 2 lines to overwrite both lines in place
             print(f"\033[2A{cmd_line}\n{state_line}\033[K", flush=True)

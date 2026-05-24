@@ -4,8 +4,8 @@ This module is the source of truth for RoboDuet-specific defaults. The
 `legged_robot_config.py` module only provides the base Cfg schema.
 """
 
-from dataclasses import dataclass, field
 import math
+from dataclasses import dataclass, field
 
 from params_proto import PrefixProto
 

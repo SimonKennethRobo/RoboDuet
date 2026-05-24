@@ -9,7 +9,8 @@ from typing import Callable, Dict, List, NamedTuple, Optional
 
 import isaacgym  # noqa: F401 - must precede torch
 import torch
-from go1_gym.envs.roboduet import HistoryWrapper, WBCEnv
+from go1_gym.envs.roboduet.wbc_env_wrapper import HistoryWrapper
+from go1_gym.envs.roboduet.wbc_env import WBCEnv
 from go1_gym.envs.roboduet.wbc_env_config import (
     ROBODUET_DEFAULTS,
     RoboDuetCfg as Cfg,
@@ -594,9 +595,7 @@ def _gait_training_costs(env: HistoryWrapper) -> Dict[str, torch.Tensor]:
 
     cur_footsteps_translated = b.foot_positions - b.base_pos.unsqueeze(1)
     qexp = quat_conjugate(b.base_quat).unsqueeze(1).expand(-1, 4, -1).reshape(b.num_envs * 4, 4)
-    footsteps_body = quat_apply_yaw(qexp, cur_footsteps_translated.reshape(b.num_envs * 4, 3)).view(
-        b.num_envs, 4, 3
-    )
+    footsteps_body = quat_apply_yaw(qexp, cur_footsteps_translated.reshape(b.num_envs * 4, 3)).view(b.num_envs, 4, 3)
 
     if b.cfg.commands.use_dynamic_gait:
         desired_stance_width = b.commands_dog[:, 8]

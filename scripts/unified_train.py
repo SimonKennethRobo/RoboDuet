@@ -4,7 +4,7 @@ assert isaacgym
 import torch
 import argparse
 
-from go1_gym.envs.roboduet.stage_schedule import StageSchedule, apply_hybrid_reward_settings
+from go1_gym.envs.roboduet.utils import StageSchedule, apply_hybrid_reward_settings
 from go1_gym.envs.roboduet.wbc_env_config import RoboDuetCfg as Cfg, configure_task_from_args
 
 import wandb
@@ -16,7 +16,7 @@ from go1_gym import MINI_GYM_ROOT_DIR
 import shutil
 import pickle
 
-from go1_gym.envs.roboduet import HistoryWrapper, WBCEnv
+from go1_gym.envs.roboduet.wbc_env_wrapper import HistoryWrapper, WBCEnv
 
 from go1_gym_learn.ppo_cse_unified import Runner
 from go1_gym_learn.ppo_cse_unified.ppo import UnifiedPPO_Args

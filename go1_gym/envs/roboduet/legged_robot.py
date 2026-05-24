@@ -4,7 +4,6 @@ import copy
 import os
 import sys
 import xml.etree.ElementTree as ET
-from typing import Dict
 
 from isaacgym import gymapi, gymtorch, gymutil
 from isaacgym.torch_utils import *

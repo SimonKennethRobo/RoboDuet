@@ -5,7 +5,7 @@ from go1_gym_learn.ppo_cse_automatic.arm_ac import ArmActorCritic
 from go1_gym_learn.ppo_cse_automatic.dog_ac import DogActorCritic
 import os.path as osp
 import pickle as pkl
-from go1_gym.envs.roboduet import HistoryWrapper
+from go1_gym.envs.roboduet.wbc_env_wrapper import HistoryWrapper
 from go1_gym.envs.roboduet.wbc_env_config import (
     ROBODUET_DEFAULTS,
     RoboDuetCfg as Cfg,

@@ -63,7 +63,7 @@ from mpl_toolkits.mplot3d import Axes3D   # noqa: F401
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import langevin_traj_gen as ltg
 import pose_traj_gen as ptg
-from trajectory_curriculum import VelocityTrajectorySimulator, speed_profile, xyz_to_lpy  # noqa: F401
+from go1_gym.envs.roboduet.traj_gen.trajectory_curriculum import VelocityTrajectorySimulator, speed_profile, xyz_to_lpy  # noqa: F401
 
 
 
