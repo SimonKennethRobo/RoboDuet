@@ -47,6 +47,9 @@ class KeyboardWrapper(WBCEnv):
     def __init__(self, sim_device, headless, cfg):
         super().__init__(sim_device, headless, cfg=cfg)
 
+        self.keyboard_control_mode = "dog"
+
+        self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_TAB, "toggle keyboard mode")
         self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_NUMPAD_8, "move forward")
         self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_NUMPAD_5, "move backward")
         self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_NUMPAD_4, "move left")
@@ -60,14 +63,150 @@ class KeyboardWrapper(WBCEnv):
         self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_J, "arm left")
         self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_L, "arm right")
 
-        self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_W, "arm pitch down")
-        self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_S, "arm pitch up")
-        self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_A, "arm roll left")
-        self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_D, "arm roll right")
-        self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_Q, "arm yaw left")
-        self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_E, "arm yaw right")
+        self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_W, "key w")
+        self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_S, "key s")
+        self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_A, "key a")
+        self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_D, "key d")
+        self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_Q, "key q")
+        self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_E, "key e")
+        self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_SPACE, "zero keyboard command")
 
         self.gym.subscribe_viewer_keyboard_event(self.viewer, gymapi.KEY_R, "reset")
+
+    def _toggle_keyboard_control_mode(self):
+        self.keyboard_control_mode = "arm" if self.keyboard_control_mode == "dog" else "dog"
+        print(f"Keyboard control mode: {self.keyboard_control_mode}")
+
+    def _apply_keyboard_dog_command(self, action):
+        cmd = self.user_vel_cmd if hasattr(self, "user_vel_cmd") else self.commands_dog[:, :3]
+        if action == "move forward":
+            cmd[0, 0] += 0.1
+            cmd[0, 0] = torch.clip(cmd[0, 0], -1.5, 1.5)
+        elif action == "move backward":
+            cmd[0, 0] -= 0.1
+            cmd[0, 0] = torch.clip(cmd[0, 0], -1.5, 1.5)
+        elif action == "move left":
+            cmd[0, 1] += 0.1
+            cmd[0, 1] = torch.clip(cmd[0, 1], -0.5, 0.5)
+        elif action == "move right":
+            cmd[0, 1] -= 0.1
+            cmd[0, 1] = torch.clip(cmd[0, 1], -0.5, 0.5)
+        elif action == "turn left":
+            cmd[0, 2] += 0.1
+            cmd[0, 2] = torch.clip(cmd[0, 2], -1.5, 1.5)
+        elif action == "turn right":
+            cmd[0, 2] -= 0.1
+            cmd[0, 2] = torch.clip(cmd[0, 2], -1.5, 1.5)
+        self.commands_dog[0, :3] = cmd[0]
+
+    def _apply_keyboard_arm_command(self, action):
+        if action == "arm up":
+            self.commands_arm[0, 1] += 0.1
+        elif action == "arm down":
+            self.commands_arm[0, 1] -= 0.1
+        elif action == "arm forward":
+            self.commands_arm[0, 0] += 0.05
+            self.commands_arm[0, 0] = torch.clip(self.commands_arm[0, 0], 0.2, 0.8)
+        elif action == "arm backward":
+            self.commands_arm[0, 0] -= 0.05
+            self.commands_arm[0, 0] = torch.clip(self.commands_arm[0, 0], 0.2, 0.8)
+        elif action == "arm left":
+            self.commands_arm[0, 2] += 0.1
+        elif action == "arm right":
+            self.commands_arm[0, 2] -= 0.1
+        elif action == "arm pitch down":
+            self.commands_arm[0, 4] += 0.1
+        elif action == "arm pitch up":
+            self.commands_arm[0, 4] -= 0.1
+        elif action == "arm roll left":
+            self.commands_arm[0, 3] += 0.1
+        elif action == "arm roll right":
+            self.commands_arm[0, 3] -= 0.1
+        elif action == "arm yaw left":
+            self.commands_arm[0, 5] += 0.1
+        elif action == "arm yaw right":
+            self.commands_arm[0, 5] -= 0.1
+
+    def _apply_keyboard_mode_command(self, key):
+        if self.keyboard_control_mode == "dog":
+            dog_key_map = {
+                "key w": "move forward",
+                "key s": "move backward",
+                "key a": "move left",
+                "key d": "move right",
+                "key q": "turn left",
+                "key e": "turn right",
+            }
+            self._apply_keyboard_dog_command(dog_key_map[key])
+            return
+
+        arm_key_map = {
+            "key w": "arm forward",
+            "key s": "arm backward",
+            "key a": "arm left",
+            "key d": "arm right",
+            "key q": "arm yaw left",
+            "key e": "arm yaw right",
+        }
+        self._apply_keyboard_arm_command(arm_key_map[key])
+
+    def _zero_keyboard_command(self):
+        if self.keyboard_control_mode == "dog":
+            if hasattr(self, "user_vel_cmd"):
+                self.user_vel_cmd[0, :3] = 0
+            self.commands_dog[0, :3] = 0
+            self._set_keyboard_gait_commands()
+            return
+
+        self.commands_arm[0, 0] = 0.5
+        self.commands_arm[0, 1] = 0.2
+        self.commands_arm[0, 2] = 0.0
+        self.commands_arm[0, 3] = 0.1
+        self.commands_arm[0, 4] = 0.5
+        self.commands_arm[0, 5] = 0.0
+
+    def _set_keyboard_gait_commands(self):
+        if self.commands_dog.shape[1] < 10:
+            return
+
+        self.commands_dog[0, 3] = 0.0
+        self.commands_dog[0, 4] = 0.0
+
+        gait_start = 6 if self.commands_dog.shape[1] >= 11 else 5
+        if gait_start == 6:
+            self.commands_dog[0, 5] = 0.0
+        self.commands_dog[0, gait_start] = 2.0
+        self.commands_dog[0, gait_start + 1] = 0.06
+        self.commands_dog[0, gait_start + 2] = 0.0
+        self.commands_dog[0, gait_start + 3] = 0.0
+        self.commands_dog[0, gait_start + 4] = 0.5
+
+    def _reset_keyboard_play_commands(self):
+        if hasattr(self, "user_vel_cmd"):
+            self.user_vel_cmd[0, :3] = 0
+        self.commands_dog[0, :3] = 0
+        self._set_keyboard_gait_commands()
+        self.commands_arm[0, 0] = 0.5
+        self.commands_arm[0, 1] = 0.2
+        self.commands_arm[0, 2] = 0.0
+        self.commands_arm[0, 3] = 0.1
+        self.commands_arm[0, 4] = 0.5
+        self.commands_arm[0, 5] = 0.0
+        self.update_arm_commands()
+
+    def _print_keyboard_commands(self):
+        print(
+            f"mode: {self.keyboard_control_mode}, "
+            f"x_vel: {self.commands_dog[0, 0]:.2f}, "
+            f"y_vel: {self.commands_dog[0, 1]:.2f}, "
+            f"yaw_vel: {self.commands_dog[0, 2]:.2f}, "
+            f"l: {self.commands_arm[0, 0]:.2f}, "
+            f"p: {self.commands_arm[0, 1]:.2f}, "
+            f"yaw: {self.commands_arm[0, 2]:.2f}, "
+            f"roll: {self.commands_arm[0, 3]:.2f}, "
+            f"pitch: {self.commands_arm[0, 4]:.2f}, "
+            f"yaw: {self.commands_arm[0, 5]:.2f}"
+        )
 
     def render_gui(self, sync_frame_time=True):
         if self.viewer:
@@ -88,9 +227,13 @@ class KeyboardWrapper(WBCEnv):
                     self.enable_viewer_sync = not self.enable_viewer_sync
                 elif evt.action == "fixed_cam" and evt.value > 0:
                     self.fixed_cam = not self.fixed_cam
+                elif evt.action == "toggle keyboard mode" and evt.value > 0:
+                    self._toggle_keyboard_control_mode()
 
                 # for demo
                 elif evt.action == "save_image" and evt.value > 0:
+                    if not hasattr(self, "rendering_camera"):
+                        continue
                     self.gym.step_graphics(self.sim)
                     self.gym.render_all_camera_sensors(self.sim)
                     cam_target = gymapi.Vec3(self.root_states[0, 0], self.root_states[0, 1], self.root_states[0, 2])
@@ -105,54 +248,32 @@ class KeyboardWrapper(WBCEnv):
                     # Save the image as now.png
                     plt.imsave("now.png", video_frame)
 
-                elif evt.action == "move forward" and evt.value > 0:
-                    self.commands_dog[0, dog_cmd_idx["x_vel"]] += 0.1
-                elif evt.action == "move backward" and evt.value > 0:
-                    self.commands_dog[0, dog_cmd_idx["x_vel"]] -= 0.1
-                elif evt.action == "move left" and evt.value > 0:
-                    self.commands_dog[0, dog_cmd_idx["y_vel"]] += 0.1
-                    self.commands_dog[0, dog_cmd_idx["y_vel"]] = torch.clip(
-                        self.commands_dog[0, dog_cmd_idx["y_vel"]], -0.5, 0.5
-                    )
-                elif evt.action == "move right" and evt.value > 0:
-                    self.commands_dog[0, dog_cmd_idx["y_vel"]] -= 0.1
-                    self.commands_dog[0, dog_cmd_idx["y_vel"]] = torch.clip(
-                        self.commands_dog[0, dog_cmd_idx["y_vel"]], -0.5, 0.5
-                    )
-                elif evt.action == "turn left" and evt.value > 0:
-                    self.commands_dog[0, dog_cmd_idx["yaw_vel"]] += 0.1
-                elif evt.action == "turn right" and evt.value > 0:
-                    self.commands_dog[0, dog_cmd_idx["yaw_vel"]] -= 0.1
-                elif evt.action == "arm up" and evt.value > 0:
-                    self.commands_arm[0, 1] += 0.1
-                elif evt.action == "arm down" and evt.value > 0:
-                    self.commands_arm[0, 1] -= 0.1
-                elif evt.action == "arm forward" and evt.value > 0:
-                    self.commands_arm[0, 0] += 0.05
-                    self.commands_arm[0, 0] = torch.clip(self.commands_arm[0, 0], 0.2, 0.8)
-                elif evt.action == "arm backward" and evt.value > 0:
-                    self.commands_arm[0, 0] -= 0.05
-                    self.commands_arm[0, 0] = torch.clip(self.commands_arm[0, 0], 0.2, 0.8)
-                elif evt.action == "arm left" and evt.value > 0:
-                    self.commands_arm[0, 2] += 0.1
-                elif evt.action == "arm right" and evt.value > 0:
-                    self.commands_arm[0, 2] -= 0.1
-                elif evt.action == "arm pitch down" and evt.value > 0:
-                    self.commands_arm[0, 4] += 0.1
-                elif evt.action == "arm pitch up" and evt.value > 0:
-                    self.commands_arm[0, 4] -= 0.1
-                elif evt.action == "arm roll left" and evt.value > 0:
-                    self.commands_arm[0, 3] += 0.1
-                elif evt.action == "arm roll right" and evt.value > 0:
-                    self.commands_arm[0, 3] -= 0.1
-                elif evt.action == "arm yaw left" and evt.value > 0:
-                    self.commands_arm[0, 5] += 0.1
-                elif evt.action == "arm yaw right" and evt.value > 0:
-                    self.commands_arm[0, 5] -= 0.1
+                elif evt.action in [
+                    "move forward",
+                    "move backward",
+                    "move left",
+                    "move right",
+                    "turn left",
+                    "turn right",
+                ] and evt.value > 0:
+                    self._apply_keyboard_dog_command(evt.action)
+                elif evt.action in [
+                    "arm up",
+                    "arm down",
+                    "arm forward",
+                    "arm backward",
+                    "arm left",
+                    "arm right",
+                ] and evt.value > 0:
+                    self._apply_keyboard_arm_command(evt.action)
+                elif evt.action in ["key w", "key s", "key a", "key d", "key q", "key e"] and evt.value > 0:
+                    self._apply_keyboard_mode_command(evt.action)
+                elif evt.action == "zero keyboard command" and evt.value > 0:
+                    self._zero_keyboard_command()
 
                 elif evt.action == "reset" and evt.value > 0:
                     self.reset()
-                    self.commands_dog[0, dog_cmd_idx["velocity"]] = 0
+                    self._reset_keyboard_play_commands()
 
                 elif (
                     evt.action
@@ -175,20 +296,17 @@ class KeyboardWrapper(WBCEnv):
                         "arm roll right",
                         "arm yaw left",
                         "arm yaw right",
+                        "key w",
+                        "key s",
+                        "key a",
+                        "key d",
+                        "key q",
+                        "key e",
+                        "zero keyboard command",
                     ]
                     and evt.value == 0
                 ):
-                    print(
-                        f"x_vel: {self.commands_dog[0, dog_cmd_idx['x_vel']]:.2f}, "
-                        f"y_vel: {self.commands_dog[0, dog_cmd_idx['y_vel']]:.2f}, "
-                        f"yaw_vel: {self.commands_dog[0, dog_cmd_idx['yaw_vel']]:.2f}, "
-                        f"l: {self.commands_arm[0, 0]:.2f}, "
-                        f"p: {self.commands_arm[0, 1]:.2f}, "
-                        f"yaw: {self.commands_arm[0, 2]:.2f}, "
-                        f"roll: {self.commands_arm[0, 3]:.2f}, "
-                        f"pitch: {self.commands_arm[0, 4]:.2f}, "
-                        f"yaw: {self.commands_arm[0, 5]:.2f}"
-                    )
+                    self._print_keyboard_commands()
 
         # fetch results
         if self.device != "cpu":
