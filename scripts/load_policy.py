@@ -72,18 +72,19 @@ def _recompute_play_dims(cfg):
     cfg.dog.dog_num_obs_history = cfg.dog.dog_num_observation_history * cfg.dog.dog_num_observations
 
 def load_dog_policy(logdir, ckpt_id, Cfg):
-    actor_critic = DogActorCritic(Cfg.dog.dog_num_observations,
-                                Cfg.dog.dog_num_privileged_obs,
-                                Cfg.dog.dog_num_obs_history,
-                                Cfg.dog.dog_actions,
-                                use_adaptation_module=getattr(Cfg.dog, "use_adaptation_module", True),
-                                ).to("cpu")
     device = torch.device("cpu")
     if ckpt_id == 'last':
         ckpt_id_ = ckpt_id + '_dog'
     else:
         ckpt_id_ = ckpt_id.zfill(6)
     ckpt = torch.load(logdir + f'/checkpoints_dog/ac_weights_{str(ckpt_id_)}.pt', map_location=device)
+    use_adaptation_module = any(key.startswith("adaptation_module.") for key in ckpt)
+    actor_critic = DogActorCritic(Cfg.dog.dog_num_observations,
+                                Cfg.dog.dog_num_privileged_obs,
+                                Cfg.dog.dog_num_obs_history,
+                                Cfg.dog.dog_actions,
+                                use_adaptation_module=use_adaptation_module,
+                                ).to("cpu")
     # for key, value in ckpt.items():
     #     print(key, value.shape)
     actor_critic.load_state_dict(ckpt)

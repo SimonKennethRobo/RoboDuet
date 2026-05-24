@@ -337,9 +337,13 @@ class KeyboardStage1Wrapper(WBCEnv):
     _HEIGHT_STEP = 0.05
     _GAIT_FREQ_STEP = 0.5
     _STANCE_STEP = 0.05
+    _LOCKED_GAIT = (2.0, 0.06, 0.0, 0.0, 0.5)
 
     def __init__(self, sim_device, headless, cfg):
         super().__init__(sim_device, headless, cfg=cfg)
+        self.stage1_user_vel_cmd = torch.zeros(
+            self.num_envs, 3, dtype=self.commands_dog.dtype, device=self.commands_dog.device
+        )
 
         bindings = [
             (gymapi.KEY_W, "dog_vx_up"),
@@ -368,13 +372,85 @@ class KeyboardStage1Wrapper(WBCEnv):
         return self.commands_dog.shape[1]
 
     def _add_dog(self, idx, delta, lo, hi):
+        if idx < 3:
+            val = float(self.stage1_user_vel_cmd[0, idx]) + delta
+            self.stage1_user_vel_cmd[:, idx] = max(lo, min(hi, val))
+            self.apply_stage1_locked_commands()
+            return
+
         if idx >= self._n_cmd():
             return
         val = float(self.commands_dog[0, idx]) + delta
         self.commands_dog[:, idx] = max(lo, min(hi, val))
 
+    def apply_stage1_locked_commands(self):
+        n_cmd = self._n_cmd()
+        if n_cmd > dog_cmd_idx["x_vel"]:
+            self.commands_dog[:, dog_cmd_idx["x_vel"]] = self.stage1_user_vel_cmd[:, 0]
+        if n_cmd > dog_cmd_idx["y_vel"]:
+            self.commands_dog[:, dog_cmd_idx["y_vel"]] = self.stage1_user_vel_cmd[:, 1]
+        if n_cmd > dog_cmd_idx["yaw_vel"]:
+            self.commands_dog[:, dog_cmd_idx["yaw_vel"]] = self.stage1_user_vel_cmd[:, 2]
+        if n_cmd > dog_cmd_idx["body_pitch"]:
+            self.commands_dog[:, dog_cmd_idx["body_pitch"]] = 0.0
+        if n_cmd > dog_cmd_idx["body_roll"]:
+            self.commands_dog[:, dog_cmd_idx["body_roll"]] = 0.0
+
+        if n_cmd >= 11:
+            self.commands_dog[:, dog_cmd_idx["body_height"]] = 0.0
+            gait_start = dog_cmd_idx["gait_frequency"]
+        elif n_cmd >= 10:
+            gait_start = dog_cmd_idx["body_height"]
+        else:
+            return
+
+        for offset, value in enumerate(self._LOCKED_GAIT):
+            self.commands_dog[:, gait_start + offset] = value
+
+    def _zero_stage1_velocity(self):
+        self.stage1_user_vel_cmd.zero_()
+        self.apply_stage1_locked_commands()
+
     def _print_state(self):
-        print(self.format_dog_commands(), flush=True)
+        c = self.commands_dog[0]
+        parts = [
+            f"vx={float(c[dog_cmd_idx['x_vel']]):+.2f}",
+            f"vy={float(c[dog_cmd_idx['y_vel']]):+.2f}",
+            f"wz={float(c[dog_cmd_idx['yaw_vel']]):+.2f}",
+        ]
+        if self._n_cmd() >= 11:
+            parts.extend(
+                [
+                    f"pitch={float(c[dog_cmd_idx['body_pitch']]):+.2f}",
+                    f"roll={float(c[dog_cmd_idx['body_roll']]):+.2f}",
+                    f"dh={float(c[dog_cmd_idx['body_height']]):+.3f}",
+                    f"freq={float(c[dog_cmd_idx['gait_frequency']]):.2f}",
+                    f"swing={float(c[dog_cmd_idx['footswing_height']]):.3f}",
+                    f"sw={float(c[dog_cmd_idx['stance_width']]):.3f}",
+                    f"sl={float(c[dog_cmd_idx['stance_length']]):.3f}",
+                    f"dur={float(c[dog_cmd_idx['gait_duration']]):.2f}",
+                ]
+            )
+        elif self._n_cmd() >= 10:
+            parts.extend(
+                [
+                    f"pitch={float(c[dog_cmd_idx['body_pitch']]):+.2f}",
+                    f"roll={float(c[dog_cmd_idx['body_roll']]):+.2f}",
+                    f"freq={float(c[5]):.2f}",
+                    f"swing={float(c[6]):.3f}",
+                    f"sw={float(c[7]):.3f}",
+                    f"sl={float(c[8]):.3f}",
+                    f"dur={float(c[9]):.2f}",
+                ]
+            )
+        elif self._n_cmd() >= 5:
+            parts.extend(
+                [
+                    f"pitch={float(c[dog_cmd_idx['body_pitch']]):+.2f}",
+                    f"roll={float(c[dog_cmd_idx['body_roll']]):+.2f}",
+                ]
+            )
+        print("  ".join(parts), flush=True)
 
     def render_gui(self, sync_frame_time=True):
         if self.viewer:
@@ -456,12 +532,10 @@ class KeyboardStage1Wrapper(WBCEnv):
                 elif evt.action == "dog_sw_down":
                     self._add_dog(dog_cmd_idx["stance_width"], -self._STANCE_STEP, 0.2, 0.5)
                 elif evt.action == "dog_vel_zero":
-                    self.commands_dog[:, dog_cmd_idx["velocity"]] = 0.0
-                    self.commands_dog[:, dog_cmd_idx["body_pose"]] = 0.0
+                    self._zero_stage1_velocity()
                 elif evt.action == "dog_reset":
                     self.reset()
-                    self.commands_dog[:, dog_cmd_idx["velocity"]] = 0.0
-                    self.commands_dog[:, dog_cmd_idx["body_pose"]] = 0.0
+                    self._zero_stage1_velocity()
 
         if self.device != "cpu":
             self.gym.fetch_results(self.sim, True)

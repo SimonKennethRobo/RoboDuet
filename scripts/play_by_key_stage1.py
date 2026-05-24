@@ -16,12 +16,47 @@ lock_arm = True
 body_pitch_cmd = 0.0
 body_roll_cmd = 0.0
 body_height_delta_cmd = 0.0
-# gait params (only used when use_dynamic_gait=True)
-gait_freq_cmd = 4.0
-footswing_height_cmd = 0.3
-stance_width_cmd = 0.2
-stance_length_cmd = 0.2
+# locked gait params used by stage1 checkpoints that observe gait commands
+gait_freq_cmd = 2.0
+footswing_height_cmd = 0.06
+stance_width_cmd = 0.0
+stance_length_cmd = 0.0
 gait_duration_cmd = 0.5
+
+
+def set_stage1_locked_gait_commands(commands_dog):
+    n_cmd = commands_dog.shape[1]
+    if n_cmd > 0:
+        commands_dog[:, 0] = x_vel_cmd
+    if n_cmd > 1:
+        commands_dog[:, 1] = y_vel_cmd
+    if n_cmd > 2:
+        commands_dog[:, 2] = yaw_vel_cmd
+    if n_cmd > 3:
+        commands_dog[:, 3] = body_pitch_cmd
+    if n_cmd > 4:
+        commands_dog[:, 4] = body_roll_cmd
+
+    if n_cmd >= 11:
+        commands_dog[:, 5] = body_height_delta_cmd
+        gait_start = 6
+    elif n_cmd >= 10:
+        gait_start = 5
+    else:
+        return
+
+    commands_dog[:, gait_start] = gait_freq_cmd
+    commands_dog[:, gait_start + 1] = footswing_height_cmd
+    commands_dog[:, gait_start + 2] = stance_width_cmd
+    commands_dog[:, gait_start + 3] = stance_length_cmd
+    commands_dog[:, gait_start + 4] = gait_duration_cmd
+
+
+def apply_stage1_play_commands(env):
+    if hasattr(env.env, "apply_stage1_locked_commands"):
+        env.env.apply_stage1_locked_commands()
+        return
+    set_stage1_locked_gait_commands(env.commands_dog)
 
 
 def main(args):
@@ -63,31 +98,7 @@ def main(args):
 
     obs = env.reset()
 
-    n_cmd = env.commands_dog.shape[1]
-    if n_cmd > 0:
-        env.commands_dog[:, 0] = x_vel_cmd
-    if n_cmd > 1:
-        env.commands_dog[:, 1] = y_vel_cmd
-    if n_cmd > 2:
-        env.commands_dog[:, 2] = yaw_vel_cmd
-    if n_cmd > 3:
-        env.commands_dog[:, 3] = body_pitch_cmd
-    if n_cmd > 4:
-        env.commands_dog[:, 4] = body_roll_cmd
-    if n_cmd > 5:
-        env.commands_dog[:, 5] = body_height_delta_cmd
-    use_dg = getattr(getattr(cfg, "commands", None), "use_dynamic_gait", False)
-    if use_dg:
-        if n_cmd > 6:
-            env.commands_dog[:, 6] = gait_freq_cmd
-        if n_cmd > 7:
-            env.commands_dog[:, 7] = footswing_height_cmd
-        if n_cmd > 8:
-            env.commands_dog[:, 8] = stance_width_cmd
-        if n_cmd > 9:
-            env.commands_dog[:, 9] = stance_length_cmd
-        if n_cmd > 10:
-            env.commands_dog[:, 10] = gait_duration_cmd
+    apply_stage1_play_commands(env)
 
     env.commands_arm[:, 0] = l_cmd
     env.commands_arm[:, 1] = p_cmd
@@ -95,12 +106,15 @@ def main(args):
     env.commands_arm[:, 3] = roll_cmd
     env.commands_arm[:, 4] = pitch_cmd
     env.commands_arm[:, 5] = yaw_cmd
+    if hasattr(env.env, "sync_arm_commands_to_obs"):
+        env.env.sync_arm_commands_to_obs()
 
     if lock_arm:
         print("[arm] LOCKED — zero actions sent every step", flush=True)
 
     for i in range(num_eval_steps):
         with torch.no_grad():
+            apply_stage1_play_commands(env)
             if lock_arm or arm_policy is None:
                 actions_arm = env.arm_fake_actions
             else:
@@ -128,7 +142,7 @@ if __name__ == '__main__':
     parser.add_argument(
         '--stage1_arm_intensity',
         type=float,
-        default=0.3,
+        default=1.0,
         help="Stage1 arm disturbance curriculum intensity for play, in [0, 1].",
     )
     parser.add_argument(
