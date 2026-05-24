@@ -1,0 +1,116 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Trajectory Curriculum — self-contained configuration
+# Used by:  scripts/trajectory_curriculum.py    (the IsaacGym-facing library)
+#           scripts/test_velocity.py            (the demo / visualizer)
+#
+# Curriculum (difficulty D ∈ [0, 1]):
+#   D ≤ point_max             → a single held POINT
+#   point < D ≤ outreach_min  → VELOCITY  — short straight → long curvy paths,
+#                                inside the arm workspace; the wander is
+#                                anchored to a per-trajectory XY drift
+#                                direction so the path TRAVELS rather than
+#                                folds (net XY span scales with L).
+#   D >  outreach_min         → OUTREACH  — paths roam freely, starting in a
+#                                hard region (out of arm reach OR inside the
+#                                robot body) so the dog's BASE must translate
+#                                to follow.
+#
+# Length is EXACT — a trapezoidal speed profile integrates to L; only the
+# direction is steered, so wander/avoidance never change the achieved length.
+#
+# Prerequisite (one-time):
+#   python scripts/langevin_field_gen.py   # → runs/langevin/precomputed_fields.pt
+# ──────────────────────────────────────────────────────────────────────────────
+
+generator:
+  # Discretisation.  K is the number of samples per trajectory; dt is the
+  # step duration.  Pick dt = your env control timestep (e.g. 0.02 s for a
+  # 50 Hz controller) so cursor advance(1) = one env step.  K · dt = the
+  # trajectory's wall-clock duration.
+  K:  150
+  dt: 0.02
+  base_height: 0.38     # matches LeggedRobot._lpy_to_world_xyz z offset
+  verbose: false        # library mode: suppress per-reset attitude prints
+
+  # Pre-computed SDF + reachable-orientation fields (built once by
+  # `scripts/langevin_field_gen.py`).  Override at construction with
+  # `TrajectoryCurriculum(..., fields_path=...)` if you keep it elsewhere.
+  fields_path: runs/langevin/precomputed_fields.pt
+
+  # ── visualiser-only ────────────────────────────────────────────────────────
+  # The library never reads these — `num_envs` is a constructor argument and
+  # the device follows the buffers' device.  These supply N + device for the
+  # standalone `scripts/test_velocity.py` runs.
+  N:       5000      # trajectories generated per difficulty
+  device:  cuda      # 'cuda' or 'cpu' (auto-falls-back if CUDA unavailable)
+
+velocity:
+  point_max:     0.1    # D ≤ this → a single held point (no motion)
+
+  # Path length scales with D.  length_min is well below 1 m on purpose: a
+  # path longer than the ~1.3 m workspace MUST fold (⇒ curvy), so a straight
+  # low-D path has to be short enough to fit the workspace core.
+  length_min:    0.5    # m — path length at D just above point_max
+  length_max:    3.0    # m — path length at D = 1
+  length_jitter: 0.15   # per-trajectory length jitter (fraction of L)
+  ramp_frac:     0.20   # fraction of K used for accel + decel
+  workspace:     dynamic   # SDF to stay inside: 'static' or 'dynamic'
+
+  # Direction wander — turn_sigma = D^wander_exp · disturb  (NO baseline; a
+  # steep exponent ⇒ small D is genuinely straight, large D is curvy).
+  # The wander is anchored to a per-trajectory XY drift direction so the
+  # path travels rather than folds — see VelocityTrajectorySimulator doc.
+  # Because the wander no longer accumulates across steps, `disturb` here is
+  # ~10× the un-anchored value, to produce the same perceived curviness.
+  turn_decay: 0.05      # OU decay of the wander noise (smaller = smoother)
+  disturb:    0.15      # noise amplitude at D = 1 (the curviness knob)
+  wander_exp: 2.0       # turn_sigma = D^this · disturb (≥ 2 ⇒ low D straight)
+
+  # Barrier avoidance — BOUNDED rotation away from boundary / body / ground.
+  k_avoid:        5.0   # avoidance steering gain
+  max_turn_deg:   12.0  # cap on per-step heading change (wander + avoidance)
+  bound_margin:   0.22  # m — workspace-boundary onset
+  body_margin:    0.12  # m — body-collision onset
+  ground_margin:  0.12  # m — ground onset
+  grid_margin:    0.12  # m — keeps outreach inside the finite SDF grid
+
+  # Command cone used in the point/velocity stages.  These defaults match the
+  # RoboDuet arm command ranges, so arm-only curriculum targets stay in the
+  # distribution expected by rewards/observations.  Outreach is intentionally
+  # allowed to leave this cone after the trajectory is world-anchored.
+  command_limits:
+    l: [0.30, 0.77]
+    p: [-1.4137167, 1.4137167]   # ±0.45π
+    y: [-1.5707963, 1.5707963]   # ±π/2
+  command_margin_l:     0.08
+  command_margin_angle: 0.15
+
+  # Outreach (whole-body) tier — for D > outreach_min the trajectory roams
+  # FREELY (no inner restriction; only an outer bound keeps it within base
+  # range; body avoidance off).  Each trajectory STARTS in a hard region —
+  # out of arm reach, or inside the robot body — so part of it is
+  # unfollowable by the arm alone, requiring base translation.
+  outreach_min:  0.7    # D > this → outreach stage
+  outreach_max:  0.40   # m — outer bound on how far past the reach boundary
+  body_fraction: 0.4    # fraction of outreach trajectories starting in the body
+
+# EE attitude — position-conditioned feasible orientation (pose_traj_gen).
+# Small D tracks the feasible mean orientation at each position; large D
+# explores more of the local feasible spread.
+attitude:
+  spread_scale: 1.0     # D=1 offset spans ±spread_scale·σ_orient(x)
+  smooth_steps: 3.0     # temporal Gaussian σ (steps) on the Euler trajectory
+
+# ─── below here is consumed only by scripts/test_velocity.py (visualizer) ───
+
+difficulties: [0.0, 0.11, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+
+output:
+  save_dir:    runs/test_velocity
+  pt_prefix:   testvel        # → testvel_D###.pt
+  plot_prefix: testvel        # → testvel_D###.png
+
+visualization:
+  n_trajectories: 1     # trajectories drawn in 3D (coloured by length)
+  n_triads:       4     # EE-frame triads drawn along each trajectory
+  triad_len:      0.10  # m — drawn EE-axis length
