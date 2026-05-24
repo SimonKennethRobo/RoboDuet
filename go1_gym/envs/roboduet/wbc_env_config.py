@@ -236,7 +236,7 @@ class DomainRandConfig:
 @dataclass(frozen=True)
 class RewardConfig:
     terminal_body_height: float = 0.17
-    use_terminal_body_height: bool = False
+    use_terminal_body_height: bool = True
     manip_weight_lpy: float = 3
     manip_weight_rpy: float = 1
 

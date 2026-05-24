@@ -144,9 +144,9 @@ def config_wtw(Cnfg: Any):
     Cnfg.commands.stance_width_range = [0.10, 0.45]
     Cnfg.commands.stance_length_range = [0.25, 0.45]
 
-    Cnfg.commands.limit_vel_x = [-5.0, 5.0]
+    Cnfg.commands.limit_vel_x = [-1.0, 1.0]
     Cnfg.commands.limit_vel_y = [-0.6, 0.6]
-    Cnfg.commands.limit_vel_yaw = [-5.0, 5.0]
+    Cnfg.commands.limit_vel_yaw = [-1.0, 1.0]
     Cnfg.commands.limit_body_height = [-0.15, 0.15]
     Cnfg.commands.limit_gait_frequency = [1.0, 8.0]
     Cnfg.commands.limit_gait_phase = [0.0, 0.01]
