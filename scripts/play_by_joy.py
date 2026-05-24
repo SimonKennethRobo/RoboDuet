@@ -1,22 +1,10 @@
-"""play_by_joy.py — policy inference with JoyLink joystick control.
-
-Usage::
-
-    python scripts/play_by_joy.py \\
-        --logdir runs/test_roboduet/2024-10-13/auto_train/003436.678552_seed9145 \\
-        --ckptid 40000
-
-Joystick transport is handled by JoyLink's Python client. Pass
---joylink_config to select the JoyLink backend config.
-"""
-
 import argparse
 import os
-import sys
 import time
-import types
+from dataclasses import dataclass
 
 import isaacgym  # noqa: F401 – must be imported before torch
+import joylink_client
 import pytorch3d.transforms as pt3d
 import torch
 from isaacgym.torch_utils import quat_from_euler_xyz, quat_mul
@@ -26,31 +14,6 @@ from go1_gym.envs.roboduet import WBCEnv
 from go1_gym.envs.roboduet.legged_robot import quaternion_to_rpy
 from go1_gym.envs.roboduet.wbc_env_config import configure_privileged_obs_dims
 from scripts.load_policy import load_arm_policy, load_dog_policy, load_env
-
-# Default run/checkpoint (overridden by CLI args)
-logdir = "runs/test_roboduet/2024-10-13/auto_train/003436.678552_seed9145"
-ckpt_id = "040000"
-
-# Initial command values — velocity
-x_vel_cmd, y_vel_cmd, yaw_vel_cmd = 0.0, 0.0, 0.0
-# Initial command values — arm
-l_cmd, p_cmd, y_cmd = 0.5, 0.2, 0.0
-roll_cmd, pitch_cmd, yaw_cmd = 0.0, 0.0, 0.0
-# Set to True to send zero arm actions every step (hold arm at default position)
-lock_arm = True
-# Initial command values — dog body pose (commands_dog[:,3:6])
-body_pitch_cmd = 0.0  # rad   commands_dog[:, 3]
-body_roll_cmd = 0.0  # rad   commands_dog[:, 4]
-body_height_delta_cmd = 0  # m     commands_dog[:, 5] (added to base_height_target)
-# Initial command values — gait params (commands_dog[:,6:11], only if use_dynamic_gait)
-gait_freq_cmd = 4  # Hz    commands_dog[:, 6]
-footswing_height_cmd = 0.08  # m     commands_dog[:, 7]
-stance_width_cmd = 0.30  # m     commands_dog[:, 8]
-stance_length_cmd = 0.45  # m     commands_dog[:, 9]
-gait_duration_cmd = 0.5  # frac  commands_dog[:, 10]
-
-DEFAULT_JOYLINK_CLIENT_DIR = "/home/simon/Projects/Simon/JoyLink/client/python"
-DEFAULT_JOYLINK_CONFIG = "/home/simon/Projects/Simon/JoyLink/config/loco_ctrl.yaml"
 
 COMMAND_KEYS = {
     "dog": {
@@ -78,32 +41,37 @@ COMMAND_KEYS = {
     },
 }
 
+# Reverse lookup: target -> key_name -> index
+_COMMAND_INDEX: dict = {
+    target: {name: idx for idx, name in mapping.items()} for target, mapping in COMMAND_KEYS.items()
+}
+
 JOYSTICK_COMMAND_MAP = {
     "left_stick_x": {
         "source": "axis",
         "mode": "absolute",
-        "command": {"target": "dog", "index": 0, "key": "x_vel"},
+        "command": {"target": "dog", "cmd_key": "x_vel"},
         "deadzone": 0.08,
         "clamp": (-1.5, 1.5),
     },
     "left_stick_y": {
         "source": "axis",
         "mode": "absolute",
-        "command": {"target": "dog", "index": 1, "key": "y_vel"},
+        "command": {"target": "dog", "cmd_key": "y_vel"},
         "deadzone": 0.08,
         "clamp": (-0.5, 0.5),
     },
     "right_stick_y": {
         "source": "axis",
         "mode": "absolute",
-        "command": {"target": "dog", "index": 2, "key": "yaw_vel"},
+        "command": {"target": "dog", "cmd_key": "yaw_vel"},
         "deadzone": 0.08,
         "clamp": (-1.5, 1.5),
     },
     "right_stick_x": {
         "source": "axis",
         "mode": "absolute",
-        "command": {"target": "dog", "index": 3, "key": "body_pitch"},
+        "command": {"target": "dog", "cmd_key": "body_pitch"},
         "deadzone": 0.08,
         "scale": -1,
         "clamp": (-0.4, 0.4),
@@ -111,7 +79,7 @@ JOYSTICK_COMMAND_MAP = {
     "rt": {
         "source": "axis",
         "mode": "absolute",
-        "command": {"target": "dog", "index": 4, "key": "body_roll"},
+        "command": {"target": "dog", "cmd_key": "body_roll"},
         "deadzone": 0.05,
         "scale": -0.3,
         "clamp": (-0.4, 0.4),
@@ -119,20 +87,36 @@ JOYSTICK_COMMAND_MAP = {
     "lt": {
         "source": "axis",
         "mode": "absolute",
-        "command": {"target": "dog", "index": 4, "key": "body_roll"},
+        "command": {"target": "dog", "cmd_key": "body_roll"},
         "deadzone": 0.05,
         "scale": 0.3,
         "clamp": (-0.4, 0.4),
     },
-    "a": {
+    "f2": {
         "source": "button",
         "mode": "reset",
-        "command": {"target": "env", "key": "reset"},
+        "command": {"target": "env", "cmd_key": "reset"},
+    },
+    "a": {
+        "source": "button",
+        "mode": "step_button",
+        "command": {"target": "dog", "cmd_key": "stance_length"},
+        "direction": -1,
+        "step": 0.05,
+        "clamp": (0.2, 0.8),
+    },
+    "b": {
+        "source": "button",
+        "mode": "step_button",
+        "command": {"target": "dog", "cmd_key": "stance_length"},
+        "direction": 1,
+        "step": 0.05,
+        "clamp": (0.2, 0.8),
     },
     "x": {
         "source": "button",
         "mode": "step_button",
-        "command": {"target": "dog", "index": 8, "key": "stance_width"},
+        "command": {"target": "dog", "cmd_key": "stance_width"},
         "direction": -1,
         "step": 0.05,
         "clamp": (-1.5, 1.5),
@@ -140,15 +124,8 @@ JOYSTICK_COMMAND_MAP = {
     "y": {
         "source": "button",
         "mode": "step_button",
-        "command": {"target": "dog", "index": 8, "key": "stance_width"},
+        "command": {"target": "dog", "cmd_key": "stance_width"},
         "direction": 1,
-        "step": 0.05,
-        "clamp": (-1.5, 1.5),
-    },
-    "b": {
-        "source": "button",
-        "mode": "step_with_trigger",
-        "command": {"target": "arm", "index": 5, "key": "arm_yaw"},
         "step": 0.05,
         "clamp": (-1.5, 1.5),
     },
@@ -157,7 +134,7 @@ JOYSTICK_COMMAND_MAP = {
         "mode": "step_once",
         "axis": "dpad_x",
         "direction": "positive",
-        "command": {"target": "dog", "index": 5, "key": "body_height_delta"},
+        "command": {"target": "dog", "cmd_key": "body_height_delta"},
         "step": 0.05,
         "clamp": (-0.3, 0.3),
     },
@@ -166,7 +143,7 @@ JOYSTICK_COMMAND_MAP = {
         "mode": "step_once",
         "axis": "dpad_x",
         "direction": "negative",
-        "command": {"target": "dog", "index": 5, "key": "body_height_delta"},
+        "command": {"target": "dog", "cmd_key": "body_height_delta"},
         "step": 0.05,
         "clamp": (-0.3, 0.3),
     },
@@ -175,7 +152,7 @@ JOYSTICK_COMMAND_MAP = {
         "mode": "step_once",
         "axis": "dpad_y",
         "direction": "positive",
-        "command": {"target": "dog", "index": 6, "key": "gait_freq"},
+        "command": {"target": "dog", "cmd_key": "gait_freq"},
         "step": 0.5,
         "clamp": (1.0, 4.0),
     },
@@ -184,7 +161,7 @@ JOYSTICK_COMMAND_MAP = {
         "mode": "step_once",
         "axis": "dpad_y",
         "direction": "negative",
-        "command": {"target": "dog", "index": 6, "key": "gait_freq"},
+        "command": {"target": "dog", "cmd_key": "gait_freq"},
         "step": 0.5,
         "clamp": (1.0, 4.0),
     },
@@ -197,97 +174,35 @@ TRIGGER_DELTA_CONFIG = {
 }
 DPAD_THRESHOLD = 0.5
 
-# Tracks previous button/axis states for rising-edge detection
-_prev_buttons: dict = {}
-_prev_axes: dict = {}
+
+@dataclass
+class DogInitCmd:
+    x_vel: float = 0.0
+    y_vel: float = 0.0
+    yaw_vel: float = 0.0
+    body_pitch: float = 0.0
+    body_roll: float = 0.0
+    body_height_delta: float = 0.0
+    gait_freq: float = 4.0
+    footswing_height: float = 0.08
+    stance_width: float = 0.30
+    stance_length: float = 0.45
+    gait_duration: float = 0.5
 
 
-def command_key(target, index):
-    return f"commands_{target}[{index}] ({COMMAND_KEYS.get(target, {}).get(index, 'unknown')})"
+@dataclass
+class ArmInitCmd:
+    l: float = 0.5
+    p: float = 0.2
+    y: float = 0.0
+    roll: float = 0.0
+    pitch: float = 0.0
+    yaw: float = 0.0
 
 
-def print_joy_command_mapping(client, joylink_config):
-    axis_names = ", ".join(client.axis_names) if hasattr(client, "axis_names") else "unknown"
-    button_names = ", ".join(client.button_names) if hasattr(client, "button_names") else "unknown"
-
-    print("\n[RoboDuet] JoyLink command mapping")
-    print(f"  JoyLink config: {joylink_config}")
-    print(f"  JoyLink axes: {axis_names}")
-    print(f"  JoyLink buttons: {button_names}")
-    print("  Joystick key -> command key:")
-    for joystick_key, mapping in JOYSTICK_COMMAND_MAP.items():
-        command = mapping["command"]
-        if command["target"] == "env":
-            print(f"    {joystick_key:<16} -> env.{command['key']} mode={mapping['mode']}")
-            continue
-        command_desc = command_key(command["target"], command["index"])
-        if mapping["mode"] == "absolute":
-            print(
-                "    "
-                f"{joystick_key:<16} -> {command_desc} "
-                f"mode=absolute deadzone={mapping['deadzone']} clamp={mapping['clamp']}"
-            )
-            continue
-        if mapping["mode"] in ("step_once", "step_button"):
-            direction = mapping.get("direction", 1)
-            sign = "+" if direction in (1, "positive") else "-"
-            print(
-                "    "
-                f"{joystick_key:<16} -> {command_desc} "
-                f"mode=step_once {sign}{mapping.get('step', '?')} clamp={mapping.get('clamp', 'none')}"
-            )
-            continue
-        print(
-            "    "
-            f"{joystick_key:<16} -> {command_desc} "
-            f"mode={mapping['mode']} step={mapping.get('step', '?')} clamp={mapping.get('clamp', 'none')}"
-        )
-    print(
-        "  "
-        f"trigger_delta = {TRIGGER_DELTA_CONFIG['positive']} - {TRIGGER_DELTA_CONFIG['negative']} "
-        f"(threshold={TRIGGER_DELTA_CONFIG['threshold']})",
-        flush=True,
-    )
-
-
-def _load_joylink_client_class(client_dir):
-    if client_dir not in sys.path:
-        sys.path.insert(0, client_dir)
-    try:
-        from joystick_client import JoystickClient
-
-        return JoystickClient
-    except TypeError as exc:
-        if "unsupported operand type(s) for |" not in str(exc):
-            raise
-
-    client_path = os.path.join(client_dir, "joystick_client.py")
-    with open(client_path, "r", encoding="utf-8") as f:
-        source = f.read()
-    module = types.ModuleType("_roboduet_play_joylink_client")
-    module.__file__ = client_path
-    code = compile("from __future__ import annotations\n" + source, client_path, "exec")
-    exec(code, module.__dict__)
-    return module.JoystickClient
-
-
-def build_joylink_client(args):
-    client_dir = args.joylink_client_dir or DEFAULT_JOYLINK_CLIENT_DIR
-    config_path = args.joylink_config or DEFAULT_JOYLINK_CONFIG
-    JoystickClient = _load_joylink_client_class(client_dir)
-    client = JoystickClient(config_path)
-    client.connect()
-    return client, config_path
-
-
-def latest_joylink_data(client):
-    latest = None
-    while True:
-        data = client.receive(timeout_ms=0)
-        if data is None:
-            break
-        latest = data
-    return latest
+# ---------------------------------------------------------------------------
+# Pure math helpers
+# ---------------------------------------------------------------------------
 
 
 def deadzone(value, threshold):
@@ -307,6 +222,11 @@ def trigger_magnitude(value):
     if value < 0.0:
         return clamp((1.0 - value) / 2.0, (0.0, 1.0))
     return clamp(value, (0.0, 1.0))
+
+
+# ---------------------------------------------------------------------------
+# Env command helpers
+# ---------------------------------------------------------------------------
 
 
 def set_command(env, target, index, value):
@@ -332,16 +252,18 @@ def add_dog_command(env, index, delta, limits):
 
 def set_mapped_command(env, mapping, value):
     command = mapping["command"]
-    set_command(env, command["target"], command["index"], value)
+    idx = _COMMAND_INDEX[command["target"]][command["cmd_key"]]
+    set_command(env, command["target"], idx, value)
 
 
 def add_mapped_command(env, mapping, delta):
     command = mapping["command"]
     limits = mapping.get("clamp", (-1e9, 1e9))
+    idx = _COMMAND_INDEX[command["target"]][command["cmd_key"]]
     if command["target"] == "dog":
-        add_dog_command(env, command["index"], delta, limits)
+        add_dog_command(env, idx, delta, limits)
     elif command["target"] == "arm":
-        add_arm_command(env, command["index"], delta, limits)
+        add_arm_command(env, idx, delta, limits)
 
 
 def sync_arm_command_obs(env):
@@ -377,46 +299,27 @@ def sync_arm_command_obs(env):
         base_env.commands_arm_obs[0:1, 5] = rpy[:, 2]
 
 
-def apply_all_dog_commands(env, cfg):
-    """Write all dog command module variables to env.commands_dog.
-
-    Respects n_cmd (body pose only written if column exists) and
-    use_dynamic_gait (gait params only written when the flag is set).
-    Safe to call before and during the step loop.
-    """
+def apply_all_dog_commands(env, cfg, cmd: DogInitCmd):
+    """Write DogInitCmd values to env.commands_dog (respects n_cmd and use_dynamic_gait)."""
     n_cmd = env.commands_dog.shape[1]
-    # velocity (always present)
-    if n_cmd > 0:
-        env.commands_dog[:, 0] = x_vel_cmd
-    if n_cmd > 1:
-        env.commands_dog[:, 1] = y_vel_cmd
-    if n_cmd > 2:
-        env.commands_dog[:, 2] = yaw_vel_cmd
-    # body pose
-    if n_cmd > 3:
-        env.commands_dog[:, 3] = body_pitch_cmd
-    if n_cmd > 4:
-        env.commands_dog[:, 4] = body_roll_cmd
-    if n_cmd > 5:
-        env.commands_dog[:, 5] = body_height_delta_cmd
-    # gait params — only when the env uses dynamic gait
+    env.commands_dog[:, 0] = cmd.x_vel
+    env.commands_dog[:, 1] = cmd.y_vel
+    env.commands_dog[:, 2] = cmd.yaw_vel
+    env.commands_dog[:, 3] = cmd.body_pitch
+    env.commands_dog[:, 4] = cmd.body_roll
+    env.commands_dog[:, 5] = cmd.body_height_delta
     use_dg = getattr(getattr(cfg, "commands", None), "use_dynamic_gait", False)
     if use_dg:
-        if n_cmd > 6:
-            env.commands_dog[:, 6] = gait_freq_cmd
-        if n_cmd > 7:
-            env.commands_dog[:, 7] = footswing_height_cmd
-        if n_cmd > 8:
-            env.commands_dog[:, 8] = stance_width_cmd
-        if n_cmd > 9:
-            env.commands_dog[:, 9] = stance_length_cmd
-        if n_cmd > 10:
-            env.commands_dog[:, 10] = gait_duration_cmd
+        env.commands_dog[:, 6] = cmd.gait_freq
+        env.commands_dog[:, 7] = cmd.footswing_height
+        env.commands_dog[:, 8] = cmd.stance_width
+        env.commands_dog[:, 9] = cmd.stance_length
+        env.commands_dog[:, 10] = cmd.gait_duration
 
 
 def format_dog_commands(env, cfg):
     """Return a one-line human-readable string of the active dog commands."""
-    c = env.commands_dog[0]  # read from env, not module vars
+    c = env.commands_dog[0]
     n_cmd = env.commands_dog.shape[1]
     parts = [
         f"vx={float(c[0]):+.2f}",
@@ -453,93 +356,159 @@ def format_robot_state(env):
     return f"vx={vx:+.2f}  vy={vy:+.2f}  wz={wz:+.2f}  |  h={z:.3f}  pitch={pitch:+.2f}  roll={roll:+.2f}"
 
 
-def apply_joylink_commands(env, joy_data):
-    global _prev_buttons, _prev_axes
-    if not joy_data:
-        return
-    axes = joy_data.get("axes", {})
-    buttons = joy_data.get("buttons", {})
+# ---------------------------------------------------------------------------
+# Joystick controller
+# ---------------------------------------------------------------------------
 
-    # Accumulate all "axis absolute" contributions per command slot, then write once.
-    # This lets multiple axes (e.g. lt and rt) contribute additively to one index.
-    _accum = {}  # (target, index) -> [total, clamp]
-    for joystick_key, mapping in JOYSTICK_COMMAND_MAP.items():
-        if mapping["source"] != "axis" or mapping["mode"] != "absolute":
-            continue
-        if joystick_key not in axes:
-            continue
-        raw = deadzone(axes[joystick_key], mapping["deadzone"]) * mapping.get("scale", 1.0)
-        cmd = mapping["command"]
-        key = (cmd["target"], cmd["index"])
-        if key not in _accum:
-            _accum[key] = [0.0, mapping["clamp"]]
-        _accum[key][0] += raw
-    for (target, index), (total, clamp_range) in _accum.items():
-        set_command(env, target, index, clamp(total, clamp_range))
 
-    lt = trigger_magnitude(axes.get(TRIGGER_DELTA_CONFIG["negative"], 0.0))
-    rt = trigger_magnitude(axes.get(TRIGGER_DELTA_CONFIG["positive"], 0.0))
-    trigger_delta = rt - lt
-    if max(lt, rt) < TRIGGER_DELTA_CONFIG["threshold"]:
-        trigger_delta = 0.0
+class JoystickController:
+    """Owns the JoyLink client and translates joystick input into env commands."""
 
-    for joystick_key, mapping in JOYSTICK_COMMAND_MAP.items():
-        if mapping["source"] != "button":
-            continue
-        pressed = bool(buttons.get(joystick_key, 0))
-        was_pressed = bool(_prev_buttons.get(joystick_key, 0))
-        rising_edge = pressed and not was_pressed
+    def __init__(self, config_path: str):
+        self._client = joylink_client.JoylinkClient(config_path)
+        self._client.connect()
+        self._config_path = config_path
+        self._prev_buttons: dict = {}
+        self._prev_axes: dict = {}
 
-        if not pressed and not rising_edge:
-            continue
+    def print_command_mapping(self):
+        client = self._client
+        axis_names = ", ".join(client.axis_names) if hasattr(client, "axis_names") else "unknown"
+        button_names = ", ".join(client.button_names) if hasattr(client, "button_names") else "unknown"
 
-        if mapping["mode"] == "reset" and rising_edge:
-            env.reset()
-            env.commands_dog[:, :3] = 0.0
-            continue
-
-        if mapping["mode"] in ("step_once", "step_button") and rising_edge:
-            direction = mapping.get("direction", 1)
-            add_mapped_command(env, mapping, direction * mapping.get("step", 0.05))
-            continue
-
-        if mapping["mode"] == "step_with_trigger" and pressed and abs(trigger_delta) > 1e-6:
-            add_mapped_command(env, mapping, trigger_delta * mapping["step"])
-            continue
-
-    for joystick_key, mapping in JOYSTICK_COMMAND_MAP.items():
-        if mapping["source"] != "axis_combo":
-            continue
-        axis_name = mapping["axis"]
-        axis_value = float(axes.get(axis_name, 0.0) or 0.0)
-        prev_axis_value = float(_prev_axes.get(axis_name, 0.0))
-
-        if mapping["mode"] == "step_once":
-            if mapping["direction"] == "positive":
-                if axis_value > DPAD_THRESHOLD and prev_axis_value <= DPAD_THRESHOLD:
-                    add_mapped_command(env, mapping, mapping.get("step", 0.05))
-            elif mapping["direction"] == "negative":
-                if axis_value < -DPAD_THRESHOLD and prev_axis_value >= -DPAD_THRESHOLD:
-                    add_mapped_command(env, mapping, -mapping.get("step", 0.05))
-        elif mapping["mode"] == "step_with_trigger" and abs(trigger_delta) > 1e-6:
-            if mapping["direction"] == "positive" and axis_value <= DPAD_THRESHOLD:
+        print("\n[RoboDuet] JoyLink command mapping")
+        print(f"  JoyLink config: {self._config_path}")
+        print(f"  JoyLink axes: {axis_names}")
+        print(f"  JoyLink buttons: {button_names}")
+        print("  Joystick key -> command key:")
+        for joystick_key, mapping in JOYSTICK_COMMAND_MAP.items():
+            cmd = mapping["command"]
+            if cmd["target"] == "env":
+                print(f"    {joystick_key:<16} -> env.{cmd['cmd_key']} mode={mapping['mode']}")
                 continue
-            if mapping["direction"] == "negative" and axis_value >= -DPAD_THRESHOLD:
+            command_desc = command_key(cmd["target"], cmd["cmd_key"])
+            if mapping["mode"] == "absolute":
+                print(
+                    "    "
+                    f"{joystick_key:<16} -> {command_desc} "
+                    f"mode=absolute deadzone={mapping['deadzone']} clamp={mapping['clamp']}"
+                )
                 continue
-            add_mapped_command(env, mapping, trigger_delta * mapping["step"])
+            if mapping["mode"] in ("step_once", "step_button"):
+                direction = mapping.get("direction", 1)
+                sign = "+" if direction in (1, "positive") else "-"
+                print(
+                    "    "
+                    f"{joystick_key:<16} -> {command_desc} "
+                    f"mode=step_once {sign}{mapping.get('step', '?')} clamp={mapping.get('clamp', 'none')}"
+                )
+                continue
+            print(
+                "    "
+                f"{joystick_key:<16} -> {command_desc} "
+                f"mode={mapping['mode']} step={mapping.get('step', '?')} clamp={mapping.get('clamp', 'none')}"
+            )
+        print(
+            "  "
+            f"trigger_delta = {TRIGGER_DELTA_CONFIG['positive']} - {TRIGGER_DELTA_CONFIG['negative']} "
+            f"(threshold={TRIGGER_DELTA_CONFIG['threshold']})",
+            flush=True,
+        )
 
-    _prev_buttons = dict(buttons)
-    _prev_axes = {
-        m["axis"]: float(axes.get(m["axis"], 0.0) or 0.0)
-        for m in JOYSTICK_COMMAND_MAP.values()
-        if m["source"] == "axis_combo"
-    }
-    sync_arm_command_obs(env)
+    def step(self, env):
+        """Receive one frame from JoyLink and apply it to env commands."""
+        joy_data = self._client.receive(timeout_ms=0)
+        self._apply(env, joy_data)
+
+    def _apply(self, env, joy_data):
+        if not joy_data:
+            return
+        axes = joy_data.get("axes", {})
+        buttons = joy_data.get("buttons", {})
+
+        # Accumulate all "axis absolute" contributions per command slot, then write once.
+        # Allows multiple axes (e.g. lt and rt) to contribute additively to one index.
+        _accum = {}  # (target, index) -> [total, clamp]
+        for joystick_key, mapping in JOYSTICK_COMMAND_MAP.items():
+            if mapping["source"] != "axis" or mapping["mode"] != "absolute":
+                continue
+            if joystick_key not in axes:
+                continue
+            raw = deadzone(axes[joystick_key], mapping["deadzone"]) * mapping.get("scale", 1.0)
+            cmd = mapping["command"]
+            accum_key = (cmd["target"], _COMMAND_INDEX[cmd["target"]][cmd["cmd_key"]])
+            if accum_key not in _accum:
+                _accum[accum_key] = [0.0, mapping["clamp"]]
+            _accum[accum_key][0] += raw
+        for (target, index), (total, clamp_range) in _accum.items():
+            set_command(env, target, index, clamp(total, clamp_range))
+
+        lt = trigger_magnitude(axes.get(TRIGGER_DELTA_CONFIG["negative"], 0.0))
+        rt = trigger_magnitude(axes.get(TRIGGER_DELTA_CONFIG["positive"], 0.0))
+        trigger_delta = rt - lt
+        if max(lt, rt) < TRIGGER_DELTA_CONFIG["threshold"]:
+            trigger_delta = 0.0
+
+        for joystick_key, mapping in JOYSTICK_COMMAND_MAP.items():
+            if mapping["source"] != "button":
+                continue
+            pressed = bool(buttons.get(joystick_key, 0))
+            was_pressed = bool(self._prev_buttons.get(joystick_key, 0))
+            rising_edge = pressed and not was_pressed
+
+            if not pressed and not rising_edge:
+                continue
+
+            if mapping["mode"] == "reset" and rising_edge:
+                env.reset()
+                env.commands_dog[:, :3] = 0.0
+                continue
+
+            if mapping["mode"] in ("step_once", "step_button") and rising_edge:
+                direction = mapping.get("direction", 1)
+                add_mapped_command(env, mapping, direction * mapping.get("step", 0.05))
+                continue
+
+            if mapping["mode"] == "step_with_trigger" and pressed and abs(trigger_delta) > 1e-6:
+                add_mapped_command(env, mapping, trigger_delta * mapping["step"])
+                continue
+
+        for joystick_key, mapping in JOYSTICK_COMMAND_MAP.items():
+            if mapping["source"] != "axis_combo":
+                continue
+            axis_name = mapping["axis"]
+            axis_value = float(axes.get(axis_name, 0.0) or 0.0)
+            prev_axis_value = float(self._prev_axes.get(axis_name, 0.0))
+
+            if mapping["mode"] == "step_once":
+                if mapping["direction"] == "positive":
+                    if axis_value > DPAD_THRESHOLD and prev_axis_value <= DPAD_THRESHOLD:
+                        add_mapped_command(env, mapping, mapping.get("step", 0.05))
+                elif mapping["direction"] == "negative":
+                    if axis_value < -DPAD_THRESHOLD and prev_axis_value >= -DPAD_THRESHOLD:
+                        add_mapped_command(env, mapping, -mapping.get("step", 0.05))
+            elif mapping["mode"] == "step_with_trigger" and abs(trigger_delta) > 1e-6:
+                if mapping["direction"] == "positive" and axis_value <= DPAD_THRESHOLD:
+                    continue
+                if mapping["direction"] == "negative" and axis_value >= -DPAD_THRESHOLD:
+                    continue
+                add_mapped_command(env, mapping, trigger_delta * mapping["step"])
+
+        self._prev_buttons = dict(buttons)
+        self._prev_axes = {
+            m["axis"]: float(axes.get(m["axis"], 0.0) or 0.0)
+            for m in JOYSTICK_COMMAND_MAP.values()
+            if m["source"] == "axis_combo"
+        }
+        sync_arm_command_obs(env)
+
+
+def command_key(target, key):
+    idx = _COMMAND_INDEX.get(target, {}).get(key, "?")
+    return f"commands_{target}[{idx}] ({key})"
 
 
 def main(args):
-    global logdir, ckpt_id, lock_arm
-
     logdir = args.logdir
     lock_arm = bool(getattr(args, "lock_arm", False))
     ckpt_id_arg = str(args.ckptid)
@@ -560,8 +529,9 @@ def main(args):
     else:
         global_switch.open_switch()
 
-    joy_client, joylink_config = build_joylink_client(args)
-    print_joy_command_mapping(joy_client, joylink_config)
+    config_path = os.path.join(os.path.dirname(joylink_client.__file__), "../../config/loco_ctrl.yaml")
+    joy_ctrl = JoystickController(config_path)
+    joy_ctrl.print_command_mapping()
 
     env, cfg = load_env(
         logdir, wrapper=WBCEnv, headless=args.headless, device=args.sim_device, robot=getattr(args, "robot", None)
@@ -575,19 +545,19 @@ def main(args):
     configure_privileged_obs_dims(cfg)
 
     env.env.enable_viewer_sync = True
-
     num_eval_steps = getattr(args, "num_eval_steps", 30000)
 
-    obs = env.reset()
+    dog_cmd = DogInitCmd()
+    arm_cmd = ArmInitCmd()
 
-    # Set initial commands
-    apply_all_dog_commands(env, cfg)
-    env.commands_arm[:, 0] = l_cmd
-    env.commands_arm[:, 1] = p_cmd
-    env.commands_arm[:, 2] = y_cmd
-    env.commands_arm[:, 3] = roll_cmd
-    env.commands_arm[:, 4] = pitch_cmd
-    env.commands_arm[:, 5] = yaw_cmd
+    env.reset()
+    apply_all_dog_commands(env, cfg, dog_cmd)
+    env.commands_arm[:, 0] = arm_cmd.l
+    env.commands_arm[:, 1] = arm_cmd.p
+    env.commands_arm[:, 2] = arm_cmd.y
+    env.commands_arm[:, 3] = arm_cmd.roll
+    env.commands_arm[:, 4] = arm_cmd.pitch
+    env.commands_arm[:, 5] = arm_cmd.yaw
     sync_arm_command_obs(env)
 
     if lock_arm:
@@ -599,8 +569,8 @@ def main(args):
     _CMD_PRINT_INTERVAL = 0.1  # seconds
     _last_print = time.monotonic()
 
-    for step_i in range(num_eval_steps):
-        apply_joylink_commands(env, latest_joylink_data(joy_client))
+    for _ in range(num_eval_steps):
+        joy_ctrl.step(env)
 
         now = time.monotonic()
         if now - _last_print >= _CMD_PRINT_INTERVAL:
@@ -664,18 +634,6 @@ def parse_args():
         action="store_true",
         default=False,
         help="Send zero arm actions every step (hold arm at default position), ignoring any loaded arm policy.",
-    )
-    parser.add_argument(
-        "--joylink_config",
-        type=str,
-        default=None,
-        help="Path to JoyLink config (default: /home/simon/Projects/Simon/JoyLink/config/loco_ctrl.yaml)",
-    )
-    parser.add_argument(
-        "--joylink_client_dir",
-        type=str,
-        default=None,
-        help="Path to JoyLink client/python directory (default: /home/simon/Projects/Simon/JoyLink/client/python)",
     )
     return parser.parse_args()
 
