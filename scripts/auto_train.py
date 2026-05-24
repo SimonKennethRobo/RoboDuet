@@ -10,8 +10,8 @@ from datetime import datetime
 
 import wandb
 from go1_gym import MINI_GYM_ROOT_DIR
-from go1_gym.envs.roboduet import WBCEnv
 from go1_gym.envs.roboduet.utils import StageSchedule, apply_hybrid_reward_settings
+from go1_gym.envs.roboduet.wbc_env import WBCEnv
 from go1_gym.envs.roboduet.wbc_env_config import RoboDuetCfg as Cfg
 from go1_gym.envs.roboduet.wbc_env_config import configure_task_from_args
 from go1_gym.envs.roboduet.wbc_env_wrapper import HistoryWrapper

@@ -326,8 +326,8 @@ class KeyboardStage1Wrapper(WBCEnv):
     q / e  — yaw_vel +/-
     j / l  — body_roll +/-
     i / k  — body_pitch +/-
-    y / h  — body_height_delta +/-
-    r / f  — gait_frequency +/-   (no-op when use_dynamic_gait=False)
+    t / g  — body_height +/-     (t increases, g decreases)
+    [ / ]  — gait_frequency +/-   (no-op when use_dynamic_gait=False)
     u / o  — stance_width +/-     (no-op when use_dynamic_gait=False)
     SPACE  — reset vel to zero
     """
@@ -352,10 +352,10 @@ class KeyboardStage1Wrapper(WBCEnv):
             (gymapi.KEY_L, "dog_roll_down"),
             (gymapi.KEY_I, "dog_pitch_up"),
             (gymapi.KEY_K, "dog_pitch_down"),
-            (gymapi.KEY_Y, "dog_height_up"),
-            (gymapi.KEY_H, "dog_height_down"),
-            (gymapi.KEY_R, "dog_freq_up"),
-            (gymapi.KEY_F, "dog_freq_down"),
+            (gymapi.KEY_T, "dog_height_up"),
+            (gymapi.KEY_G, "dog_height_down"),
+            (gymapi.KEY_LEFT_BRACKET, "dog_freq_up"),
+            (gymapi.KEY_RIGHT_BRACKET, "dog_freq_down"),
             (gymapi.KEY_U, "dog_sw_up"),
             (gymapi.KEY_O, "dog_sw_down"),
             (gymapi.KEY_SPACE, "dog_vel_zero"),
@@ -444,9 +444,9 @@ class KeyboardStage1Wrapper(WBCEnv):
                 elif evt.action == "dog_pitch_down":
                     self._add_dog(dog_cmd_idx["body_pitch"], -self._POSE_STEP, -0.4, 0.4)
                 elif evt.action == "dog_height_up":
-                    self._add_dog(dog_cmd_idx["body_height"], self._HEIGHT_STEP, -0.3, 0.3)
+                    self._add_dog(dog_cmd_idx["body_height"], self._HEIGHT_STEP, -0.2, 0.2)
                 elif evt.action == "dog_height_down":
-                    self._add_dog(dog_cmd_idx["body_height"], -self._HEIGHT_STEP, -0.3, 0.3)
+                    self._add_dog(dog_cmd_idx["body_height"], -self._HEIGHT_STEP, -0.2, 0.2)
                 elif evt.action == "dog_freq_up":
                     self._add_dog(dog_cmd_idx["gait_frequency"], self._GAIT_FREQ_STEP, 1.0, 4.0)
                 elif evt.action == "dog_freq_down":
