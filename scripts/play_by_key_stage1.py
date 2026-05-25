@@ -20,9 +20,9 @@ body_roll_cmd = 0.0
 body_height_delta_cmd = 0.0
 # gait params (only used when use_dynamic_gait=True)
 gait_freq_cmd = 4.0
-footswing_height_cmd = 0.3
+footswing_height_cmd = 0.06
 stance_width_cmd = 0.3
-stance_length_cmd = 0.45
+stance_length_cmd = 0.4
 gait_duration_cmd = 0.5
 
 

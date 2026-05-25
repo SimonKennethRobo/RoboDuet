@@ -329,6 +329,7 @@ class KeyboardStage1Wrapper(WBCEnv):
     t / g  — body_height +/-     (t increases, g decreases)
     [ / ]  — gait_frequency +/-   (no-op when use_dynamic_gait=False)
     u / o  — stance_width +/-     (no-op when use_dynamic_gait=False)
+    y / h  — stance_length +/-    (no-op when use_dynamic_gait=False)
     SPACE  — reset vel to zero
     """
 
@@ -350,14 +351,16 @@ class KeyboardStage1Wrapper(WBCEnv):
             (gymapi.KEY_E, "dog_yaw_down"),
             (gymapi.KEY_J, "dog_roll_up"),
             (gymapi.KEY_L, "dog_roll_down"),
-            (gymapi.KEY_I, "dog_pitch_up"),
-            (gymapi.KEY_K, "dog_pitch_down"),
+            (gymapi.KEY_I, "dog_pitch_down"),
+            (gymapi.KEY_K, "dog_pitch_up"),
             (gymapi.KEY_T, "dog_height_up"),
             (gymapi.KEY_G, "dog_height_down"),
-            (gymapi.KEY_LEFT_BRACKET, "dog_freq_up"),
-            (gymapi.KEY_RIGHT_BRACKET, "dog_freq_down"),
+            (gymapi.KEY_LEFT_BRACKET, "dog_freq_down"),
+            (gymapi.KEY_RIGHT_BRACKET, "dog_freq_up"),
             (gymapi.KEY_U, "dog_sw_up"),
             (gymapi.KEY_O, "dog_sw_down"),
+            (gymapi.KEY_Y, "dog_sl_up"),
+            (gymapi.KEY_H, "dog_sl_down"),
             (gymapi.KEY_SPACE, "dog_vel_zero"),
             (gymapi.KEY_M, "dog_reset"),
         ]
@@ -403,6 +406,8 @@ class KeyboardStage1Wrapper(WBCEnv):
                 "dog_freq_down",
                 "dog_sw_up",
                 "dog_sw_down",
+                "dog_sl_up",
+                "dog_sl_down",
                 "dog_vel_zero",
                 "dog_reset",
             }
@@ -455,6 +460,10 @@ class KeyboardStage1Wrapper(WBCEnv):
                     self._add_dog(dog_cmd_idx["stance_width"], self._STANCE_STEP, 0.2, 0.5)
                 elif evt.action == "dog_sw_down":
                     self._add_dog(dog_cmd_idx["stance_width"], -self._STANCE_STEP, 0.2, 0.5)
+                elif evt.action == "dog_sl_up":
+                    self._add_dog(dog_cmd_idx["stance_length"], self._STANCE_STEP, 0.25, 0.45)
+                elif evt.action == "dog_sl_down":
+                    self._add_dog(dog_cmd_idx["stance_length"], -self._STANCE_STEP, 0.25, 0.45)
                 elif evt.action == "dog_vel_zero":
                     self.commands_dog[:, dog_cmd_idx["velocity"]] = 0.0
                     self.commands_dog[:, dog_cmd_idx["body_pose"]] = 0.0
