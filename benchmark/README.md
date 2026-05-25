@@ -33,23 +33,23 @@ benchmark/candidates/
 当前已实现的是 dog-only benchmark：
 
 ```bash
-python -m benchmark.dog_policy.cli \
-  --candidate_dir benchmark/candidates \
+python -m benchmark.cli \
   --dog_only \
+  --candidate_dir benchmark/candidates \
   --profile benchmark/profiles/smoke.json \
   --sim_device cuda:0
 ```
 
 旧入口 `python scripts/benchmark_policy.py ...` 仍然保留为兼容 wrapper。
 
-`--candidate_dir` 会递归扫描所有包含 `parameters.pkl` 的 run-like 目录。`--dog_only` 模式只选择包含 `checkpoints_dog/` 的 candidate。
+统一入口 `benchmark.cli` 负责选择 benchmark 模式。当前 `--dog_only` 已实现，`--candidate_dir` 会递归扫描所有包含 `parameters.pkl` 的 run-like 目录，并只选择包含 `checkpoints_dog/` 的 candidate。
 
 未来模式：
 
 - `--arm_only`: 只评估 arm policy，要求 candidate 有 `checkpoints_arm/`。
 - `--hybrid`: 评估 dog + arm pair，要求 candidate 同时有 `checkpoints_dog/` 和 `checkpoints_arm/`。
 
-这两个模式的 CLI 参数已预留，但当前尚未实现。
+这两个模式的统一入口参数已预留，但当前尚未实现。
 
 ## Compatibility
 

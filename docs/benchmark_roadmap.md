@@ -18,6 +18,7 @@
 
 | 文件 | 作用 |
 | --- | --- |
+| `benchmark/cli.py` | 统一 benchmark 入口，负责选择 `dog_only`、`arm_only` 或 `hybrid` 模式。 |
 | `benchmark/dog_policy/cli.py` | dog-only policy 质量评估入口，支持多个 policy 在同一个 IsaacGym simulation 中并行评估。 |
 | `benchmark/dog_policy/evaluation.py` | dog-only evaluation 实现，包括 policy/env 加载、配置兼容性检查、metric 累积、结果保存、markdown report 和 matplotlib plot。 |
 | `benchmark/env_fps.py` | 环境吞吐 benchmark，用不同 env count 测量 FPS、耗时和显存。 |
@@ -157,7 +158,8 @@ benchmark/results/<timestamp>/
 当前使用方式依赖手写命令：
 
 ```bash
-python -m benchmark.dog_policy.cli \
+python -m benchmark.cli \
+  --dog_only \
   --logdirs runs/run_A runs/run_B \
   --names A B \
   --ckptids last 15000
@@ -325,9 +327,9 @@ benchmark/
 Candidate 本身不需要声明为 `dog_only`、`arm_only` 或 `hybrid`。这些是“本次 benchmark 的模式”，应该通过 CLI 控制：
 
 ```bash
-python -m benchmark.dog_policy.cli \
-  --candidate_dir benchmark/candidates \
+python -m benchmark.cli \
   --dog_only \
+  --candidate_dir benchmark/candidates \
   --profile benchmark/profiles/smoke.json
 ```
 
@@ -402,6 +404,7 @@ HTML dashboard 应该包含：
 ```text
 benchmark/
   __init__.py
+  cli.py
   candidates.py
   config.py
   schemas.py
@@ -428,6 +431,7 @@ benchmark/
 
 | 模块 | 职责 |
 | --- | --- |
+| `cli.py` | 统一 benchmark 模式选择和顶层调度。 |
 | `candidates.py` | 扫描 run-like candidate 目录，解析 candidate logdir、checkpoint 和可选 metadata。 |
 | `dog_policy/cli.py` | dog-only benchmark CLI 和 profile/candidate 参数解析。 |
 | `dog_policy/evaluation.py` | 当前 dog-only benchmark 的运行、加载、metric、report 实现。 |
@@ -438,7 +442,7 @@ benchmark/
 | `reports/html_report.py` | 生成 HTML dashboard。 |
 | `profiles/*.json` | 定义 smoke/nightly/full benchmark profile。 |
 
-迁移不需要一次性重写；当前已经保留 `scripts/benchmark_policy.py` 作为兼容 wrapper，内部调用 `benchmark.dog_policy.cli`。
+迁移不需要一次性重写；当前已经保留 `scripts/benchmark_policy.py` 作为兼容 wrapper，内部调用 `benchmark.cli`。
 
 ## 并行化演进方向
 

@@ -455,7 +455,7 @@ def _apply_profile(args):
                 setattr(args, skip_attr, scenario not in scenarios)
 
 
-def _discover_candidate_logdirs(candidate_dir: str, mode: str) -> List[Path]:
+def _discover_candidate_logdirs(candidate_dir: str) -> List[Path]:
     root = Path(candidate_dir)
     if not root.exists():
         raise ValueError(f"{candidate_dir}: candidate directory does not exist")
@@ -466,54 +466,32 @@ def _discover_candidate_logdirs(candidate_dir: str, mode: str) -> List[Path]:
     for params_path in sorted(root.rglob("parameters.pkl")):
         logdir = params_path.parent
         has_dog = (logdir / "checkpoints_dog").is_dir()
-        has_arm = (logdir / "checkpoints_arm").is_dir()
-        if mode == "dog_only" and has_dog:
-            logdirs.append(logdir)
-        elif mode == "arm_only" and has_arm:
-            logdirs.append(logdir)
-        elif mode == "hybrid" and has_dog and has_arm:
+        if has_dog:
             logdirs.append(logdir)
 
     if not logdirs:
-        raise ValueError(f"{candidate_dir}: no {mode} candidates found")
+        raise ValueError(f"{candidate_dir}: no dog-policy candidates found")
     return logdirs
 
 
-def _benchmark_mode(args) -> str:
-    if not args.dog_only and not args.arm_only and not args.hybrid:
-        args.dog_only = True
-    selected = [name for name in ("dog_only", "arm_only", "hybrid") if getattr(args, name)]
-    if len(selected) != 1:
-        raise ValueError("Select exactly one benchmark mode: --dog_only, --arm_only, or --hybrid")
-    return selected[0]
-
-
 def _apply_candidate_dir(args):
-    mode = _benchmark_mode(args)
-    if mode != "dog_only":
-        raise NotImplementedError(f"{mode} benchmark mode is reserved but not implemented yet")
-
     if not args.candidate_dir:
         if not args.logdirs:
             raise ValueError("Provide either --logdirs or --candidate_dir")
         return
 
-    logdirs = _discover_candidate_logdirs(args.candidate_dir, mode)
+    logdirs = _discover_candidate_logdirs(args.candidate_dir)
     args.logdirs = [str(path) for path in logdirs]
     args.names = [path.name[:24] for path in logdirs]
 
 
-def parse_args():
+def parse_args(argv: Optional[List[str]] = None):
     p = argparse.ArgumentParser(description="Dog-only policy benchmark (GPU-parallel)")
     p.add_argument("--logdirs", nargs="+", default=None)
     p.add_argument("--names", nargs="*", default=None, help="Display name per logdir (default: directory name)")
     p.add_argument("--ckptids", nargs="*", default=None, help="Checkpoint id per logdir (default: 'last' for all)")
     p.add_argument("--candidate_dir", type=str, default=None, help="Run-like candidate root directory")
     p.add_argument("--profile", type=str, default=None, help="JSON benchmark profile path")
-    mode = p.add_mutually_exclusive_group()
-    mode.add_argument("--dog_only", action="store_true", default=False, help="Evaluate dog policies only")
-    mode.add_argument("--arm_only", action="store_true", help="[Reserved] Evaluate arm policies only")
-    mode.add_argument("--hybrid", action="store_true", help="[Reserved] Evaluate dog+arm policy pairs")
     p.add_argument("--headless", action="store_true", default=False)
     p.add_argument("--sim_device", type=str, default="cuda:0")
     p.add_argument("--robot", type=str, default="go2", choices=["go1", "go2"])
@@ -531,14 +509,14 @@ def parse_args():
     p.add_argument("--skip_c", action="store_true")
     p.add_argument("--skip_d", action="store_true")
     p.add_argument("--stage2", action="store_true", help="[Reserved] Stage-2 hybrid evaluation (not yet implemented)")
-    args = p.parse_args()
+    args = p.parse_args(argv)
     _apply_profile(args)
     _apply_candidate_dir(args)
     return args
 
 
-def main():
-    args = parse_args()
+def main(argv: Optional[List[str]] = None):
+    args = parse_args(argv)
 
     if args.stage2:
         print("[WARNING] --stage2 is reserved and not yet implemented.")
@@ -624,7 +602,7 @@ def main():
     plots_dir = os.path.join(run_dir, "plots")
     metadata = {
         "candidate_dir": args.candidate_dir or "cli",
-        "benchmark_mode": _benchmark_mode(args),
+        "benchmark_mode": "dog_only",
         "profile": args.profile or "cli",
         "runs": ", ".join(names),
         "num_envs_per_policy": args.num_envs_per_policy,
