@@ -1,0 +1,10 @@
+{
+  "description": "Fast dog-only benchmark profile for validating candidate loading and core metrics.",
+  "headless": true,
+  "robot": "go2",
+  "num_envs_per_policy": 8,
+  "num_eval_steps": 100,
+  "arm_intensity": 1.0,
+  "output_dir": "runs/benchmark_results",
+  "scenarios": ["vel_grid", "arm_sweep"]
+}

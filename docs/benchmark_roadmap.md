@@ -304,11 +304,11 @@ PolicyBundle:
 
 ## Candidate Checkpoint 管理建议
 
-建议引入 manifest，例如：
+建议引入 manifest。当前第一版实现为了避免新增 PyYAML 依赖，先使用 JSON；未来如果团队更偏好 YAML，可以在 loader 中补充 YAML 支持，schema 不需要变化。
 
 ```text
 benchmark/
-  candidates.yaml
+  candidates.json
 ```
 
 示例结构：
@@ -557,8 +557,8 @@ Full benchmark 不应该阻塞所有开发 PR，但可以作为模型相关 PR �
 ### Phase 1: 文档与候选清单
 
 - 新增 benchmark roadmap 文档。
-- 引入 `benchmark/candidates.yaml`。
-- CLI 支持 `--candidates benchmark/candidates.yaml`。
+- 引入 `benchmark/candidates.json`。
+- CLI 支持 `--candidates benchmark/candidates.json`。
 - 保留当前 `--logdirs --ckptids --names` 作为低层接口。
 - Candidate schema 从第一版就支持 `policies.dog` 和 `policies.arm`，即使当前只实际使用 dog。
 

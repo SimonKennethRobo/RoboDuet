@@ -40,6 +40,7 @@ Stage-2 hook: ``--stage2`` is reserved (not yet implemented).
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
@@ -404,11 +405,100 @@ def run_scenario_d(
 # ---------------------------------------------------------------------------
 
 
+SCENARIO_FLAGS = {
+    "vel_grid": "skip_a",
+    "arm_sweep": "skip_b",
+    "body_pose": "skip_c",
+    "gait": "skip_d",
+}
+
+
+def _load_json_config(path: str) -> dict:
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _cli_option_was_provided(option: str) -> bool:
+    import sys
+
+    prefix = option + "="
+    return option in sys.argv[1:] or any(arg.startswith(prefix) for arg in sys.argv[1:])
+
+
+def _apply_profile(args):
+    if not args.profile:
+        return
+
+    profile = _load_json_config(args.profile)
+    simple_fields = [
+        "headless",
+        "sim_device",
+        "robot",
+        "num_envs_per_policy",
+        "num_eval_steps",
+        "arm_intensity",
+        "output_dir",
+    ]
+    for field in simple_fields:
+        option = "--" + field
+        if field in profile and not _cli_option_was_provided(option):
+            setattr(args, field, profile[field])
+
+    scenarios = profile.get("scenarios")
+    if scenarios is not None:
+        unknown = sorted(set(scenarios) - set(SCENARIO_FLAGS))
+        if unknown:
+            raise ValueError(f"{args.profile}: unknown benchmark scenarios: {', '.join(unknown)}")
+        for scenario, skip_attr in SCENARIO_FLAGS.items():
+            skip_option = "--" + skip_attr
+            if not _cli_option_was_provided(skip_option):
+                setattr(args, skip_attr, scenario not in scenarios)
+
+
+def _active_dog_candidates(path: str) -> List[dict]:
+    data = _load_json_config(path)
+    candidates = data.get("candidates", data if isinstance(data, list) else [])
+    selected = []
+    for candidate in candidates:
+        if not candidate.get("active", True):
+            continue
+        benchmark_type = candidate.get("benchmark_type", "dog_only")
+        if benchmark_type != "dog_only":
+            print(f"[Benchmark] Skipping non dog-only candidate {candidate.get('id', '<unnamed>')}: {benchmark_type}")
+            continue
+        dog_policy = candidate.get("policies", {}).get("dog")
+        if not dog_policy:
+            print(f"[Benchmark] Skipping candidate without dog policy: {candidate.get('id', '<unnamed>')}")
+            continue
+        selected.append(candidate)
+    if not selected:
+        raise ValueError(f"{path}: no active dog-only candidates found")
+    return selected
+
+
+def _apply_candidates(args):
+    if not args.candidates:
+        if not args.logdirs:
+            raise ValueError("Provide either --logdirs or --candidates")
+        return
+
+    candidates = _active_dog_candidates(args.candidates)
+    args.logdirs = [c["policies"]["dog"]["logdir"] for c in candidates]
+    args.ckptids = [str(c["policies"]["dog"].get("ckptid", "last")) for c in candidates]
+    args.names = [c.get("name") or c.get("id") or Path(c["policies"]["dog"]["logdir"]).name for c in candidates]
+
+    robots = {c.get("robot") for c in candidates if c.get("robot")}
+    if len(robots) == 1 and not _cli_option_was_provided("--robot"):
+        args.robot = robots.pop()
+
+
 def parse_args():
-    p = argparse.ArgumentParser(description="Stage-1 dog-policy benchmark (GPU-parallel)")
-    p.add_argument("--logdirs", nargs="+", required=True)
+    p = argparse.ArgumentParser(description="Dog-only policy benchmark (GPU-parallel)")
+    p.add_argument("--logdirs", nargs="+", default=None)
     p.add_argument("--names", nargs="*", default=None, help="Display name per logdir (default: directory name)")
     p.add_argument("--ckptids", nargs="*", default=None, help="Checkpoint id per logdir (default: 'last' for all)")
+    p.add_argument("--candidates", type=str, default=None, help="JSON candidate manifest path")
+    p.add_argument("--profile", type=str, default=None, help="JSON benchmark profile path")
     p.add_argument("--headless", action="store_true", default=False)
     p.add_argument("--sim_device", type=str, default="cuda:0")
     p.add_argument("--robot", type=str, default="go2", choices=["go1", "go2"])
@@ -426,7 +516,10 @@ def parse_args():
     p.add_argument("--skip_c", action="store_true")
     p.add_argument("--skip_d", action="store_true")
     p.add_argument("--stage2", action="store_true", help="[Reserved] Stage-2 hybrid evaluation (not yet implemented)")
-    return p.parse_args()
+    args = p.parse_args()
+    _apply_profile(args)
+    _apply_candidates(args)
+    return args
 
 
 def main():
@@ -515,6 +608,8 @@ def main():
     markdown_path = os.path.join(run_dir, "report.md")
     plots_dir = os.path.join(run_dir, "plots")
     metadata = {
+        "candidates": args.candidates or "cli",
+        "profile": args.profile or "cli",
         "runs": ", ".join(names),
         "num_envs_per_policy": args.num_envs_per_policy,
         "total_envs": total_envs,

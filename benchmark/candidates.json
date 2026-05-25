@@ -1,0 +1,40 @@
+{
+  "candidates": [
+    {
+      "id": "dog_0525_110431_last",
+      "name": "stage1_0525_110431",
+      "benchmark_type": "dog_only",
+      "robot": "go2",
+      "active": true,
+      "policies": {
+        "dog": {
+          "logdir": "ckpts/stage1_0525_110431",
+          "ckptid": "last"
+        },
+        "arm": null
+      },
+      "tags": ["dog_only", "baseline"],
+      "reason_kept": "Current checked-in dog-only checkpoint candidate."
+    },
+    {
+      "id": "dog_20260523_test_004413_last",
+      "name": "stage1_test_004413",
+      "benchmark_type": "dog_only",
+      "robot": "go2",
+      "active": false,
+      "policies": {
+        "dog": {
+          "logdir": "runs/2026-05-23/stage1_test_004413_seed3035",
+          "ckptid": "last"
+        },
+        "arm": null
+      },
+      "tags": ["dog_only", "comparison"],
+      "reason_kept": "Known runnable dog policy run, kept for manual comparison.",
+      "compatibility_notes": [
+        "Not active by default because it cannot share the current benchmark env with dog_0525_110431_last.",
+        "Observed differences: dog.dog_num_observations 83 vs 86, arm.arm_num_commands 6 vs 9, use_rot6d false vs true."
+      ]
+    }
+  ]
+}
