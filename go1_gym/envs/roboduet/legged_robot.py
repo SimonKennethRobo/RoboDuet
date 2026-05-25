@@ -6,7 +6,15 @@ import sys
 import xml.etree.ElementTree as ET
 
 from isaacgym import gymapi, gymtorch, gymutil
-from isaacgym.torch_utils import *
+from isaacgym.torch_utils import (
+    get_axis_params,
+    quat_apply,
+    quat_from_angle_axis,
+    quat_mul,
+    quat_rotate_inverse,
+    to_torch,
+    torch_rand_float,
+)
 
 assert gymtorch
 
@@ -16,7 +24,7 @@ import torch
 from go1_gym import MINI_GYM_ROOT_DIR
 from go1_gym.envs.base.base_task import BaseTask
 from go1_gym.utils import global_switch, quaternion_to_rpy
-from go1_gym.utils.math_utils import get_scale_shift, quat_apply_yaw, wrap_to_pi
+from go1_gym.utils.math_utils import get_scale_shift, quat_apply_yaw
 from go1_gym.utils.terrain import Terrain
 
 from .wbc_env_config import RoboDuetCfg as Cfg
@@ -2300,11 +2308,9 @@ class LeggedRobot(BaseTask):
         if self.cfg.commands.use_dynamic_gait:
             frequencies = self.commands_dog[:, 6]  # (num_envs,)
             durations = self.commands_dog[:, 10]  # (num_envs,)
-            footswing_height_cmd = self.commands_dog[:, 7]  # (num_envs,)
         else:
             frequencies = 3.0
             durations = 0.5
-            footswing_height_cmd = 0.04
 
         self.gait_indices = torch.remainder(self.gait_indices + self.dt * frequencies, 1.0)
 
