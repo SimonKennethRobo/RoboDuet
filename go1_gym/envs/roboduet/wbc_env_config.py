@@ -185,11 +185,6 @@ class ControlConfig:
 
 
 @dataclass(frozen=True)
-class TerrainConfig:
-    mesh_type: str = "plane"
-
-
-@dataclass(frozen=True)
 class ArmDomainRandConfig:
     """Per-stage arm domain randomization (applied every episode reset)."""
 
@@ -265,7 +260,7 @@ class Stage1ArmDisturbanceConfig:
     saturation_fraction: float = 0.8
     accel_resample_time_s: float = 0.01  # 100 Hz, larger than actual ctrl freq
     zero_accel_probability: float = 0.3
-    zero_vel_probability: float = 0.1
+    zero_vel_probability: float = 0.005
     max_accel: float = 10.0
     max_vel: float = 5.0
     max_offset: float = 999
@@ -333,7 +328,7 @@ class RoboDuetDefaults:
     env: EnvConfig = EnvConfig()
     commands: CommandConfig = CommandConfig()
     control: ControlConfig = ControlConfig()
-    terrain: TerrainConfig = TerrainConfig()
+
     domain_rand: DomainRandConfig = DomainRandConfig()
     rewards: RewardConfig = RewardConfig()
     reward_scales: BaseRewardScaleConfig = BaseRewardScaleConfig()
@@ -624,9 +619,7 @@ def materialize_base_cfg(cfg, defaults, options):
     cfg.normalization.Kd_factor_range = [0.2, 2.0]
     cfg.normalization.dof_damping_range = [0.0, 10.0]
 
-    cfg.terrain.mesh_type = defaults.terrain.mesh_type
-    if cfg.terrain.mesh_type == "plane":
-        cfg.terrain.teleport_robots = False
+    cfg.terrain.teleport_robots = False
 
     cfg.asset.render_sphere = defaults.asset.render_sphere
 
@@ -889,7 +882,7 @@ def validate_roboduet_cfg(cfg):
         raise ValueError("RoboDuet config has unset required fields: {}".format(", ".join(missing)))
 
 
-def configure_task_from_args(cfg, args, traj_track_reward_scale=5.0):
+def configure_task_from_args(cfg, args, traj_track_reward_scale=5.0, debug=False):
     defaults = ROBODUET_DEFAULTS
     options = RoboDuetRuntimeOptions.from_args(args)
 
@@ -916,3 +909,6 @@ def configure_task_from_args(cfg, args, traj_track_reward_scale=5.0):
     configure_privileged_obs_dims(cfg)
     configure_robot_asset(cfg, defaults, options.robot)
     validate_roboduet_cfg(cfg)
+
+    if debug:
+        cfg.domain_rand.randomize_mount_pos = False
