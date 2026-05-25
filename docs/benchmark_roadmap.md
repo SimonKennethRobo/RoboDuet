@@ -103,7 +103,7 @@ RoboDuet 的训练流程会分阶段：先训练 dog policy，再训练 arm poli
 一次 policy benchmark 会输出到：
 
 ```text
-runs/benchmark_results/<timestamp>/
+benchmark/results/<timestamp>/
   results.json
   report.md
   plots/
@@ -286,7 +286,7 @@ benchmark unit = dog_policy + arm_policy + env/scenario config
 PolicyBundle:
   dog_policy: optional
   arm_policy: optional
-  benchmark_type: dog_only | arm_only | hybrid
+  benchmark_mode: dog_only | arm_only | hybrid
   compatibility: observation/action/command layout
 ```
 
@@ -304,68 +304,36 @@ PolicyBundle:
 
 ## Candidate Checkpoint 管理建议
 
-建议引入 manifest。当前第一版实现为了避免新增 PyYAML 依赖，先使用 JSON；未来如果团队更偏好 YAML，可以在 loader 中补充 YAML 支持，schema 不需要变化。
+建议使用 run-like candidate 目录，而不是维护全局 candidate manifest。这样可以直接复用训练产物的目录结构，加入 candidate 的成本最低。
 
 ```text
 benchmark/
-  candidates.json
+  candidates/
+    .gitignore
+    2026-05-25/
+      stage1_0525_110431/
+        parameters.pkl
+        params.txt
+        checkpoints_dog/
+          ac_weights_last_dog.pt
+        checkpoints_arm/
+          ac_weights_last_arm.pt
 ```
 
-示例结构：
+`benchmark/candidates/.gitignore` 应该使用 allowlist，默认忽略复制进来的训练产物，只保留 benchmark 需要的最小文件集。这样可以直接把 `runs/<date>/<run_name>` 复制进 `benchmark/candidates/`，但不会把 logs、wandb、视频、完整脚本快照等无关文件都提交进 Git。
 
-```yaml
-candidates:
-  - id: dog_0525_110431_last
-    name: stage1_0525_110431
-    benchmark_type: dog_only
-    robot: go2
-    logdir: ckpts/stage1_0525_110431
-    ckptid: last
-    tags:
-      - stable
-      - dynamic_gait_candidate
-    source:
-      train_run: runs/2026-05-25/stage1_0525_110431
-      commit: unknown
-      owner: unknown
-    reason_kept: "Current reference checkpoint for dog-only benchmark."
-    retire_condition: "Retire when another candidate improves velocity, gait, and fall-rate metrics without torque regression."
+Candidate 本身不需要声明为 `dog_only`、`arm_only` 或 `hybrid`。这些是“本次 benchmark 的模式”，应该通过 CLI 控制：
+
+```bash
+python scripts/benchmark_policy.py \
+  --candidate_dir benchmark/candidates \
+  --dog_only \
+  --profile benchmark/profiles/smoke.json
 ```
 
-为了支持双 policy，candidate manifest 不应该只支持一个 `logdir` 和一个 `ckptid`。建议从一开始就允许 policy bundle 写法：
+`--dog_only` 只要求 candidate 目录中存在 `checkpoints_dog/`；`--arm_only` 未来只要求 `checkpoints_arm/`；`--hybrid` 未来要求两者都存在。
 
-```yaml
-candidates:
-  - id: dog_0525
-    name: dog-only baseline
-    benchmark_type: dog_only
-    robot: go2
-    policies:
-      dog:
-        logdir: ckpts/stage1_0525_110431
-        ckptid: last
-      arm: null
-    tags:
-      - dog_only
-      - baseline
-
-  - id: hybrid_pair_exp001
-    name: hybrid pair exp001
-    benchmark_type: hybrid
-    robot: go2
-    policies:
-      dog:
-        logdir: runs/dog_exp001
-        ckptid: 030000
-      arm:
-        logdir: runs/arm_exp001
-        ckptid: 030000
-    tags:
-      - hybrid
-      - experimental_arm
-```
-
-这样做的好处是：现在仍然可以只填 dog policy，但未来加入 arm policy 时不用推翻 candidate schema。
+如果将来需要记录 `baseline`、`tags`、保留原因、淘汰原因等信息，可以在每个 candidate 目录下放可选 `candidate.json`。这比全局 manifest 更不容易和真实文件结构脱节。
 
 未来 candidate pool 应该支持：
 
@@ -387,7 +355,7 @@ candidates:
 理想输出：
 
 ```text
-runs/benchmark_results/<timestamp>/
+benchmark/results/<timestamp>/
   index.html
   results.json
   report.md
@@ -448,22 +416,22 @@ benchmark/
     markdown_report.py
     html_report.py
   profiles/
-    smoke.yaml
-    nightly.yaml
-    full.yaml
+    smoke.json
+    nightly.json
+    full.json
 ```
 
 职责划分：
 
 | 模块 | 职责 |
 | --- | --- |
-| `candidates.py` | 读取 candidate manifest，解析 logdir/ckptid/name/tags。 |
+| `candidates.py` | 扫描 run-like candidate 目录，解析 candidate logdir、checkpoint 和可选 metadata。 |
 | `scenarios.py` | 定义 scenario point 和 command setter。 |
 | `runner.py` | 负责 env 创建、policy loading、parallel eval loop。 |
 | `metrics.py` | 负责 metric accumulation 和 summary。 |
 | `schemas.py` | 统一结果数据结构和 JSON schema。 |
 | `reports/html_report.py` | 生成 HTML dashboard。 |
-| `profiles/*.yaml` | 定义 smoke/nightly/full benchmark profile。 |
+| `profiles/*.json` | 定义 smoke/nightly/full benchmark profile。 |
 
 迁移时不需要一次性重写。可以先保留 `scripts/benchmark_policy.py` 作为 CLI wrapper，内部逐步调用新的 package。
 
@@ -554,13 +522,14 @@ Full benchmark 不应该阻塞所有开发 PR，但可以作为模型相关 PR �
 
 ## 推荐路线图
 
-### Phase 1: 文档与候选清单
+### Phase 1: 文档与候选目录
 
 - 新增 benchmark roadmap 文档。
-- 引入 `benchmark/candidates.json`。
-- CLI 支持 `--candidates benchmark/candidates.json`。
+- 引入 `benchmark/candidates/` run-like candidate 目录。
+- 使用 `benchmark/candidates/.gitignore` allowlist 控制 Git 只 track 必要文件。
+- CLI 支持 `--candidate_dir benchmark/candidates`。
 - 保留当前 `--logdirs --ckptids --names` 作为低层接口。
-- Candidate schema 从第一版就支持 `policies.dog` 和 `policies.arm`，即使当前只实际使用 dog。
+- Benchmark 模式通过 `--dog_only`、未来的 `--arm_only` / `--hybrid` 控制，而不是写死在 candidate 目录名里。
 
 ### Phase 2: HTML Report
 
@@ -607,8 +576,8 @@ Full benchmark 不应该阻塞所有开发 PR，但可以作为模型相关 PR �
 
 最值得优先做的三个改动：
 
-1. Candidate manifest  
-   先解决“哪些 ckpt 应该参与 benchmark”这个管理问题。
+1. Candidate directory  
+   先解决“哪些 ckpt 应该参与 benchmark”这个管理问题，同时避免维护全局 manifest。
 
 2. HTML dashboard  
    直接提升结果查看效率，让 benchmark 结果真正可用。

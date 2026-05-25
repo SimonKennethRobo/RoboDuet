@@ -5,6 +5,6 @@
   "num_envs_per_policy": 8,
   "num_eval_steps": 100,
   "arm_intensity": 1.0,
-  "output_dir": "runs/benchmark_results",
+  "output_dir": "benchmark/results",
   "scenarios": ["vel_grid", "arm_sweep"]
 }

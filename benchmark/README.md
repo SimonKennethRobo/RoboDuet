@@ -1,46 +1,59 @@
 # Benchmark Configs
 
-这个目录存放 `scripts/benchmark_policy.py` 使用的 benchmark 配置。
+这个目录存放 benchmark 运行配置和长期保留的 candidate runs。
 
-## Candidate Manifest
+## Candidate Runs
 
-默认 candidate manifest:
+Candidate 使用和 `runs/<date>/<run_name>` 相同的目录结构：
 
-```bash
-benchmark/candidates.json
+```text
+benchmark/candidates/
+  2026-05-25/
+    stage1_0525_110431/
+      parameters.pkl
+      params.txt
+      checkpoints_dog/
+        ac_weights_last_dog.pt
+      checkpoints_arm/
+        ac_weights_last_arm.pt
 ```
 
-运行当前激活的 dog-only candidates:
+加入 candidate 的推荐方式是把需要保留的 run 复制到 `benchmark/candidates/<date>/<run_name>`。该目录下有局部 `.gitignore`，默认忽略复制进来的无关训练产物，只 track benchmark 需要的最小文件集：
+
+- `parameters.pkl`
+- `params.txt`
+- `checkpoints_dog/ac_weights_*_dog.pt`
+- `checkpoints_arm/ac_weights_*_arm.pt`
+- 可选 `README.md` / `candidate.json`
+
+不要使用 symlink 指向 `runs/`。`runs/` 已被仓库全局 ignore，symlink 不能可靠表达需要长期保留的 candidate 内容。
+
+## Run Dog-Only Benchmark
+
+当前已实现的是 dog-only benchmark：
 
 ```bash
 python scripts/benchmark_policy.py \
-  --candidates benchmark/candidates.json \
+  --candidate_dir benchmark/candidates \
+  --dog_only \
   --profile benchmark/profiles/smoke.json \
   --sim_device cuda:0
 ```
 
-manifest 现在只实际用于 dog-only benchmark，但 schema 已经按 policy bundle 设计：
+`--candidate_dir` 会递归扫描所有包含 `parameters.pkl` 的 run-like 目录。`--dog_only` 模式只选择包含 `checkpoints_dog/` 的 candidate。
 
-```json
-{
-  "benchmark_type": "dog_only",
-  "policies": {
-    "dog": {
-      "logdir": "ckpts/stage1_0525_110431",
-      "ckptid": "last"
-    },
-    "arm": null
-  }
-}
-```
+未来模式：
 
-这样未来扩展到 `arm_only` 和 `hybrid` benchmark 时，不需要推翻 candidate schema。
+- `--arm_only`: 只评估 arm policy，要求 candidate 有 `checkpoints_arm/`。
+- `--hybrid`: 评估 dog + arm pair，要求 candidate 同时有 `checkpoints_dog/` 和 `checkpoints_arm/`。
+
+这两个模式的 CLI 参数已预留，但当前尚未实现。
 
 ## Compatibility
 
-当前 policy benchmark 会把所有 active dog candidates 放进同一个 IsaacGym simulation 里并行运行。因此，所有 active candidates 必须共享相同的 observation/action/command layout。
+当前 dog-only benchmark 会把所有 candidate 放进同一个 IsaacGym simulation 里并行运行。因此，所有被扫描到的 active candidates 必须共享相同的 observation/action/command layout。
 
-如果两个 checkpoint 在关键配置上不同，例如 dog observation 维度、arm command 维度或 `use_rot6d`，它们就不能同时作为 active candidates 参与同一个 shared benchmark run。可以先保留在 manifest 里并设置 `"active": false`，等后续实现按兼容性自动分组后再一起管理。
+如果两个 checkpoint 在关键配置上不同，例如 dog observation 维度、arm command 维度或 `use_rot6d`，它们就不能同时参与同一个 shared benchmark run。短期做法是把不兼容 candidate 放到不同 candidate root，分别运行；长期可以实现自动兼容性分组。
 
 ## Profiles
 
@@ -51,3 +64,11 @@ benchmark/profiles/smoke.json
 ```
 
 smoke profile 刻意保持较小规模，用来快速验证 candidate 加载、核心 scenario 和 metric 输出是否正常。完整 benchmark 后续应放到 nightly/full profile 中。
+
+默认输出目录是：
+
+```text
+benchmark/results/<timestamp>/
+```
+
+该目录用于本地查看 benchmark 结果，已在仓库 `.gitignore` 中忽略。
