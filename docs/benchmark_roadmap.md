@@ -18,11 +18,11 @@
 
 | 文件 | 作用 |
 | --- | --- |
-| `scripts/benchmark_policy.py` | dog-only policy 质量评估入口，支持多个 policy 在同一个 IsaacGym simulation 中并行评估。 |
-| `scripts/benchmark_policy_common.py` | 公共实现，包括 policy/env 加载、配置兼容性检查、metric 累积、结果保存、markdown report 和 matplotlib plot。 |
-| `scripts/benchmark_env_fps.py` | 环境吞吐 benchmark，用不同 env count 测量 FPS、耗时和显存。 |
+| `benchmark/policy.py` | dog-only policy 质量评估入口，支持多个 policy 在同一个 IsaacGym simulation 中并行评估。 |
+| `benchmark/policy_common.py` | 公共实现，包括 policy/env 加载、配置兼容性检查、metric 累积、结果保存、markdown report 和 matplotlib plot。 |
+| `benchmark/env_fps.py` | 环境吞吐 benchmark，用不同 env count 测量 FPS、耗时和显存。 |
 
-`benchmark_policy.py` 当前定位是 dog-only policy benchmark。它把多个候选 policy 放到同一个共享 simulation 中运行：
+`benchmark/policy.py` 当前定位是 dog-only policy benchmark。它把多个候选 policy 放到同一个共享 simulation 中运行：
 
 ```text
 total_envs = num_envs_per_policy * num_policies
@@ -57,7 +57,7 @@ RoboDuet 的训练流程会分阶段：先训练 dog policy，再训练 arm poli
 
 ## 当前 Scenario
 
-`benchmark_policy.py` 当前包含四类 scenario：
+`benchmark/policy.py` 当前包含四类 scenario：
 
 | Scenario | 内容 | 主要关注点 |
 | --- | --- | --- |
@@ -66,7 +66,7 @@ RoboDuet 的训练流程会分阶段：先训练 dog policy，再训练 arm poli
 | C: Body-Pose Tracking | 扫描 body pitch、roll、height delta | 身体姿态跟踪和姿态稳定性 |
 | D: Gait-Parameter Tracking | 扫描 gait frequency、footswing height、stance width | 步态接触、摆腿高度、Raibert foot placement |
 
-当前 scenario 是写死在 Python 代码中的，例如 velocity grid、arm intensity sweep、body pose sweep、gait sweep 都直接定义在 `benchmark_policy.py` 顶层常量里。
+当前 scenario 是写死在 Python 代码中的，例如 velocity grid、arm intensity sweep、body pose sweep、gait sweep 都直接定义在 `benchmark/policy.py` 顶层常量里。
 
 ## 当前 Metric
 
@@ -129,7 +129,7 @@ benchmark/results/<timestamp>/
 
 ### 2. 有配置兼容性检查
 
-`benchmark_policy_common.py` 中的 `validate_shared_env_compatibility()` 会检查多个 checkpoint 是否共享关键 observation/control layout，例如：
+`benchmark/policy_common.py` 中的 `validate_shared_env_compatibility()` 会检查多个 checkpoint 是否共享关键 observation/control layout，例如：
 
 - dog command 维度
 - dog observation history 维度
@@ -148,7 +148,7 @@ benchmark/results/<timestamp>/
 
 ### 5. Env FPS benchmark 单独存在
 
-`benchmark_env_fps.py` 把 simulation throughput benchmark 和 policy quality benchmark 分开，是合理的。policy benchmark 回答“哪个 checkpoint 更好”，env FPS benchmark 回答“当前环境配置能跑多快、显存占用如何”。
+`benchmark/env_fps.py` 把 simulation throughput benchmark 和 policy quality benchmark 分开，是合理的。policy benchmark 回答“哪个 checkpoint 更好”，env FPS benchmark 回答“当前环境配置能跑多快、显存占用如何”。
 
 ## 当前缺点
 
@@ -157,7 +157,7 @@ benchmark/results/<timestamp>/
 当前使用方式依赖手写命令：
 
 ```bash
-python scripts/benchmark_policy.py \
+python -m benchmark.policy \
   --logdirs runs/run_A runs/run_B \
   --names A B \
   --ckptids last 15000
@@ -225,7 +225,7 @@ candidate_A vs baseline:
 
 ### 5. 代码组织仍然偏脚本化
 
-当前 `benchmark_policy_common.py` 已经承担很多职责：
+当前 `benchmark/policy_common.py` 已经承担很多职责：
 
 - 读取配置
 - 加载 env
@@ -325,7 +325,7 @@ benchmark/
 Candidate 本身不需要声明为 `dog_only`、`arm_only` 或 `hybrid`。这些是“本次 benchmark 的模式”，应该通过 CLI 控制：
 
 ```bash
-python scripts/benchmark_policy.py \
+python -m benchmark.policy \
   --candidate_dir benchmark/candidates \
   --dog_only \
   --profile benchmark/profiles/smoke.json
@@ -397,7 +397,7 @@ HTML dashboard 应该包含：
 
 ## 代码结构重构建议
 
-未来建议从 `scripts/benchmark_*.py` 逐步迁移到 package 化结构：
+当前 benchmark 入口已经从 `scripts/benchmark_*.py` 迁移到 `benchmark/` package，`scripts/` 下只保留兼容 wrapper。后续可以继续把大文件拆成更细模块：
 
 ```text
 benchmark/
@@ -433,7 +433,7 @@ benchmark/
 | `reports/html_report.py` | 生成 HTML dashboard。 |
 | `profiles/*.json` | 定义 smoke/nightly/full benchmark profile。 |
 
-迁移时不需要一次性重写。可以先保留 `scripts/benchmark_policy.py` 作为 CLI wrapper，内部逐步调用新的 package。
+迁移不需要一次性重写；当前已经保留 `scripts/benchmark_policy.py` 作为 CLI wrapper，内部调用 `benchmark.policy`。
 
 ## 并行化演进方向
 
@@ -540,7 +540,7 @@ Full benchmark 不应该阻塞所有开发 PR，但可以作为模型相关 PR �
 
 ### Phase 3: Benchmark 代码结构整理
 
-- 把 `benchmark_policy_common.py` 拆出 candidate、scenario、metric、report 模块。
+- 把 `benchmark/policy_common.py` 拆出 candidate、scenario、metric、report 模块。
 - 保留旧 CLI 入口，降低迁移风险。
 - 给 JSON 结果定义稳定 schema。
 - 引入 `PolicyBundle` 概念，避免 runner 和 result schema 只绑定单个 dog policy。

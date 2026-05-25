@@ -33,12 +33,14 @@ benchmark/candidates/
 当前已实现的是 dog-only benchmark：
 
 ```bash
-python scripts/benchmark_policy.py \
+python -m benchmark.policy \
   --candidate_dir benchmark/candidates \
   --dog_only \
   --profile benchmark/profiles/smoke.json \
   --sim_device cuda:0
 ```
+
+旧入口 `python scripts/benchmark_policy.py ...` 仍然保留为兼容 wrapper。
 
 `--candidate_dir` 会递归扫描所有包含 `parameters.pkl` 的 run-like 目录。`--dog_only` 模式只选择包含 `checkpoints_dog/` 的 candidate。
 
