@@ -438,7 +438,7 @@ benchmark/
 | `reports/html_report.py` | 生成 HTML dashboard。 |
 | `profiles/*.json` | 定义 smoke/nightly/full benchmark profile。 |
 
-迁移不需要一次性重写；当前已经保留 `benchmark.policy` 和 `scripts/benchmark_policy.py` 作为兼容 wrapper，内部调用 `benchmark.dog_policy.cli`。
+迁移不需要一次性重写；当前已经保留 `scripts/benchmark_policy.py` 作为兼容 wrapper，内部调用 `benchmark.dog_policy.cli`。
 
 ## 并行化演进方向
 
