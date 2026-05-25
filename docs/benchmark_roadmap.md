@@ -18,11 +18,11 @@
 
 | 文件 | 作用 |
 | --- | --- |
-| `benchmark/policy.py` | dog-only policy 质量评估入口，支持多个 policy 在同一个 IsaacGym simulation 中并行评估。 |
-| `benchmark/policy_common.py` | 公共实现，包括 policy/env 加载、配置兼容性检查、metric 累积、结果保存、markdown report 和 matplotlib plot。 |
+| `benchmark/dog_policy/cli.py` | dog-only policy 质量评估入口，支持多个 policy 在同一个 IsaacGym simulation 中并行评估。 |
+| `benchmark/dog_policy/evaluation.py` | dog-only evaluation 实现，包括 policy/env 加载、配置兼容性检查、metric 累积、结果保存、markdown report 和 matplotlib plot。 |
 | `benchmark/env_fps.py` | 环境吞吐 benchmark，用不同 env count 测量 FPS、耗时和显存。 |
 
-`benchmark/policy.py` 当前定位是 dog-only policy benchmark。它把多个候选 policy 放到同一个共享 simulation 中运行：
+`benchmark/dog_policy/cli.py` 当前定位是 dog-only policy benchmark。它把多个候选 policy 放到同一个共享 simulation 中运行：
 
 ```text
 total_envs = num_envs_per_policy * num_policies
@@ -57,7 +57,7 @@ RoboDuet 的训练流程会分阶段：先训练 dog policy，再训练 arm poli
 
 ## 当前 Scenario
 
-`benchmark/policy.py` 当前包含四类 scenario：
+`benchmark/dog_policy/cli.py` 当前包含四类 scenario：
 
 | Scenario | 内容 | 主要关注点 |
 | --- | --- | --- |
@@ -66,7 +66,7 @@ RoboDuet 的训练流程会分阶段：先训练 dog policy，再训练 arm poli
 | C: Body-Pose Tracking | 扫描 body pitch、roll、height delta | 身体姿态跟踪和姿态稳定性 |
 | D: Gait-Parameter Tracking | 扫描 gait frequency、footswing height、stance width | 步态接触、摆腿高度、Raibert foot placement |
 
-当前 scenario 是写死在 Python 代码中的，例如 velocity grid、arm intensity sweep、body pose sweep、gait sweep 都直接定义在 `benchmark/policy.py` 顶层常量里。
+当前 scenario 是写死在 Python 代码中的，例如 velocity grid、arm intensity sweep、body pose sweep、gait sweep 都直接定义在 `benchmark/dog_policy/cli.py` 顶层常量里。
 
 ## 当前 Metric
 
@@ -129,7 +129,7 @@ benchmark/results/<timestamp>/
 
 ### 2. 有配置兼容性检查
 
-`benchmark/policy_common.py` 中的 `validate_shared_env_compatibility()` 会检查多个 checkpoint 是否共享关键 observation/control layout，例如：
+`benchmark/dog_policy/evaluation.py` 中的 `validate_shared_env_compatibility()` 会检查多个 checkpoint 是否共享关键 observation/control layout，例如：
 
 - dog command 维度
 - dog observation history 维度
@@ -157,7 +157,7 @@ benchmark/results/<timestamp>/
 当前使用方式依赖手写命令：
 
 ```bash
-python -m benchmark.policy \
+python -m benchmark.dog_policy.cli \
   --logdirs runs/run_A runs/run_B \
   --names A B \
   --ckptids last 15000
@@ -225,7 +225,7 @@ candidate_A vs baseline:
 
 ### 5. 代码组织仍然偏脚本化
 
-当前 `benchmark/policy_common.py` 已经承担很多职责：
+当前 `benchmark/dog_policy/evaluation.py` 已经承担很多职责：
 
 - 读取配置
 - 加载 env
@@ -325,7 +325,7 @@ benchmark/
 Candidate 本身不需要声明为 `dog_only`、`arm_only` 或 `hybrid`。这些是“本次 benchmark 的模式”，应该通过 CLI 控制：
 
 ```bash
-python -m benchmark.policy \
+python -m benchmark.dog_policy.cli \
   --candidate_dir benchmark/candidates \
   --dog_only \
   --profile benchmark/profiles/smoke.json
@@ -402,14 +402,17 @@ HTML dashboard 应该包含：
 ```text
 benchmark/
   __init__.py
-  cli.py
   candidates.py
   config.py
-  scenarios.py
-  runner.py
-  metrics.py
   schemas.py
   compatibility.py
+  dog_policy/
+    __init__.py
+    cli.py
+    evaluation.py
+    scenarios.py
+    metrics.py
+    reports.py
   reports/
     __init__.py
     json_report.py
@@ -426,14 +429,16 @@ benchmark/
 | 模块 | 职责 |
 | --- | --- |
 | `candidates.py` | 扫描 run-like candidate 目录，解析 candidate logdir、checkpoint 和可选 metadata。 |
-| `scenarios.py` | 定义 scenario point 和 command setter。 |
-| `runner.py` | 负责 env 创建、policy loading、parallel eval loop。 |
-| `metrics.py` | 负责 metric accumulation 和 summary。 |
+| `dog_policy/cli.py` | dog-only benchmark CLI 和 profile/candidate 参数解析。 |
+| `dog_policy/evaluation.py` | 当前 dog-only benchmark 的运行、加载、metric、report 实现。 |
+| `dog_policy/scenarios.py` | 未来拆出 scenario point 和 command setter。 |
+| `dog_policy/metrics.py` | 未来拆出 metric accumulation 和 summary。 |
+| `dog_policy/reports.py` | 未来拆出 dog-policy 专用 report 生成逻辑。 |
 | `schemas.py` | 统一结果数据结构和 JSON schema。 |
 | `reports/html_report.py` | 生成 HTML dashboard。 |
 | `profiles/*.json` | 定义 smoke/nightly/full benchmark profile。 |
 
-迁移不需要一次性重写；当前已经保留 `scripts/benchmark_policy.py` 作为 CLI wrapper，内部调用 `benchmark.policy`。
+迁移不需要一次性重写；当前已经保留 `benchmark.policy` 和 `scripts/benchmark_policy.py` 作为兼容 wrapper，内部调用 `benchmark.dog_policy.cli`。
 
 ## 并行化演进方向
 
@@ -540,7 +545,7 @@ Full benchmark 不应该阻塞所有开发 PR，但可以作为模型相关 PR �
 
 ### Phase 3: Benchmark 代码结构整理
 
-- 把 `benchmark/policy_common.py` 拆出 candidate、scenario、metric、report 模块。
+- 把 `benchmark/dog_policy/evaluation.py` 拆出 candidate、scenario、metric、report 模块。
 - 保留旧 CLI 入口，降低迁移风险。
 - 给 JSON 结果定义稳定 schema。
 - 引入 `PolicyBundle` 概念，避免 runner 和 result schema 只绑定单个 dog policy。
