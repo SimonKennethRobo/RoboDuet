@@ -265,7 +265,11 @@ class LeggedRobot(BaseTask):
         pass
 
     def _arm_post_reset_refresh_hook(self, env_ids):
-        """Refresh sim tensors so newly-reset arm state is observable."""
+        """Bookkeep arm state after reset without writing sim tensors."""
+        pass
+
+    def _arm_post_dof_reset_hook(self, env_ids):
+        """Let arm tasks adjust reset DOF positions before the single DOF state write."""
         pass
 
     def _arm_resample_commands_train_hook(self, env_ids):
@@ -384,6 +388,7 @@ class LeggedRobot(BaseTask):
         self._resample_commands(env_ids)
         self._arm_reset_hook(env_ids)
         self._randomize_dof_props(env_ids, self.cfg)
+        self._arm_post_dof_randomization_hook(env_ids)
         if self.cfg.domain_rand.randomize_rigids_after_start:
             self._randomize_rigid_body_props(env_ids, self.cfg)
             self.refresh_actor_rigid_shape_props(env_ids, self.cfg)
@@ -1185,6 +1190,7 @@ class LeggedRobot(BaseTask):
             0.5, 1.5, (len(env_ids), self.num_dof), device=self.device
         )
         self.dof_vel[env_ids] = 0.0
+        self._arm_post_dof_reset_hook(env_ids)
 
         env_ids_int32 = env_ids.to(dtype=torch.int32)
         self.gym.set_dof_state_tensor_indexed(
@@ -1210,29 +1216,30 @@ class LeggedRobot(BaseTask):
             )
             self.root_states[env_ids, 0] += cfg.terrain.x_init_offset
             self.root_states[env_ids, 1] += cfg.terrain.y_init_offset
+            self.root_states[env_ids, 2:3] += torch_rand_float(
+                0, cfg.terrain.z_init_range, (len(env_ids), 1), device=self.device
+            )
         else:
             self.root_states[env_ids] = self.base_init_state
             self.root_states[env_ids, :3] += self.env_origins[env_ids]
+            self.root_states[env_ids, 2:3] += torch_rand_float(
+                0, cfg.terrain.z_init_range, (len(env_ids), 1), device=self.device
+            )
 
         # base orientation: yaw / pitch / roll each randomized independently
         init_yaws = torch_rand_float(
             -cfg.terrain.yaw_init_range, cfg.terrain.yaw_init_range, (len(env_ids), 1), device=self.device
         )
         init_pitches = torch_rand_float(
-            -getattr(cfg.terrain, "pitch_init_range", 0.0),
-            getattr(cfg.terrain, "pitch_init_range", 0.0),
-            (len(env_ids), 1), device=self.device,
+            -cfg.terrain.pitch_init_range, cfg.terrain.pitch_init_range, (len(env_ids), 1), device=self.device
         )
         init_rolls = torch_rand_float(
-            -getattr(cfg.terrain, "roll_init_range", 0.0),
-            getattr(cfg.terrain, "roll_init_range", 0.0),
-            (len(env_ids), 1), device=self.device,
+            -cfg.terrain.roll_init_range, cfg.terrain.roll_init_range, (len(env_ids), 1), device=self.device
         )
         q_yaw = quat_from_angle_axis(init_yaws, torch.Tensor([0, 0, 1]).to(self.device))[:, 0, :]
         q_pitch = quat_from_angle_axis(init_pitches, torch.Tensor([0, 1, 0]).to(self.device))[:, 0, :]
         q_roll = quat_from_angle_axis(init_rolls, torch.Tensor([1, 0, 0]).to(self.device))[:, 0, :]
         self.root_states[env_ids, 3:7] = quat_mul(q_yaw, quat_mul(q_pitch, q_roll))
-
         # base velocities
         self.root_states[env_ids, 7:13] = torch_rand_float(
             -0.5, 0.5, (len(env_ids), 6), device=self.device
@@ -1270,12 +1277,16 @@ class LeggedRobot(BaseTask):
             max_push_ang = cfg.domain_rand.max_push_ang_vel
             n = len(push_env_ids)
             self.root_states[push_env_ids, 7:9] = torch_rand_float(-max_vel, max_vel, (n, 2), device=self.device)
-            self.root_states[push_env_ids, 10:13] = torch_rand_float(-max_push_ang, max_push_ang, (n, 3), device=self.device)
+            self.root_states[push_env_ids, 10:13] = torch_rand_float(
+                -max_push_ang, max_push_ang, (n, 3), device=self.device
+            )
 
             env_ids_int32 = push_env_ids.to(dtype=torch.int32)
             self.gym.set_actor_root_state_tensor_indexed(
-                self.sim, gymtorch.unwrap_tensor(self.root_states),
-                gymtorch.unwrap_tensor(env_ids_int32), len(env_ids_int32)
+                self.sim,
+                gymtorch.unwrap_tensor(self.root_states),
+                gymtorch.unwrap_tensor(env_ids_int32),
+                len(env_ids_int32),
             )
 
     def _teleport_robots(self, env_ids, cfg):
@@ -1733,7 +1744,9 @@ class LeggedRobot(BaseTask):
     def _generate_arm_mount_asset_files(self, asset_root, asset_file):
         arm_dr = self.cfg.domain_rand
         source_path = os.path.join(asset_root, asset_file)
-        mount_joint_name = getattr(arm_dr, "mount_joint_name", "zarx5p2_mount") if arm_dr is not None else "zarx5p2_mount"
+        mount_joint_name = (
+            getattr(arm_dr, "mount_joint_name", "zarx5p2_mount") if arm_dr is not None else "zarx5p2_mount"
+        )
 
         def read_source_mount_tf():
             if not asset_file.lower().endswith(".urdf"):
@@ -1810,8 +1823,7 @@ class LeggedRobot(BaseTask):
             axis=1,
         ).astype(np.float32)
         print(
-            f"[RoboDuet] mount position URDF buckets ready: {len(generated_files)} "
-            f"({updated_files} updated)",
+            f"[RoboDuet] mount position URDF buckets ready: {len(generated_files)} ({updated_files} updated)",
             flush=True,
         )
         return generated_files
@@ -1851,7 +1863,10 @@ class LeggedRobot(BaseTask):
         self.robot_assets = []
         print(f"[RoboDuet] loading {len(asset_files)} robot asset bucket(s) from {asset_root}", flush=True)
         for bucket_id, mount_asset_file in enumerate(asset_files):
-            print(f"[RoboDuet] loading robot asset bucket {bucket_id + 1}/{len(asset_files)}: {mount_asset_file}", flush=True)
+            print(
+                f"[RoboDuet] loading robot asset bucket {bucket_id + 1}/{len(asset_files)}: {mount_asset_file}",
+                flush=True,
+            )
             robot_asset = self.gym.load_asset(self.sim, asset_root, mount_asset_file, asset_options)
             if self.gym.get_asset_rigid_shape_count(robot_asset) == 0:
                 raise RuntimeError(f"Failed to load robot asset '{os.path.join(asset_root, mount_asset_file)}'")
@@ -1951,7 +1966,9 @@ class LeggedRobot(BaseTask):
             self.envs.append(env_handle)
             self.actor_handles.append(anymal_handle)
             self.arm_mount_bucket_ids.append(bucket_id)
-            self.arm_mount_tfs[i] = to_torch(self.arm_mount_bucket_tfs[bucket_id], device=self.device, dtype=torch.float)
+            self.arm_mount_tfs[i] = to_torch(
+                self.arm_mount_bucket_tfs[bucket_id], device=self.device, dtype=torch.float
+            )
 
         self.feet_indices = torch.zeros(len(feet_names), dtype=torch.long, device=self.device, requires_grad=False)
         for i in range(len(feet_names)):

@@ -10,8 +10,8 @@ from datetime import datetime
 
 import wandb
 from go1_gym import MINI_GYM_ROOT_DIR
-from go1_gym.envs.roboduet import WBCEnv
 from go1_gym.envs.roboduet.utils import StageSchedule, apply_hybrid_reward_settings
+from go1_gym.envs.roboduet.wbc_env import WBCEnv
 from go1_gym.envs.roboduet.wbc_env_config import RoboDuetCfg as Cfg
 from go1_gym.envs.roboduet.wbc_env_config import configure_task_from_args
 from go1_gym.envs.roboduet.wbc_env_wrapper import HistoryWrapper
@@ -39,7 +39,7 @@ def configure_train_stage(args):
         RunnerArgs.save_video_interval = 10
 
 
-def main(arg):
+def main(args):
 
     if args.debug:
         mode = "disabled"
@@ -47,7 +47,6 @@ def main(arg):
         args.video = True
     else:
         mode = "online"
-
         if args.offline:
             mode = "offline"
 
@@ -60,7 +59,7 @@ def main(arg):
     args.seed = set_seed(args.seed)
     args.tags.append(f"seed{args.seed}")
 
-    configure_task_from_args(Cfg, args, traj_track_reward_scale=5.0)
+    configure_task_from_args(Cfg, args, traj_track_reward_scale=5.0, debug=args.debug)
     Cfg.env.record_video = args.video
     if not Cfg.env.record_video:
         RunnerArgs.log_video = False
@@ -126,44 +125,24 @@ def main(arg):
 
     if not args.debug:
         os.makedirs(osp.join(args.log_dir, "scripts"), exist_ok=True)
-
-        # save code
-        if 1:
-            shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/scripts/auto_train.py", f"{args.log_dir}/scripts/auto_train.py")
-            shutil.copyfile(
-                f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet/legged_robot.py", f"{args.log_dir}/scripts/legged_robot.py"
+        shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/scripts/auto_train.py", f"{args.log_dir}/scripts/auto_train.py")
+        for root, dirs, files in os.walk(f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet"):
+            rel_root = osp.relpath(root, f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet")
+            target_root = (
+                osp.join(args.log_dir, "scripts", rel_root) if rel_root != "." else osp.join(args.log_dir, "scripts")
             )
-            shutil.copyfile(
-                f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet/legged_robot_config.py",
-                f"{args.log_dir}/scripts/legged_robot_config.py",
-            )
-            shutil.copyfile(
-                f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet/wbc_env.py",
-                f"{args.log_dir}/scripts/wbc_env.py",
-            )
-            shutil.copyfile(
-                f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet/trajectory_geometry.py",
-                f"{args.log_dir}/scripts/trajectory_geometry.py",
-            )
-            shutil.copyfile(
-                f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet/wbc_env_config.py",
-                f"{args.log_dir}/scripts/wbc_env_config.py",
-            )
-            shutil.copyfile(
-                f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet/asset_config.py", f"{args.log_dir}/scripts/asset_config.py"
-            )
-            shutil.copyfile(
-                f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/go1/go1_config.py", f"{args.log_dir}/scripts/go1_config.py"
-            )
-            shutil.copyfile(
-                f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/go1/wtw_config.py", f"{args.log_dir}/scripts/wtw_config.py"
-            )
-            shutil.copyfile(
-                f"{MINI_GYM_ROOT_DIR}/go1_gym_learn/ppo_cse_automatic/arm_ac.py", f"{args.log_dir}/scripts/arm_ac.py"
-            )
-            shutil.copyfile(
-                f"{MINI_GYM_ROOT_DIR}/go1_gym_learn/ppo_cse_automatic/dog_ac.py", f"{args.log_dir}/scripts/dog_ac.py"
-            )
+            os.makedirs(target_root, exist_ok=True)
+            for filename in files:
+                if filename.endswith(".py"):
+                    shutil.copyfile(osp.join(root, filename), osp.join(target_root, filename))
+        shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/go1/go1_config.py", f"{args.log_dir}/scripts/go1_config.py")
+        shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/go1/wtw_config.py", f"{args.log_dir}/scripts/wtw_config.py")
+        shutil.copyfile(
+            f"{MINI_GYM_ROOT_DIR}/go1_gym_learn/ppo_cse_automatic/arm_ac.py", f"{args.log_dir}/scripts/arm_ac.py"
+        )
+        shutil.copyfile(
+            f"{MINI_GYM_ROOT_DIR}/go1_gym_learn/ppo_cse_automatic/dog_ac.py", f"{args.log_dir}/scripts/dog_ac.py"
+        )
 
         wandb.run.log_code(f"{args.log_dir}/scripts")
 

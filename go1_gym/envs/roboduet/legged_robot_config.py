@@ -88,6 +88,7 @@ class LeggedRobotCfg(PrefixProto, cli=False):
         difficulty_scale = 1.
         x_init_range = 1.
         y_init_range = 1.
+        z_init_range = 1.
         yaw_init_range = 0.
         roll_init_range = 3.14
         pitch_init_range = 3.14

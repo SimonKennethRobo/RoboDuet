@@ -704,24 +704,28 @@ class WBCEnv(LeggedRobot):
         arm_default = self.default_dof_pos[:, self.num_actions_loco : self.num_actions_loco + self.num_actions_arm]
         self.stage1_arm_fixed_dof_pos = arm_default.expand(self.num_envs, -1).clone()
 
-        # Arm rigid-body domain rand buffers
-        arm_body_names = [n for n in self.body_names if "zarx" in n.lower()]
-        self.arm_body_indices = [self.body_names.index(n) for n in arm_body_names]
-        n_arm_bodies = len(self.arm_body_indices)
-        # Default masses fetched from env 0 actor (available after _create_envs)
-        props0 = self.gym.get_actor_rigid_body_properties(self.envs[0], self.actor_handles[0])
-        self.arm_default_link_masses = torch.tensor(
-            [props0[i].mass for i in self.arm_body_indices],
-            dtype=torch.float,
-            device=self.device,
-        )
-        self.arm_default_link_coms = torch.tensor(
-            [[props0[i].com.x, props0[i].com.y, props0[i].com.z] for i in self.arm_body_indices],
-            dtype=torch.float,
-            device=self.device,
-        )
-        self.arm_link_mass_scales = torch.ones(self.num_envs, n_arm_bodies, dtype=torch.float, device=self.device)
-        self.arm_link_com_offsets = torch.zeros(self.num_envs, n_arm_bodies, 3, dtype=torch.float, device=self.device)
+        # Arm rigid-body domain rand buffers are initialized while actor body props
+        # are processed in _create_envs(), so per-env link mass/COM randomization is
+        # applied before the sim starts and is not rewritten during episode reset.
+        if not hasattr(self, "arm_link_mass_scales"):
+            arm_body_names = [n for n in self.body_names if "zarx" in n.lower()]
+            self.arm_body_indices = [self.body_names.index(n) for n in arm_body_names]
+            n_arm_bodies = len(self.arm_body_indices)
+            props0 = self.gym.get_actor_rigid_body_properties(self.envs[0], self.actor_handles[0])
+            self.arm_default_link_masses = torch.tensor(
+                [props0[i].mass for i in self.arm_body_indices],
+                dtype=torch.float,
+                device=self.device,
+            )
+            self.arm_default_link_coms = torch.tensor(
+                [[props0[i].com.x, props0[i].com.y, props0[i].com.z] for i in self.arm_body_indices],
+                dtype=torch.float,
+                device=self.device,
+            )
+            self.arm_link_mass_scales = torch.ones(self.num_envs, n_arm_bodies, dtype=torch.float, device=self.device)
+            self.arm_link_com_offsets = torch.zeros(
+                self.num_envs, n_arm_bodies, 3, dtype=torch.float, device=self.device
+            )
 
         # Deferred resample: set at episode reset, cleared after first post-simulate step.
         # Avoids using stale FK state (set_dof_state_tensor_indexed does not propagate FK
@@ -802,45 +806,78 @@ class WBCEnv(LeggedRobot):
             )
         self.traj_episode_success_buf[env_ids] = False
 
+    def _ensure_arm_rigid_body_rand_buffers(self, props):
+        if hasattr(self, "arm_link_mass_scales"):
+            return
+        arm_body_names = [n for n in self.body_names if "zarx" in n.lower()]
+        self.arm_body_indices = [self.body_names.index(n) for n in arm_body_names]
+        n_arm = len(self.arm_body_indices)
+        self.arm_default_link_masses = torch.tensor(
+            [props[i].mass for i in self.arm_body_indices],
+            dtype=torch.float,
+            device=self.device,
+        )
+        self.arm_default_link_coms = torch.tensor(
+            [[props[i].com.x, props[i].com.y, props[i].com.z] for i in self.arm_body_indices],
+            dtype=torch.float,
+            device=self.device,
+        )
+        self.arm_link_mass_scales = torch.ones(self.num_envs, n_arm, dtype=torch.float, device=self.device)
+        self.arm_link_com_offsets = torch.zeros(self.num_envs, n_arm, 3, dtype=torch.float, device=self.device)
+
+    def _sample_arm_rigid_body_props(self, env_id):
+        if not self.arm_body_indices:
+            return
+        arm_dr = self.cfg.domain_rand.stage1_arm if not global_switch.switch_open else self.cfg.domain_rand.stage2_arm
+        n_arm = len(self.arm_body_indices)
+        if arm_dr.randomize_link_mass:
+            lo, hi = arm_dr.link_mass_range
+            self.arm_link_mass_scales[env_id] = torch.rand(n_arm, device=self.device) * (hi - lo) + lo
+        if arm_dr.randomize_link_com:
+            r = arm_dr.link_com_range
+            self.arm_link_com_offsets[env_id] = torch.rand(n_arm, 3, device=self.device) * 2 * r - r
+
+    def _process_rigid_body_props(self, props, env_id):
+        props = super()._process_rigid_body_props(props, env_id)
+        self._ensure_arm_rigid_body_rand_buffers(props)
+        self._sample_arm_rigid_body_props(env_id)
+
+        for k, body_idx in enumerate(self.arm_body_indices):
+            props[body_idx].mass = self.arm_default_link_masses[k].item() * self.arm_link_mass_scales[env_id, k].item()
+            com = self.arm_default_link_coms[k] + self.arm_link_com_offsets[env_id, k]
+            props[body_idx].com = gymapi.Vec3(com[0].item(), com[1].item(), com[2].item())
+        return props
+
+    def _arm_post_dof_reset_hook(self, env_ids):
+        if len(env_ids) == 0:
+            return
+
+        # Add additive noise to arm joint positions before the single reset-time
+        # set_dof_state_tensor_indexed() call in _reset_dofs().  Issuing a second
+        # DOF write after root reset can desynchronise IsaacGym's articulation cache.
+        noise = getattr(self.cfg.env, "stage1_arm_init_dof_pos_noise", 0.0)
+        if noise <= 0.0:
+            return
+
+        arm_slice = slice(self.num_actions_loco, self.num_actions_loco + self.num_actions_arm)
+        self.dof_pos[env_ids, arm_slice] += torch_rand_float(
+            -noise,
+            noise,
+            (len(env_ids), self.num_actions_arm),
+            device=self.device,
+        )
+        self.dof_pos[env_ids] = torch.clamp(
+            self.dof_pos[env_ids],
+            self.dof_pos_limits[:, 0],
+            self.dof_pos_limits[:, 1],
+        )
+
     def _arm_post_reset_refresh_hook(self, env_ids):
         if len(env_ids) == 0:
             return
 
-        # ---- Arm DOF domain rand (Kp/Kd/strength/offset) ----
-        # Must override the arm slice AFTER _randomize_dof_props has set leg-wide values.
-        self._randomize_arm_dof_props(env_ids)
-        # ---- Arm rigid-body domain rand (link mass / COM) ----
-        self._randomize_arm_rigid_body_props(env_ids)
-
-        # Add additive noise to arm joint positions at reset.
-        # Arm default angles are 0, so the multiplicative noise in _reset_dofs has no effect;
-        # we apply ±noise [rad] here instead.
-        noise = getattr(self.cfg.env, "stage1_arm_init_dof_pos_noise", 0.0)
-        if noise > 0.0:
-            arm_slice = slice(self.num_actions_loco, self.num_actions_loco + self.num_actions_arm)
-            self.dof_pos[env_ids, arm_slice] += torch_rand_float(
-                -noise,
-                noise,
-                (len(env_ids), self.num_actions_arm),
-                device=self.device,
-            )
-            # Clamp to DOF limits to avoid out-of-range positions
-            self.dof_pos[env_ids] = torch.clamp(
-                self.dof_pos[env_ids],
-                self.dof_pos_limits[:, 0],
-                self.dof_pos_limits[:, 1],
-            )
-            env_ids_int32 = env_ids.to(dtype=torch.int32)
-            self.gym.set_dof_state_tensor_indexed(
-                self.sim,
-                gymtorch.unwrap_tensor(self.dof_state),
-                gymtorch.unwrap_tensor(env_ids_int32),
-                len(env_ids_int32),
-            )
-
-        # Unified initial arm state: record the randomized position and initialise the
-        # curriculum offset so both fix (intensity=0) and disturbance (intensity>0) phases
-        # start from the same randomised joint configuration.
+        # Bookkeeping only.  Do not write DOF/root/rigid-body state here; reset root
+        # pose must remain the final sim-state write for GUI and PhysX consistency.
         arm_slice = slice(self.num_actions_loco, self.num_actions_loco + self.num_actions_arm)
         self.stage1_arm_fixed_dof_pos[env_ids] = self.dof_pos[env_ids, arm_slice].clone()
 
@@ -887,36 +924,8 @@ class WBCEnv(LeggedRobot):
         self._randomize_arm_dof_props(env_ids)
 
     def _randomize_arm_rigid_body_props(self, env_ids):
-        """Randomize arm link masses and COM offsets; push to the physics engine."""
-        arm_dr = self.cfg.domain_rand.stage1_arm if not global_switch.switch_open else self.cfg.domain_rand.stage2_arm
-        if not self.arm_body_indices:
-            return
-        if not arm_dr.randomize_link_mass and not arm_dr.randomize_link_com:
-            return
-
-        n = len(env_ids)
-        n_arm = len(self.arm_body_indices)
-
-        if arm_dr.randomize_link_mass:
-            lo, hi = arm_dr.link_mass_range
-            self.arm_link_mass_scales[env_ids] = torch.rand(n, n_arm, device=self.device) * (hi - lo) + lo
-        if arm_dr.randomize_link_com:
-            r = arm_dr.link_com_range
-            self.arm_link_com_offsets[env_ids] = torch.rand(n, n_arm, 3, device=self.device) * 2 * r - r
-
-        for env_id in env_ids.tolist():
-            props = self.gym.get_actor_rigid_body_properties(self.envs[env_id], self.actor_handles[env_id])
-            for k, body_idx in enumerate(self.arm_body_indices):
-                if arm_dr.randomize_link_mass:
-                    props[body_idx].mass = (
-                        self.arm_default_link_masses[k].item() * self.arm_link_mass_scales[env_id, k].item()
-                    )
-                if arm_dr.randomize_link_com:
-                    com = self.arm_default_link_coms[k] + self.arm_link_com_offsets[env_id, k]
-                    props[body_idx].com = gymapi.Vec3(com[0].item(), com[1].item(), com[2].item())
-            self.gym.set_actor_rigid_body_properties(
-                self.envs[env_id], self.actor_handles[env_id], props, recomputeInertia=True
-            )
+        """Deprecated: arm link mass/COM DR is applied per-env during actor creation."""
+        return
 
     def _arm_resample_commands_train_hook(self, env_ids):
         if self.cfg.arm.trajectory.enabled and global_switch.switch_open:

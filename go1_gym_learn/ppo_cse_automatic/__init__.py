@@ -15,8 +15,8 @@ from params_proto import PrefixProto
 
 import wandb
 from go1_gym import MINI_GYM_ROOT_DIR
-from go1_gym.envs.roboduet.wbc_env_wrapper import HistoryWrapper
 from go1_gym.envs.roboduet.utils import apply_hybrid_reward_settings
+from go1_gym.envs.roboduet.wbc_env_wrapper import HistoryWrapper
 from go1_gym.utils import global_switch
 
 from .arm_ac import ArmActorCritic

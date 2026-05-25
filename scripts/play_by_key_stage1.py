@@ -1,17 +1,19 @@
+import argparse
 import time
+
 import isaacgym
 import torch
 from isaacgym.torch_utils import *
+
 from go1_gym.envs import *
-from go1_gym.envs.roboduet import KeyboardStage1Wrapper
 from go1_gym.envs.roboduet.wbc_env_config import configure_privileged_obs_dims
-from scripts.load_policy import load_dog_policy, load_arm_policy, load_env
-import argparse
+from go1_gym.envs.roboduet.wbc_env_wrapper import KeyboardStage1Wrapper
+from scripts.load_policy import load_arm_policy, load_dog_policy, load_env
 
 x_vel_cmd, y_vel_cmd, yaw_vel_cmd = 0.0, 0.0, 0.0
 l_cmd, p_cmd, y_cmd = 0.5, 0.2, 0.0
 roll_cmd, pitch_cmd, yaw_cmd = 0.0, 0.0, 0.0
-lock_arm = True
+lock_arm = False
 # dog body pose
 body_pitch_cmd = 0.0
 body_roll_cmd = 0.0
@@ -19,13 +21,25 @@ body_height_delta_cmd = 0.0
 # gait params (only used when use_dynamic_gait=True)
 gait_freq_cmd = 4.0
 footswing_height_cmd = 0.3
-stance_width_cmd = 0.2
-stance_length_cmd = 0.2
+stance_width_cmd = 0.3
+stance_length_cmd = 0.45
 gait_duration_cmd = 0.5
 
 
 def main(args):
-    global x_vel_cmd, y_vel_cmd, yaw_vel_cmd, l_cmd, p_cmd, y_cmd, roll_cmd, pitch_cmd, yaw_cmd, logdir, ckpt_id, lock_arm
+    global \
+        x_vel_cmd, \
+        y_vel_cmd, \
+        yaw_vel_cmd, \
+        l_cmd, \
+        p_cmd, \
+        y_cmd, \
+        roll_cmd, \
+        pitch_cmd, \
+        yaw_cmd, \
+        logdir, \
+        ckpt_id, \
+        lock_arm
 
     logdir = args.logdir
     lock_arm = bool(getattr(args, "lock_arm", False))
@@ -47,8 +61,13 @@ def main(args):
     else:
         global_switch.open_switch()
 
-    env, cfg = load_env(logdir, wrapper=KeyboardStage1Wrapper, headless=args.headless, device=args.sim_device,
-                        robot=getattr(args, "robot", None))
+    env, cfg = load_env(
+        logdir,
+        wrapper=KeyboardStage1Wrapper,
+        headless=args.headless,
+        device=args.sim_device,
+        robot=getattr(args, "robot", None),
+    )
     dog_policy = load_dog_policy(logdir, ckpt_id, cfg)
     arm_policy = None if stage1_only else load_arm_policy(logdir, ckpt_id, cfg)
     if stage1_only and getattr(args, "disable_stage1_arm_curriculum", False):
@@ -76,18 +95,16 @@ def main(args):
         env.commands_dog[:, 4] = body_roll_cmd
     if n_cmd > 5:
         env.commands_dog[:, 5] = body_height_delta_cmd
-    use_dg = getattr(getattr(cfg, "commands", None), "use_dynamic_gait", False)
-    if use_dg:
-        if n_cmd > 6:
-            env.commands_dog[:, 6] = gait_freq_cmd
-        if n_cmd > 7:
-            env.commands_dog[:, 7] = footswing_height_cmd
-        if n_cmd > 8:
-            env.commands_dog[:, 8] = stance_width_cmd
-        if n_cmd > 9:
-            env.commands_dog[:, 9] = stance_length_cmd
-        if n_cmd > 10:
-            env.commands_dog[:, 10] = gait_duration_cmd
+    if n_cmd > 6:
+        env.commands_dog[:, 6] = gait_freq_cmd
+    if n_cmd > 7:
+        env.commands_dog[:, 7] = footswing_height_cmd
+    if n_cmd > 8:
+        env.commands_dog[:, 8] = stance_width_cmd
+    if n_cmd > 9:
+        env.commands_dog[:, 9] = stance_length_cmd
+    if n_cmd > 10:
+        env.commands_dog[:, 10] = gait_duration_cmd
 
     env.commands_arm[:, 0] = l_cmd
     env.commands_arm[:, 1] = p_cmd
@@ -117,35 +134,35 @@ def main(args):
             env.step(actions_dog, actions_arm[..., :-2].to(env.env.device))
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="RoboDuet — keyboard inference")
-    parser.add_argument('--headless', action='store_true', default=False)
-    parser.add_argument('--sim_device', type=str, default="cuda:0")
-    parser.add_argument('--logdir', type=str, required=True)
-    parser.add_argument('--ckptid', type=str, default="last")
-    parser.add_argument('--robot', type=str, default="go2", choices=["go1", "go2"])
-    parser.add_argument('--num_eval_steps', type=int, default=30000)
+    parser.add_argument("--headless", action="store_true", default=False)
+    parser.add_argument("--sim_device", type=str, default="cuda:0")
+    parser.add_argument("--logdir", type=str, required=True)
+    parser.add_argument("--ckptid", type=str, default="last")
+    parser.add_argument("--robot", type=str, default="go2", choices=["go1", "go2"])
+    parser.add_argument("--num_eval_steps", type=int, default=30000)
     parser.add_argument(
-        '--stage1_arm_intensity',
+        "--stage1_arm_intensity",
         type=float,
-        default=0.3,
+        default=1,
         help="Stage1 arm disturbance curriculum intensity for play, in [0, 1].",
     )
     parser.add_argument(
-        '--stage1_arm_ramp_iterations',
+        "--stage1_arm_ramp_iterations",
         type=int,
         default=1,
         help="Synthetic ramp length used to realize --stage1_arm_intensity during play.",
     )
     parser.add_argument(
-        '--disable_stage1_arm_curriculum',
-        action='store_true',
+        "--disable_stage1_arm_curriculum",
+        action="store_true",
         default=False,
         help="Keep the arm fixed instead of applying stage1 arm disturbance during stage1-only play.",
     )
     parser.add_argument(
-        '--lock_arm',
-        action='store_true',
+        "--lock_arm",
+        action="store_true",
         default=False,
         help="Send zero arm actions every step (hold arm at default position), ignoring any loaded arm policy.",
     )
