@@ -67,6 +67,8 @@ benchmark/profiles/smoke.json
 
 smoke profile 刻意保持较小规模，用来快速验证 candidate 加载、核心 scenario 和 metric 输出是否正常。完整 benchmark 后续应放到 nightly/full profile 中。
 
+Profile 中的 `seed` 是 benchmark 评估 seed，只用于控制评估时的随机采样和环境 reset。它独立于训练 seed，不要求和 candidate checkpoint 的训练 seed 一致。
+
 默认输出目录是：
 
 ```text

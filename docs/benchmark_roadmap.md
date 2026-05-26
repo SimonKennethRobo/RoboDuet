@@ -10,6 +10,7 @@
 - 运行足够高效，充分利用 IsaacGym 的多 env 并行能力。
 - 输出结果直观，能快速比较不同实验、不同 checkpoint、不同 scenario 的性能差异。
 - benchmark 本身可维护，scenario、candidate checkpoint、report、runner 之间职责清晰。
+- benchmark seed 独立于训练 seed，用于保证评估采样和环境 reset 尽可能可复现。
 - 未来可以接入服务器上的 CI/CD 或 Jenkins，作为持续回归测试和 candidate promotion 流程的一部分。
 
 ## 当前实现概览

@@ -42,10 +42,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 import isaacgym  # noqa: F401 – must precede torch
+import numpy as np
+import torch
 
 from benchmark.dog_policy.evaluation import (
     CommandLayout,
@@ -436,6 +439,7 @@ def _apply_profile(args):
         "robot",
         "num_envs_per_policy",
         "num_eval_steps",
+        "seed",
         "arm_intensity",
         "output_dir",
     ]
@@ -502,6 +506,7 @@ def parse_args(argv: Optional[List[str]] = None):
         help="Envs per policy. Total envs = num_envs_per_policy × N_policies.",
     )
     p.add_argument("--num_eval_steps", type=int, default=100, help="Sim steps per scenario point (per env)")
+    p.add_argument("--seed", type=int, default=1, help="Benchmark RNG seed, independent from training seed")
     p.add_argument("--arm_intensity", type=float, default=1.0, help="Arm disturbance for scenarios A/C/D")
     p.add_argument("--output_dir", type=str, default="benchmark/results")
     p.add_argument("--skip_a", action="store_true")
@@ -513,6 +518,14 @@ def parse_args(argv: Optional[List[str]] = None):
     _apply_profile(args)
     _apply_candidate_dir(args)
     return args
+
+
+def set_benchmark_seed(seed: int, device: str):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if str(device).startswith("cuda") and torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 def main(argv: Optional[List[str]] = None):
@@ -535,6 +548,8 @@ def main(argv: Optional[List[str]] = None):
     total_envs = num_envs_per_policy * n_runs
 
     print(f"[Benchmark] {n_runs} policies × {num_envs_per_policy} envs = {total_envs} total envs")
+    print(f"[Benchmark] Seed = {args.seed}")
+    set_benchmark_seed(args.seed, args.sim_device)
     validate_shared_env_compatibility(args.logdirs[0], args.logdirs[1:])
     print(f"[Benchmark] Creating shared env from {args.logdirs[0]}")
 
@@ -608,6 +623,7 @@ def main(argv: Optional[List[str]] = None):
         "num_envs_per_policy": args.num_envs_per_policy,
         "total_envs": total_envs,
         "num_eval_steps": args.num_eval_steps,
+        "seed": args.seed,
         "control_dt_s": getattr(env.env, "dt", "unknown"),
         "headless": args.headless,
         "dog_num_commands": getattr(cfg.dog, "dog_num_commands", "unknown"),

@@ -4,6 +4,7 @@
   "robot": "go2",
   "num_envs_per_policy": 8,
   "num_eval_steps": 100,
+  "seed": 1,
   "arm_intensity": 1.0,
   "output_dir": "benchmark/results",
   "scenarios": ["vel_grid", "arm_sweep"]
