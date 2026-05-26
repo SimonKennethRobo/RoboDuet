@@ -36,6 +36,17 @@ def _load_results(path: Path) -> Dict[str, Dict[str, List[dict]]]:
         return json.load(f)
 
 
+def _load_metadata(results_path: Path) -> Dict[str, Any]:
+    path = results_path.with_name("metadata.json")
+    if not path.is_file():
+        return {}
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
 def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value))
 
@@ -116,13 +127,15 @@ def _rank_class(rows: List[dict], metric: str, direction: str, run_name: str) ->
     return ""
 
 
-def _table(headers: List[str], rows: List[List[Tuple[str, str]]]) -> str:
-    head = "".join(f"<th>{escape(label)}</th>" for label in headers)
+def _table(headers: List[str], rows: List[List[Tuple[str, str]]], sortable: bool = True) -> str:
+    th_attr = ' data-sortable="1"' if sortable else ""
+    head = "".join(f"<th{th_attr}>{escape(label)}</th>" for label in headers)
     body = []
     for row in rows:
         cells = "".join(f'<td class="{klass}">{value}</td>' for value, klass in row)
         body.append(f"<tr>{cells}</tr>")
-    return f"<table><thead><tr>{head}</tr></thead><tbody>{''.join(body)}</tbody></table>"
+    table_class = ' class="sortable"' if sortable else ""
+    return f"<table{table_class}><thead><tr>{head}</tr></thead><tbody>{''.join(body)}</tbody></table>"
 
 
 def _summary_table(rows: List[dict]) -> str:
@@ -189,17 +202,54 @@ def _velocity_grid(results: Dict[str, Dict[str, List[dict]]]) -> str:
 
 def _candidate_cards(results: Dict[str, Dict[str, List[dict]]]) -> str:
     cards = []
+    summary_lookup = {row["run_name"]: row for row in _summary_rows(results)}
     for run_name, scenarios in results.items():
         points = sum(len(rows) for rows in scenarios.values())
         scenario_text = ", ".join(SCENARIO_TITLES.get(name, name) for name in sorted(scenarios))
+        summary = summary_lookup.get(run_name, {})
         cards.append(
             '<div class="card">'
             f"<h3>{escape(run_name)}</h3>"
             f"<p>{escape(scenario_text)}</p>"
+            '<div class="card-stats">'
             f'<div class="stat"><span>{points}</span><label>points</label></div>'
+            f'<div class="stat"><span>{_fmt(summary.get("lin_vel_x_rmse"))}</span><label>vx RMSE</label></div>'
+            f'<div class="stat"><span>{_fmt(summary.get("ang_vel_yaw_rmse"))}</span><label>yaw RMSE</label></div>'
+            f'<div class="stat"><span>{_fmt(summary.get("fall_rate"))}</span><label>fall rate</label></div>'
+            "</div>"
             "</div>"
         )
     return "".join(cards)
+
+
+def _metadata_panel(metadata: Dict[str, Any]) -> str:
+    if not metadata:
+        return ""
+    keys = [
+        "benchmark_mode",
+        "profile",
+        "candidate_dir",
+        "generated_at",
+        "git_commit",
+        "seed",
+        "num_envs_per_policy",
+        "total_envs",
+        "num_eval_steps",
+        "ckptids",
+        "logdirs",
+        "control_dt_s",
+    ]
+    rows = []
+    for key in keys:
+        if key not in metadata:
+            continue
+        value = metadata[key]
+        if isinstance(value, list):
+            value = ", ".join(str(item) for item in value)
+        rows.append(f"<tr><th>{escape(key)}</th><td>{escape(str(value))}</td></tr>")
+    if not rows:
+        return ""
+    return '<section class="panel metadata-panel" id="metadata"><h2>Metadata</h2><table><tbody>' + "".join(rows) + "</tbody></table></section>"
 
 
 def _rel_link(target: Path, base_dir: Path) -> str:
@@ -248,18 +298,33 @@ def _plot_gallery(source: Path, output_path: Path) -> str:
             f"<figcaption>{escape(title)}</figcaption>"
             "</figure>"
         )
-    return '<section class="panel"><h2>Plots</h2><div class="plot-grid">' + "".join(figures) + "</div></section>"
+    return '<section class="panel" id="plots"><h2>Plots</h2><div class="plot-grid">' + "".join(figures) + "</div></section>"
+
+
+def _quick_nav(scenarios: List[str], has_plots: bool, has_metadata: bool) -> str:
+    links = [('<a href="#summary">Summary</a>')]
+    if has_metadata:
+        links.append('<a href="#metadata">Metadata</a>')
+    for scenario in scenarios:
+        links.append(f'<a href="#scenario-{escape(scenario)}">{escape(SCENARIO_TITLES.get(scenario, scenario))}</a>')
+    if "vel_grid" in scenarios:
+        links.append('<a href="#velocity-grid">Velocity Detail</a>')
+    if has_plots:
+        links.append('<a href="#plots">Plots</a>')
+    return '<div class="quick-nav">' + "".join(links) + "</div>"
 
 
 def _render_html(results: Dict[str, Dict[str, List[dict]]], source: Path, output_path: Path) -> str:
     scenarios = _scenario_names(results)
     summary = _summary_rows(results)
+    metadata = _load_metadata(source)
+    has_plots = source.with_name("plots").is_dir() and any(source.with_name("plots").glob("*.png"))
     generated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     scenario_sections = []
     for scenario in scenarios:
         title = SCENARIO_TITLES.get(scenario, scenario)
         scenario_sections.append(
-            f'<section class="panel"><h2>{escape(title)}</h2>{_scenario_table(results, scenario)}</section>'
+            f'<section class="panel" id="scenario-{escape(scenario)}"><h2>{escape(title)}</h2>{_scenario_table(results, scenario)}</section>'
         )
 
     return f"""<!doctype html>
@@ -309,6 +374,27 @@ def _render_html(results: Dict[str, Dict[str, List[dict]]], source: Path, output
       background: #fbfcfe;
     }}
     nav a:hover, footer a:hover {{ text-decoration: underline; }}
+    .quick-nav {{
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding: 10px 32px;
+      background: rgba(246,247,249,0.94);
+      border-bottom: 1px solid var(--border);
+      backdrop-filter: blur(8px);
+    }}
+    .quick-nav a {{
+      color: var(--accent);
+      text-decoration: none;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 5px 9px;
+      background: #ffffff;
+      font-weight: 650;
+    }}
     main {{ padding: 24px 32px 40px; max-width: 1440px; margin: 0 auto; }}
     .cards {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; margin-bottom: 18px; }}
     .card, .panel {{
@@ -318,14 +404,20 @@ def _render_html(results: Dict[str, Dict[str, List[dict]]], source: Path, output
     }}
     .card {{ padding: 16px; }}
     .card h3 {{ margin-top: 0; }}
-    .card p {{ min-height: 36px; color: var(--muted); }}
-    .stat span {{ font-size: 28px; font-weight: 700; color: var(--accent); }}
+    .card p {{ color: var(--muted); }}
+    .card-stats {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }}
+    .stat span {{ font-size: 22px; font-weight: 700; color: var(--accent); }}
     .stat label {{ display: block; color: var(--muted); }}
     .panel {{ padding: 18px; margin-bottom: 18px; overflow-x: auto; }}
     table {{ width: 100%; border-collapse: collapse; min-width: 780px; }}
     th, td {{ padding: 9px 10px; border-bottom: 1px solid var(--border); text-align: right; white-space: nowrap; }}
     th:first-child, td:first-child {{ text-align: left; }}
     th {{ color: var(--muted); font-weight: 600; background: #fbfcfe; }}
+    th[data-sortable="1"] {{ cursor: pointer; user-select: none; }}
+    th[data-sortable="1"]::after {{ content: " ↕"; color: #98a2b3; font-weight: 400; }}
+    .metadata-panel table {{ min-width: 0; }}
+    .metadata-panel th {{ width: 220px; text-align: left; }}
+    .metadata-panel td {{ text-align: left; white-space: normal; word-break: break-word; }}
     td.best {{ background: var(--best); color: #047857; font-weight: 650; }}
     td.worst {{ background: var(--worst); color: #b42318; }}
     td.metric-cell span {{ display: block; margin: -9px -10px; padding: 9px 10px; }}
@@ -410,11 +502,13 @@ def _render_html(results: Dict[str, Dict[str, List[dict]]], source: Path, output
     </div>
     <nav>{_artifact_nav(source, output_path)}</nav>
   </header>
+  {_quick_nav(scenarios, has_plots, bool(metadata))}
   <main>
     <section class="cards">{_candidate_cards(results)}</section>
-    <section class="panel"><h2>Summary</h2>{_summary_table(summary)}</section>
+    <section class="panel" id="summary"><h2>Summary</h2>{_summary_table(summary)}</section>
+    {_metadata_panel(metadata)}
     {''.join(scenario_sections)}
-    {_velocity_grid(results)}
+    <div id="velocity-grid">{_velocity_grid(results)}</div>
     {_plot_gallery(source, output_path)}
   </main>
   <div class="lightbox" id="plot-lightbox" aria-hidden="true">
@@ -432,6 +526,29 @@ def _render_html(results: Dict[str, Dict[str, List[dict]]], source: Path, output
   <footer>Green cells mark best values within the current table; red cells mark worst values.</footer>
   <script>
     (() => {{
+      document.querySelectorAll("table.sortable").forEach((table) => {{
+        const headers = Array.from(table.querySelectorAll("th"));
+        headers.forEach((header, colIndex) => {{
+          header.addEventListener("click", () => {{
+            const tbody = table.tBodies[0];
+            const rows = Array.from(tbody.rows);
+            const direction = header.dataset.direction === "asc" ? "desc" : "asc";
+            headers.forEach((item) => delete item.dataset.direction);
+            header.dataset.direction = direction;
+            rows.sort((a, b) => {{
+              const av = a.cells[colIndex]?.textContent.trim() || "";
+              const bv = b.cells[colIndex]?.textContent.trim() || "";
+              const an = Number(av);
+              const bn = Number(bv);
+              const bothNumeric = Number.isFinite(an) && Number.isFinite(bn);
+              const cmp = bothNumeric ? an - bn : av.localeCompare(bv);
+              return direction === "asc" ? cmp : -cmp;
+            }});
+            rows.forEach((row) => tbody.appendChild(row));
+          }});
+        }});
+      }});
+
       const links = Array.from(document.querySelectorAll(".plot-link"));
       const lightbox = document.getElementById("plot-lightbox");
       const image = document.getElementById("lightbox-image");
@@ -603,6 +720,12 @@ def _write_report(results_path: Path, output_path: Path):
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(html, encoding="utf-8")
     print(f"[Benchmark] HTML report saved -> {output_path}")
+
+
+def write_report_bundle(results_path: str):
+    path = Path(results_path)
+    _write_report(path, path.with_name("report.html"))
+    _write_index(path)
 
 
 def parse_args(argv: Optional[List[str]] = None):

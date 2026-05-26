@@ -98,6 +98,16 @@ python -m benchmark.reports.html \
 
 默认输出到同目录下的 `report.html`。第一版 HTML report 只读取已有结果文件，不改变 benchmark 计算逻辑。
 
+通过 `python -m benchmark.cli --dog_only ...` 正常跑 benchmark 时，会自动生成：
+
+```text
+results.json
+metadata.json
+report.md
+report.html
+plots/
+```
+
 HTML report 会嵌入同目录下的 `plots/*.png`，并自动更新结果根目录的索引页：
 
 ```text

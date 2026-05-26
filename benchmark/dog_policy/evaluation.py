@@ -996,3 +996,10 @@ def save_results(all_results: Dict[str, Dict[str, List[ScenarioResult]]], output
     with open(output_path, "w") as f:
         json.dump(data, f, indent=2)
     print(f"\n[Benchmark] Results saved → {output_path}")
+
+
+def save_metadata(metadata: Dict[str, object], output_path: str):
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(metadata, f, indent=2, default=str)
+    print(f"[Benchmark] Metadata saved → {output_path}")

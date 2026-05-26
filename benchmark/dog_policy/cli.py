@@ -40,9 +40,11 @@ Stage-2 hook: ``--stage2`` is reserved (not yet implemented).
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import os
 import random
+import subprocess
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
@@ -62,6 +64,7 @@ from benchmark.dog_policy.evaluation import (
     load_env_benchmark,
     print_comparison_table,
     save_markdown_report,
+    save_metadata,
     save_results,
     save_visualizations,
     set_gait_cmd,
@@ -560,6 +563,13 @@ def set_benchmark_seed(seed: int, device: str):
         torch.cuda.manual_seed_all(seed)
 
 
+def _git_commit() -> str:
+    try:
+        return subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], text=True).strip()
+    except Exception:
+        return "unknown"
+
+
 def main(argv: Optional[List[str]] = None):
     args = parse_args(argv)
 
@@ -639,20 +649,23 @@ def main(argv: Optional[List[str]] = None):
 
     print_comparison_table(all_results)
 
-    import datetime
-
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = os.path.join(args.output_dir, timestamp)
     os.makedirs(run_dir, exist_ok=True)
 
     json_path = os.path.join(run_dir, "results.json")
+    metadata_path = os.path.join(run_dir, "metadata.json")
     markdown_path = os.path.join(run_dir, "report.md")
     plots_dir = os.path.join(run_dir, "plots")
     metadata = {
         "candidate_dir": args.candidate_dir or "cli",
         "benchmark_mode": "dog_only",
         "profile": args.profile or "cli",
-        "runs": ", ".join(names),
+        "generated_at": datetime.datetime.now().isoformat(timespec="seconds"),
+        "git_commit": _git_commit(),
+        "runs": names,
+        "logdirs": args.logdirs,
+        "ckptids": ckptids,
         "num_envs_per_policy": args.num_envs_per_policy,
         "total_envs": total_envs,
         "num_eval_steps": args.num_eval_steps,
@@ -664,8 +677,15 @@ def main(argv: Optional[List[str]] = None):
         "scenario_d_enabled": layout.has_dynamic_gait and not args.skip_d,
     }
     save_results(all_results, json_path)
+    save_metadata(metadata, metadata_path)
     save_visualizations(all_results, plots_dir)
     save_markdown_report(all_results, markdown_path, metadata=metadata, plot_dir=plots_dir)
+    try:
+        from benchmark.reports.html import write_report_bundle
+
+        write_report_bundle(json_path)
+    except Exception as exc:
+        print(f"[Benchmark] Skipping HTML report: {exc}")
     print(f"[Benchmark] Output directory → {run_dir}")
 
 
