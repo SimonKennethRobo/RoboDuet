@@ -122,7 +122,9 @@ benchmark/candidates/<date>/<run_name>/
 ```text
 benchmark/results/<timestamp>/
   results.json
+  metadata.json
   report.md
+  report.html
   plots/
     *.png
 ```
@@ -131,10 +133,13 @@ benchmark/results/<timestamp>/
 
 - terminal comparison table
 - 结构化 `results.json`
+- 结构化 `metadata.json`，记录 seed、profile、candidate path、ckpt id、env count、git commit 等运行上下文
 - markdown report
 - matplotlib 静态图片
+- 单文件 HTML report，包含 summary cards、metadata panel、可排序 metric table、velocity-grid detail、plot gallery 和 plot lightbox
+- `benchmark/results/index.html`，用于在本地静态 server 中浏览不同 result
 
-这些结果已经可追踪，但对多 checkpoint、多 scenario、多 metric 的交互式比较还不够友好。
+这些结果已经覆盖 dog-only benchmark 的日常使用。当前主要缺口是跨 result 的交互式对比，例如两个不同 benchmark run 之间的 side-by-side summary、delta table 和 regression verdict。
 
 ## 当前优点
 
@@ -206,18 +211,22 @@ scenario grid 和 metric selection 都写在 Python 文件里。这样导致：
 
 ### 3. 输出不够适合快速比较
 
-当前 markdown report 在一个 checkpoint 时还能阅读；多个 checkpoint、多 scenario、多 metric 后会变得很宽。
+当前 HTML report 已经可以覆盖单次 result 的浏览和检查。单个 result 内可以查看 summary、metadata、scenario table、velocity detail、plots，并支持表格排序和 plot lightbox。
 
-当前 matplotlib plot 是静态图片，无法做到：
+目前更明显的不足是跨 result 对比。也就是说，如果要比较两个历史 benchmark run，目前仍需要人工打开多个页面或手工对比 JSON。下一步更合适的是增加 compare report：
 
-- 按 metric 排序。
-- 切换 candidate。
-- hover 查看具体数值。
-- 一键只看 fall cases。
-- 一键查看某个 checkpoint 相对 baseline 的 regression。
-- 多 scenario 汇总成一个综合排名。
+```bash
+python -m benchmark.reports.html \
+  --compare benchmark/results/A/results.json benchmark/results/B/results.json
+```
 
-更合适的输出是一个单文件或静态资源目录形式的 HTML dashboard。
+compare report 应该提供：
+
+- 不同 result 的 metadata 对齐。
+- candidate / scenario / metric summary 对齐。
+- baseline vs candidate 的 delta table。
+- 关键 metric bar chart。
+- regression verdict。
 
 ### 4. 缺少综合评分和 regression 判断
 
@@ -374,11 +383,13 @@ python -m benchmark.cli \
 
 ```text
 benchmark/results/<timestamp>/
-  index.html
   results.json
+  metadata.json
   report.md
-  assets/
-    plots...
+  report.html
+  plots/
+    *.png
+benchmark/results/index.html
 ```
 
 HTML dashboard 应该包含：
@@ -558,10 +569,12 @@ Full benchmark 不应该阻塞所有开发 PR，但可以作为模型相关 PR �
 
 ### Phase 2: HTML Report
 
-- 基于现有 `results.json` 生成 `index.html`。
+- 基于现有 `results.json` 和 `metadata.json` 生成 `report.html`。
+- 自动更新 `benchmark/results/index.html`。
 - 先实现静态 HTML，不引入复杂服务。
-- 支持 summary、scenario tabs、metric table、baseline diff。
-- markdown 和 PNG plot 可以继续保留，但 HTML 成为主要查看入口。
+- 支持 summary cards、metadata panel、scenario metric table、velocity detail、plot gallery、plot lightbox。
+- markdown 和 PNG plot 继续保留，但 HTML 成为主要查看入口。
+- 跨 result compare report 后续单独实现。
 
 ### Phase 3: Benchmark 代码结构整理
 

@@ -2,7 +2,7 @@
 
 这个目录存放 benchmark 运行配置和长期保留的 candidate checkpoints。
 
-## Candidate Runs
+## Candidate Checkpoints
 
 Candidate 使用 run-like logdir 结构。目录名可以来自训练 run 名，但 benchmark mode 不使用 `stage1` 这类训练阶段语义：
 
@@ -46,6 +46,19 @@ python -m benchmark.cli \
   --candidate_dir benchmark/candidates \
   --profile benchmark/profiles/smoke.json \
   --sim_device cuda:0
+```
+
+常用 smoke 验证命令：
+
+```bash
+python -m benchmark.cli \
+  --dog_only \
+  --candidate_dir benchmark/candidates \
+  --profile benchmark/profiles/smoke.json \
+  --sim_device cuda:0 \
+  --num_eval_steps 20 \
+  --seed 7 \
+  --skip_b
 ```
 
 旧入口 `python scripts/benchmark_policy.py ...` 仍然保留为兼容 wrapper。
@@ -101,11 +114,12 @@ python -m benchmark.reports.html \
 通过 `python -m benchmark.cli --dog_only ...` 正常跑 benchmark 时，会自动生成：
 
 ```text
-results.json
-metadata.json
-report.md
-report.html
-plots/
+benchmark/results/<timestamp>/
+  results.json
+  metadata.json
+  report.md
+  report.html
+  plots/
 ```
 
 HTML report 会嵌入同目录下的 `plots/*.png`，并自动更新结果根目录的索引页：
@@ -126,3 +140,13 @@ http://127.0.0.1:8765/index.html
 python -m benchmark.reports.html \
   --results_root benchmark/results
 ```
+
+HTML report 当前包含：
+
+- summary cards: points、vx RMSE、yaw RMSE、fall rate
+- metadata panel: seed、profile、candidate path、ckpt id、env count、git commit 等
+- scenario metric tables: 支持点击表头排序
+- velocity-grid detail table: 带 metric heatmap
+- plot gallery: 直接嵌入 matplotlib plots
+- plot lightbox: 点击图片后可放大、关闭、上一张/下一张切换
+- results index: `benchmark/results/index.html` 可跳转不同 result
