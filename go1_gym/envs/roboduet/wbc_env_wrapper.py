@@ -8,6 +8,7 @@ import torch
 from isaacgym import gymapi
 
 from go1_gym.envs.roboduet.wbc_env import WBCEnv, dog_cmd_idx
+from go1_gym.envs.roboduet.utils import get_play_command_limit
 from go1_gym.envs.roboduet.wbc_env_config import Cfg
 from go1_gym.utils.global_switch import global_switch
 
@@ -370,11 +371,18 @@ class KeyboardStage1Wrapper(WBCEnv):
     def _n_cmd(self):
         return self.commands_dog.shape[1]
 
+    def _dog_limit(self, command_key, fallback):
+        return get_play_command_limit(self.cfg, "dog", command_key, fallback)
+
     def _add_dog(self, idx, delta, lo, hi):
         if idx >= self._n_cmd():
             return
         val = float(self.commands_dog[0, idx]) + delta
         self.commands_dog[:, idx] = max(lo, min(hi, val))
+
+    def _add_dog_cmd(self, command_key, delta, fallback):
+        lo, hi = self._dog_limit(command_key, fallback)
+        self._add_dog(dog_cmd_idx[command_key], delta, lo, hi)
 
     def _print_state(self):
         print(self.format_dog_commands(), flush=True)
@@ -429,41 +437,41 @@ class KeyboardStage1Wrapper(WBCEnv):
 
                 # key-down handlers
                 elif evt.action == "dog_vx_up":
-                    self._add_dog(dog_cmd_idx["x_vel"], self._VEL_STEP, -1.5, 1.5)
+                    self._add_dog_cmd("x_vel", self._VEL_STEP, (-1.5, 1.5))
                 elif evt.action == "dog_vx_down":
-                    self._add_dog(dog_cmd_idx["x_vel"], -self._VEL_STEP, -1.5, 1.5)
+                    self._add_dog_cmd("x_vel", -self._VEL_STEP, (-1.5, 1.5))
                 elif evt.action == "dog_vy_up":
-                    self._add_dog(dog_cmd_idx["y_vel"], self._VEL_STEP, -0.5, 0.5)
+                    self._add_dog_cmd("y_vel", self._VEL_STEP, (-0.5, 0.5))
                 elif evt.action == "dog_vy_down":
-                    self._add_dog(dog_cmd_idx["y_vel"], -self._VEL_STEP, -0.5, 0.5)
+                    self._add_dog_cmd("y_vel", -self._VEL_STEP, (-0.5, 0.5))
                 elif evt.action == "dog_yaw_up":
-                    self._add_dog(dog_cmd_idx["yaw_vel"], self._VEL_STEP, -1.5, 1.5)
+                    self._add_dog_cmd("yaw_vel", self._VEL_STEP, (-1.5, 1.5))
                 elif evt.action == "dog_yaw_down":
-                    self._add_dog(dog_cmd_idx["yaw_vel"], -self._VEL_STEP, -1.5, 1.5)
+                    self._add_dog_cmd("yaw_vel", -self._VEL_STEP, (-1.5, 1.5))
                 elif evt.action == "dog_roll_up":
-                    self._add_dog(dog_cmd_idx["body_roll"], self._POSE_STEP, -0.4, 0.4)
+                    self._add_dog_cmd("body_roll", self._POSE_STEP, (-0.4, 0.4))
                 elif evt.action == "dog_roll_down":
-                    self._add_dog(dog_cmd_idx["body_roll"], -self._POSE_STEP, -0.4, 0.4)
+                    self._add_dog_cmd("body_roll", -self._POSE_STEP, (-0.4, 0.4))
                 elif evt.action == "dog_pitch_up":
-                    self._add_dog(dog_cmd_idx["body_pitch"], self._POSE_STEP, -0.4, 0.4)
+                    self._add_dog_cmd("body_pitch", self._POSE_STEP, (-0.4, 0.4))
                 elif evt.action == "dog_pitch_down":
-                    self._add_dog(dog_cmd_idx["body_pitch"], -self._POSE_STEP, -0.4, 0.4)
+                    self._add_dog_cmd("body_pitch", -self._POSE_STEP, (-0.4, 0.4))
                 elif evt.action == "dog_height_up":
-                    self._add_dog(dog_cmd_idx["body_height"], self._HEIGHT_STEP, -0.2, 0.2)
+                    self._add_dog_cmd("body_height", self._HEIGHT_STEP, (-0.2, 0.2))
                 elif evt.action == "dog_height_down":
-                    self._add_dog(dog_cmd_idx["body_height"], -self._HEIGHT_STEP, -0.2, 0.2)
+                    self._add_dog_cmd("body_height", -self._HEIGHT_STEP, (-0.2, 0.2))
                 elif evt.action == "dog_freq_up":
-                    self._add_dog(dog_cmd_idx["gait_frequency"], self._GAIT_FREQ_STEP, 1.0, 4.0)
+                    self._add_dog_cmd("gait_frequency", self._GAIT_FREQ_STEP, (1.0, 4.0))
                 elif evt.action == "dog_freq_down":
-                    self._add_dog(dog_cmd_idx["gait_frequency"], -self._GAIT_FREQ_STEP, 1.0, 4.0)
+                    self._add_dog_cmd("gait_frequency", -self._GAIT_FREQ_STEP, (1.0, 4.0))
                 elif evt.action == "dog_sw_up":
-                    self._add_dog(dog_cmd_idx["stance_width"], self._STANCE_STEP, 0.2, 0.5)
+                    self._add_dog_cmd("stance_width", self._STANCE_STEP, (0.2, 0.5))
                 elif evt.action == "dog_sw_down":
-                    self._add_dog(dog_cmd_idx["stance_width"], -self._STANCE_STEP, 0.2, 0.5)
+                    self._add_dog_cmd("stance_width", -self._STANCE_STEP, (0.2, 0.5))
                 elif evt.action == "dog_sl_up":
-                    self._add_dog(dog_cmd_idx["stance_length"], self._STANCE_STEP, 0.25, 0.45)
+                    self._add_dog_cmd("stance_length", self._STANCE_STEP, (0.25, 0.45))
                 elif evt.action == "dog_sl_down":
-                    self._add_dog(dog_cmd_idx["stance_length"], -self._STANCE_STEP, 0.25, 0.45)
+                    self._add_dog_cmd("stance_length", -self._STANCE_STEP, (0.25, 0.45))
                 elif evt.action == "dog_vel_zero":
                     self.commands_dog[:, dog_cmd_idx["velocity"]] = 0.0
                     self.commands_dog[:, dog_cmd_idx["body_pose"]] = 0.0

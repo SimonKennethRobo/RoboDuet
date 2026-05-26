@@ -11,6 +11,7 @@ from go1_gym.envs import *  # noqa: F403
 from go1_gym.envs.roboduet.wbc_env import WBCEnv
 from go1_gym.envs.roboduet.wbc_env_config import configure_privileged_obs_dims
 from go1_gym.utils.viz import add_rerun_args, make_rerun_logger
+from go1_gym.envs.roboduet.utils import get_play_command_limits
 from scripts.load_policy import load_arm_policy, load_dog_policy, load_env
 
 COMMAND_KEYS = {
@@ -171,6 +172,17 @@ TRIGGER_DELTA_CONFIG = {
     "threshold": 0.1,
 }
 DPAD_THRESHOLD = 0.5
+
+
+def apply_checkpoint_command_limits(cfg):
+    limits = get_play_command_limits(cfg)
+    for mapping in JOYSTICK_COMMAND_MAP.values():
+        command = mapping.get("command", {})
+        target = command.get("target")
+        cmd_key = command.get("cmd_key")
+        limit = limits.get(target, {}).get(cmd_key)
+        if limit is not None:
+            mapping["clamp"] = limit
 
 
 @dataclass
@@ -497,13 +509,14 @@ def main(args):
     dog_cmd = DogInitCmd()
     arm_cmd = ArmInitCmd()
 
-    config_path = os.path.join(os.path.dirname(joylink_client.__file__), "../../config/loco_ctrl.yaml")
-    joy_ctrl = JoystickController(config_path, dog_cmd, arm_cmd)
-    joy_ctrl.print_command_mapping()
-
     env, cfg = load_env(
         logdir, wrapper=WBCEnv, headless=False, device=args.sim_device, robot=getattr(args, "robot", None)
     )
+    apply_checkpoint_command_limits(cfg)
+
+    config_path = os.path.join(os.path.dirname(joylink_client.__file__), "../../config/loco_ctrl.yaml")
+    joy_ctrl = JoystickController(config_path, dog_cmd, arm_cmd)
+    joy_ctrl.print_command_mapping()
     dog_policy = load_dog_policy(logdir, ckpt_id, cfg)
     arm_policy = None if stage1_only else load_arm_policy(logdir, ckpt_id, cfg)
     if stage1_only:

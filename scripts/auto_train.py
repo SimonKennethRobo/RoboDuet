@@ -25,6 +25,39 @@ from go1_gym_learn.ppo_cse_automatic.ppo import PPO_Args
 os.environ["WANDB_SILENT"] = "true"
 
 
+def _serializable_config_value(value):
+    if isinstance(value, tuple):
+        return [_serializable_config_value(item) for item in value]
+    if isinstance(value, list):
+        return [_serializable_config_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _serializable_config_value(item) for key, item in value.items()}
+    return value
+
+
+def _public_config_dict(obj):
+    if isinstance(obj, dict):
+        items = obj.items()
+    else:
+        items = ((key, getattr(obj, key)) for key in dir(obj) if not key.startswith("_"))
+    result = {}
+    for key, value in items:
+        if callable(value):
+            continue
+        result[key] = _serializable_config_value(value)
+    return result
+
+
+def _cfg_snapshot_with_command_limits(cfg):
+    snapshot = dict(vars(cfg))
+    commands = _public_config_dict(getattr(cfg, "commands"))
+    for key in dir(cfg.commands):
+        if key.startswith("limit_"):
+            commands[key] = _serializable_config_value(getattr(cfg.commands, key))
+    snapshot["commands"] = commands
+    return snapshot
+
+
 def configure_train_stage(args):
     schedule = StageSchedule(
         args.train_stage,
@@ -147,7 +180,7 @@ def main(args):
         wandb.run.log_code(f"{args.log_dir}/scripts")
 
         temp_dict = {
-            "Cfg": vars(Cfg),
+            "Cfg": _cfg_snapshot_with_command_limits(Cfg),
             "RunnerArgs": vars(RunnerArgs),
             "ArmAC_Args": vars(ArmAC_Args),
             "DogAC_Args": vars(DogAC_Args),

@@ -174,6 +174,54 @@ Reusable Rerun telemetry lives in `go1_gym/utils/viz.py`.
 - Default torque logging is the first 12 joints. Use `--rerun_torque_joints` to change this and `--rerun_joint_state` to also log joint positions/velocities.
 - `--rerun_window_seconds` controls the visible sliding time window where the installed Rerun blueprint API supports `VisibleTimeRange`; old Rerun versions may require manual viewer configuration.
 
+## Reset Curriculum
+
+`LeggedRobot._init_reset_curriculum()` / `_update_reset_curriculum()` / `_get_reset_curriculum_range()` implement a curriculum that scales reset randomization ranges (z, yaw, pitch, roll) from a small initial fraction up to the full configured value, gated on locomotion tracking success.
+
+### Key parameters (`cfg.terrain`)
+
+| Parameter                              | Default                     | Meaning                                                                                             |
+| -------------------------------------- | --------------------------- | --------------------------------------------------------------------------------------------------- |
+| `reset_curriculum`                   | `False` (`True` in WBC) | Enable/disable the curriculum                                                                       |
+| `reset_curriculum_initial_fraction`  | `0.0`                     | Starting intensity as fraction of max range.`0.0` means fully flat reset until curriculum starts  |
+| `reset_curriculum_reward_threshold`  | `0.5`                     | Per-env success criterion: episode avg tracking reward must exceed `threshold × reward_scale`    |
+| `reset_curriculum_start_threshold`   | `0.5`                     | EMA of batch success must reach this before intensity begins growing                                |
+| `reset_curriculum_success_ema_alpha` | `0.05`                    | EMA smoothing factor for success rate                                                               |
+| `reset_curriculum_growth_iterations` | `5000`                    | Iterations (by `global_switch.count`) to linearly grow intensity from `initial_fraction` to 1.0 |
+
+### Intensity formula
+
+```
+# Before curriculum starts:
+intensity = initial_fraction
+
+# After curriculum starts (elapsed = global_switch.count - start_iteration):
+progress = min(1.0, elapsed / growth_iterations)
+intensity = initial_fraction + (1 - initial_fraction) * progress
+```
+
+### Two-level threshold design
+
+`reset_curriculum_reward_threshold` and `reset_curriculum_start_threshold` operate at different levels:
+
+- `reward_threshold`: classifies a **single env's episode** as success or failure by comparing per-step avg tracking reward to `threshold × reward_scale`.
+- `start_threshold`: gates **curriculum activation** by comparing the long-running EMA of batch success rates to this value.
+
+### Logged metrics (misleading names)
+
+- `reset_curriculum_lin_progress` = **instantaneous** batch success rate (combined lin+ang, not lin-only).
+- `reset_curriculum_ang_progress` = **EMA** of batch success rate (combined lin+ang, not ang-only).
+
+Both are derived from the same joint `tracking_lin_vel & tracking_ang_vel` success, just at different timescales. The names do not mean lin and ang are tracked independently.
+
+### EMA update frequency coupling
+
+`_update_reset_curriculum` is called once per `_resample_commands` call (i.e., once per reset batch). EMA update frequency scales with termination rate, which depends on episode length. The growth timer (`global_switch.count`) is iteration-based. In runs with short episodes, the EMA warms up faster relative to the iteration clock, so the curriculum may activate earlier than intended.
+
+### `wbc_env_config.py` sets `reset_curriculum = True` with `initial_fraction = 0.0`
+
+This means all WBC training runs start with **zero orientation randomization** (all resets are flat). Restoring from a checkpoint trained without this curriculum will experience a sudden change in reset distribution.
+
 ## Reward and Curriculum Notes
 
 Reward scale signs matter.
@@ -186,6 +234,17 @@ Reward scale signs matter.
 ## Debug Checklist
 
 Related skills: isaac-skill
+
+conda env for this project is: isaacgym. Agent can use:
+
+```
+source /opt/miniconda3/etc/profile.d/conda.sh
+conda activate isaacgym
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+export PYTHONPATH=$PYTHONPATH:/home/simon/Projects/WBC/RoboDuet
+```
+
+to activate the env and debug.
 
 When reset height/orientation looks wrong:
 
