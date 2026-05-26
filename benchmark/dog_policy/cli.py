@@ -478,6 +478,38 @@ def _discover_candidate_logdirs(candidate_dir: str) -> List[Path]:
     return logdirs
 
 
+def _dog_checkpoint_path(logdir: Path, ckpt_id: str) -> Path:
+    ckpt_id_ = "last_dog" if ckpt_id == "last" else ckpt_id.zfill(6)
+    return logdir / "checkpoints_dog" / f"ac_weights_{ckpt_id_}.pt"
+
+
+def _validate_dog_logdir(logdir: str, ckpt_id: str):
+    path = Path(logdir)
+    missing = []
+    for rel in ("parameters.pkl", "params.txt", "checkpoints_dog"):
+        candidate = path / rel
+        if rel == "checkpoints_dog":
+            exists = candidate.is_dir()
+        else:
+            exists = candidate.is_file()
+        if not exists:
+            missing.append(rel)
+
+    ckpt_path = _dog_checkpoint_path(path, ckpt_id)
+    if not ckpt_path.is_file():
+        missing.append(str(ckpt_path.relative_to(path)))
+
+    if missing:
+        raise ValueError(
+            f"{logdir}: invalid dog-policy benchmark candidate; missing " + ", ".join(missing)
+        )
+
+
+def _validate_dog_logdirs(logdirs: List[str], ckptids: List[str]):
+    for logdir, ckpt_id in zip(logdirs, ckptids):
+        _validate_dog_logdir(logdir, ckpt_id)
+
+
 def _apply_candidate_dir(args):
     if not args.candidate_dir:
         if not args.logdirs:
@@ -543,6 +575,7 @@ def main(argv: Optional[List[str]] = None):
     while len(ckptids_raw) < n_runs:
         ckptids_raw.append("last")
     ckptids = [("last" if c == "last" else c.zfill(6)) for c in ckptids_raw]
+    _validate_dog_logdirs(args.logdirs, ckptids)
 
     num_envs_per_policy = args.num_envs_per_policy
     total_envs = num_envs_per_policy * n_runs

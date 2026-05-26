@@ -11,6 +11,7 @@
 - 输出结果直观，能快速比较不同实验、不同 checkpoint、不同 scenario 的性能差异。
 - benchmark 本身可维护，scenario、candidate checkpoint、report、runner 之间职责清晰。
 - benchmark seed 独立于训练 seed，用于保证评估采样和环境 reset 尽可能可复现。
+- candidate 使用 run-like logdir 结构保存，benchmark mode 按 dog-only、arm-only、hybrid 命名，不沿用训练阶段名。
 - 未来可以接入服务器上的 CI/CD 或 Jenkins，作为持续回归测试和 candidate promotion 流程的一部分。
 
 ## 当前实现概览
@@ -56,6 +57,20 @@ RoboDuet 的训练流程会分阶段：先训练 dog policy，再训练 arm poli
 - dog 固定、只比较 arm
 - arm 固定、只比较 dog
 - dog 和 arm 同时变化的 hybrid candidate
+
+当前 `benchmark/candidates/` 中的 candidate 采用和训练输出相同的 run-like logdir 结构：
+
+```text
+benchmark/candidates/<date>/<run_name>/
+  parameters.pkl
+  params.txt
+  checkpoints_dog/ac_weights_*.pt
+  checkpoints_arm/ac_weights_*.pt  # 未来 hybrid/arm-only 使用
+```
+
+目录名里的 `stage1` 只表示原始训练 run 名，不表示 benchmark mode。benchmark mode 应该使用 dog-only、arm-only、hybrid。
+
+同一次 dog-only shared simulation 只能比较 dog policy layout 兼容的 candidate。旧 checkpoint 和新 checkpoint 可以分别跑 benchmark，但如果 observation/action/history/adaptation 相关维度不同，就应该放到不同 benchmark group 中，不能混跑。
 
 ## 当前 Scenario
 

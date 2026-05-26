@@ -1,10 +1,10 @@
 # Benchmark Configs
 
-这个目录存放 benchmark 运行配置和长期保留的 candidate runs。
+这个目录存放 benchmark 运行配置和长期保留的 candidate checkpoints。
 
 ## Candidate Runs
 
-Candidate 使用和 `runs/<date>/<run_name>` 相同的目录结构：
+Candidate 使用 run-like logdir 结构。目录名可以来自训练 run 名，但 benchmark mode 不使用 `stage1` 这类训练阶段语义：
 
 ```text
 benchmark/candidates/
@@ -18,7 +18,7 @@ benchmark/candidates/
         ac_weights_last_arm.pt
 ```
 
-加入 candidate 的推荐方式是把需要保留的 run 复制到 `benchmark/candidates/<date>/<run_name>`。该目录下有局部 `.gitignore`，默认忽略复制进来的无关训练产物，只 track benchmark 需要的最小文件集：
+加入 candidate 的推荐方式是把需要保留的 run-like 目录复制到 `benchmark/candidates/<date>/<run_name>`。该目录下有局部 `.gitignore`，默认忽略复制进来的无关训练产物，只 track benchmark 需要的最小文件集：
 
 - `parameters.pkl`
 - `params.txt`
@@ -27,6 +27,14 @@ benchmark/candidates/
 - 可选 `README.md` / `candidate.json`
 
 不要使用 symlink 指向 `runs/`。`runs/` 已被仓库全局 ignore，symlink 不能可靠表达需要长期保留的 candidate 内容。
+
+当前启动前会检查每个 dog-only candidate 至少包含：
+
+- `parameters.pkl`
+- `params.txt`
+- `checkpoints_dog/ac_weights_<ckptid>.pt`
+
+其中 `--ckptids last` 对应 `checkpoints_dog/ac_weights_last_dog.pt`。
 
 ## Run Dog-Only Benchmark
 
@@ -56,6 +64,8 @@ python -m benchmark.cli \
 当前 dog-only benchmark 会把所有 candidate 放进同一个 IsaacGym simulation 里并行运行。因此，所有被扫描到的 active candidates 必须共享相同的 observation/action/command layout。
 
 如果两个 checkpoint 在关键配置上不同，例如 dog observation 维度、arm command 维度或 `use_rot6d`，它们就不能同时参与同一个 shared benchmark run。短期做法是把不兼容 candidate 放到不同 candidate root，分别运行；长期可以实现自动兼容性分组。
+
+例如历史 `runs/...` 里的 dog policy 可能是 `adapt=on`、`obs=83`，而当前 `benchmark/candidates/...` 中的新结构是 `adapt=off`、`obs=86`。这两类 checkpoint 都可以单独 benchmark，但不能混在同一次多 policy shared simulation 中比较。
 
 ## Profiles
 

@@ -155,7 +155,9 @@ def load_dog_policy_for_benchmark(
     if mismatches:
         raise ValueError(
             f"{logdir}: checkpoint dog policy obs/action dimensions are incompatible with the shared env "
-            "(use_adaptation_module differences are allowed). " + "; ".join(mismatches)
+            "(use_adaptation_module differences are allowed when obs/action dimensions match). "
+            "Run candidates with different dog policy layouts in separate benchmark groups. "
+            + "; ".join(mismatches)
         )
 
     actor_critic = DogActorCritic(
