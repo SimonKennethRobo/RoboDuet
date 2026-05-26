@@ -80,6 +80,43 @@ python -m benchmark.cli \
 
 例如历史 `runs/...` 里的 dog policy 可能是 `adapt=on`、`obs=83`，而当前 `benchmark/candidates/...` 中的新结构是 `adapt=off`、`obs=86`。这两类 checkpoint 都可以单独 benchmark，但不能混在同一次多 policy shared simulation 中比较。
 
+## Inspect Policy Bundles
+
+如果拿到一个旧 run 或未知 checkpoint，可以先做轻量检查，不创建 IsaacGym env：
+
+```bash
+python -m benchmark.cli \
+  --inspect \
+  --logdirs /path/to/run_like_logdir \
+  --ckptid last
+```
+
+也可以扫描整个 candidate root：
+
+```bash
+python -m benchmark.cli \
+  --inspect \
+  --candidate_dir benchmark/candidates
+```
+
+inspect 会读取 `parameters.pkl`、`checkpoints_dog/` 和 `checkpoints_arm/`，输出 dog/arm 的 observation、history、privileged obs、action、command、adaptation module 和 checkpoint shape。它用于回答“这个 policy bundle 内部结构是否自洽”，以及“它属于哪一代 policy layout”。它不会保证该 policy 能在当前 env 中直接执行；真正执行仍然需要通过 dog-only、arm-only 或 hybrid benchmark 的 shared-env compatibility check。
+
+例如旧版 RoboDuet policy 可能显示：
+
+```text
+dog:
+  cfg: obs=56 hist=1680 priv=2 actions=12 commands=5 adapt=True
+  ckpt: adaptation_module=True adaptation_input=1680 actor_input=1682 critic_input=1682 actions=12
+  internal check: ok
+arm:
+  cfg: obs=20 hist=600 priv=9 actions=8 commands=6 adapt=False
+  ckpt: adaptation_module=True adaptation_input=600 history_encoder_input=580 actor_input=157 critic_input=157 actions=8
+  internal check: mismatch
+    - arm adaptation flag cfg=False checkpoint=True
+```
+
+这类结果说明 checkpoint 本身可能来自旧版 policy layout，不能直接假设和当前 loader 或当前 env layout 兼容。
+
 ## Profiles
 
 默认 smoke profile:
