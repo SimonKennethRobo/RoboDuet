@@ -86,3 +86,14 @@ benchmark/results/<timestamp>/
 ```
 
 该目录用于本地查看 benchmark 结果，已在仓库 `.gitignore` 中忽略。
+
+## HTML Report
+
+可以从任意已有 `results.json` 生成一个独立 HTML report：
+
+```bash
+python -m benchmark.reports.html \
+  --results benchmark/results/<timestamp>/results.json
+```
+
+默认输出到同目录下的 `report.html`。第一版 HTML report 只读取已有结果文件，不改变 benchmark 计算逻辑。
