@@ -86,9 +86,15 @@ def config_wtw(Cnfg: Any):
     Cnfg.terrain.x_init_range = 0.2
     Cnfg.terrain.y_init_range = 0.2
     Cnfg.terrain.z_init_range = 0.5
-    Cnfg.terrain.roll_init_range = 1.57
-    Cnfg.terrain.pitch_init_range = 1.57
-    Cnfg.terrain.yaw_init_range = 1.57
+    Cnfg.terrain.yaw_init_range = 3.14
+    Cnfg.terrain.roll_init_range = 3.14
+    Cnfg.terrain.pitch_init_range = 3.14
+    Cnfg.terrain.reset_curriculum = True
+    Cnfg.terrain.reset_curriculum_initial_fraction = 0.1
+    Cnfg.terrain.reset_curriculum_start_threshold = 0.7
+    Cnfg.terrain.reset_curriculum_reward_threshold = 0.7
+    Cnfg.terrain.reset_curriculum_success_ema_alpha = 0.05
+    Cnfg.terrain.reset_curriculum_growth_iterations = 5000
     Cnfg.terrain.teleport_thresh = 0.3
     Cnfg.terrain.teleport_robots = False
     Cnfg.terrain.center_robots = True
@@ -179,7 +185,6 @@ def config_wtw(Cnfg: Any):
 
     Cnfg.normalization.friction_range = [0, 1]
     Cnfg.normalization.ground_friction_range = [0, 1]
-    Cnfg.terrain.yaw_init_range = 3.14
     Cnfg.normalization.clip_actions = 10.0
 
     Cnfg.commands.exclusive_phase_offset = False
