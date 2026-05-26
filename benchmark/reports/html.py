@@ -239,10 +239,11 @@ def _plot_gallery(source: Path, output_path: Path) -> str:
     figures = []
     for image in images:
         title = image.stem.replace("_", " ")
+        src = _rel_link(image, base_dir)
         figures.append(
             "<figure>"
-            f'<a href="{_rel_link(image, base_dir)}">'
-            f'<img src="{_rel_link(image, base_dir)}" alt="{escape(title)}">'
+            f'<a href="{src}" class="plot-link" data-title="{escape(title)}">'
+            f'<img src="{src}" alt="{escape(title)}">'
             "</a>"
             f"<figcaption>{escape(title)}</figcaption>"
             "</figure>"
@@ -341,7 +342,60 @@ def _render_html(results: Dict[str, Dict[str, List[dict]]], source: Path, output
       background: #ffffff;
     }}
     figure img {{ display: block; width: 100%; height: auto; }}
+    .plot-link {{ display: block; cursor: zoom-in; }}
     figcaption {{ padding: 9px 10px; color: var(--muted); border-top: 1px solid var(--border); }}
+    .lightbox {{
+      position: fixed;
+      inset: 0;
+      z-index: 1000;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      background: rgba(17, 24, 39, 0.88);
+      padding: 28px;
+    }}
+    .lightbox.open {{ display: flex; }}
+    .lightbox-inner {{
+      position: relative;
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      gap: 10px;
+      width: min(1120px, 96vw);
+      height: min(820px, 94vh);
+    }}
+    .lightbox-title {{ color: #ffffff; font-weight: 650; }}
+    .lightbox img {{
+      align-self: center;
+      justify-self: center;
+      max-width: 100%;
+      max-height: 100%;
+      object-fit: contain;
+      background: #ffffff;
+      border-radius: 8px;
+    }}
+    .lightbox-controls {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }}
+    .lightbox button {{
+      border: 1px solid rgba(255,255,255,0.28);
+      border-radius: 6px;
+      background: rgba(255,255,255,0.12);
+      color: #ffffff;
+      font: inherit;
+      font-weight: 650;
+      padding: 8px 12px;
+      cursor: pointer;
+    }}
+    .lightbox button:hover {{ background: rgba(255,255,255,0.22); }}
+    .lightbox-close {{
+      position: absolute;
+      top: 0;
+      right: 0;
+    }}
+    .lightbox-count {{ color: rgba(255,255,255,0.78); }}
     footer {{ color: var(--muted); padding: 0 32px 30px; max-width: 1440px; margin: 0 auto; }}
   </style>
 </head>
@@ -363,7 +417,80 @@ def _render_html(results: Dict[str, Dict[str, List[dict]]], source: Path, output
     {_velocity_grid(results)}
     {_plot_gallery(source, output_path)}
   </main>
+  <div class="lightbox" id="plot-lightbox" aria-hidden="true">
+    <div class="lightbox-inner">
+      <button class="lightbox-close" type="button" data-lightbox-close>Close</button>
+      <div class="lightbox-title" id="lightbox-title"></div>
+      <img id="lightbox-image" src="" alt="">
+      <div class="lightbox-controls">
+        <button type="button" data-lightbox-prev>Previous</button>
+        <span class="lightbox-count" id="lightbox-count"></span>
+        <button type="button" data-lightbox-next>Next</button>
+      </div>
+    </div>
+  </div>
   <footer>Green cells mark best values within the current table; red cells mark worst values.</footer>
+  <script>
+    (() => {{
+      const links = Array.from(document.querySelectorAll(".plot-link"));
+      const lightbox = document.getElementById("plot-lightbox");
+      const image = document.getElementById("lightbox-image");
+      const title = document.getElementById("lightbox-title");
+      const count = document.getElementById("lightbox-count");
+      let index = 0;
+
+      function render() {{
+        const link = links[index];
+        if (!link) return;
+        const label = link.dataset.title || link.querySelector("img")?.alt || "plot";
+        image.src = link.getAttribute("href");
+        image.alt = label;
+        title.textContent = label;
+        count.textContent = `${{index + 1}} / ${{links.length}}`;
+      }}
+
+      function openAt(nextIndex) {{
+        index = nextIndex;
+        render();
+        lightbox.classList.add("open");
+        lightbox.setAttribute("aria-hidden", "false");
+        document.body.style.overflow = "hidden";
+      }}
+
+      function close() {{
+        lightbox.classList.remove("open");
+        lightbox.setAttribute("aria-hidden", "true");
+        image.src = "";
+        document.body.style.overflow = "";
+      }}
+
+      function move(delta) {{
+        if (!links.length) return;
+        index = (index + delta + links.length) % links.length;
+        render();
+      }}
+
+      links.forEach((link, i) => {{
+        link.addEventListener("click", (event) => {{
+          event.preventDefault();
+          openAt(i);
+        }});
+      }});
+
+      document.querySelector("[data-lightbox-close]")?.addEventListener("click", close);
+      document.querySelector("[data-lightbox-prev]")?.addEventListener("click", () => move(-1));
+      document.querySelector("[data-lightbox-next]")?.addEventListener("click", () => move(1));
+      lightbox.addEventListener("click", (event) => {{
+        if (event.target === lightbox) close();
+      }});
+      document.addEventListener("keydown", (event) => {{
+        if (!lightbox.classList.contains("open")) return;
+        if (event.key === "Escape") close();
+        if (event.key === "ArrowLeft") move(-1);
+        if (event.key === "ArrowRight") move(1);
+      }});
+    }})();
+  </script>
 </body>
 </html>
 """
