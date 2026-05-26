@@ -155,7 +155,9 @@ def load_dog_policy_for_benchmark(
     if mismatches:
         raise ValueError(
             f"{logdir}: checkpoint dog policy obs/action dimensions are incompatible with the shared env "
-            "(use_adaptation_module differences are allowed). " + "; ".join(mismatches)
+            "(use_adaptation_module differences are allowed when obs/action dimensions match). "
+            "Run candidates with different dog policy layouts in separate benchmark groups. "
+            + "; ".join(mismatches)
         )
 
     actor_critic = DogActorCritic(
@@ -994,3 +996,10 @@ def save_results(all_results: Dict[str, Dict[str, List[ScenarioResult]]], output
     with open(output_path, "w") as f:
         json.dump(data, f, indent=2)
     print(f"\n[Benchmark] Results saved → {output_path}")
+
+
+def save_metadata(metadata: Dict[str, object], output_path: str):
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(metadata, f, indent=2, default=str)
+    print(f"[Benchmark] Metadata saved → {output_path}")

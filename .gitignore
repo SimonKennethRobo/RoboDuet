@@ -72,6 +72,8 @@ resources/robots/**/urdf/*_mount_bucket_*.urdf
 
 wandb/*
 
+benchmark/results/
+
 */__pycache__/*
 __pycache__
 .pytest_cache
