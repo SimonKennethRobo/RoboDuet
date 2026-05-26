@@ -97,3 +97,22 @@ python -m benchmark.reports.html \
 ```
 
 默认输出到同目录下的 `report.html`。第一版 HTML report 只读取已有结果文件，不改变 benchmark 计算逻辑。
+
+HTML report 会嵌入同目录下的 `plots/*.png`，并自动更新结果根目录的索引页：
+
+```text
+benchmark/results/index.html
+```
+
+如果本地静态 server 服务 `benchmark/results/`，可以从索引页进入不同 result：
+
+```text
+http://127.0.0.1:8765/index.html
+```
+
+也可以为整个结果目录批量生成 HTML：
+
+```bash
+python -m benchmark.reports.html \
+  --results_root benchmark/results
+```

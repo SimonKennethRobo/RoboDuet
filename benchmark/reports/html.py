@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 from datetime import datetime
 from html import escape
 from pathlib import Path
@@ -201,7 +202,55 @@ def _candidate_cards(results: Dict[str, Dict[str, List[dict]]]) -> str:
     return "".join(cards)
 
 
-def _render_html(results: Dict[str, Dict[str, List[dict]]], source: Path) -> str:
+def _rel_link(target: Path, base_dir: Path) -> str:
+    return escape(os.path.relpath(target, base_dir))
+
+
+def _artifact_nav(source: Path, output_path: Path) -> str:
+    base_dir = output_path.parent
+    links = []
+    results_root = _find_results_root(source)
+    index_path = results_root / "index.html"
+    if index_path.exists() or results_root.exists():
+        links.append(("All results", index_path))
+    links.append(("results.json", source))
+    report_md = source.with_name("report.md")
+    if report_md.exists():
+        links.append(("report.md", report_md))
+    plots_dir = source.with_name("plots")
+    if plots_dir.exists():
+        links.append(("plots", plots_dir))
+    return "".join(
+        f'<a href="{_rel_link(target, base_dir)}">{escape(label)}</a>'
+        for label, target in links
+    )
+
+
+def _plot_gallery(source: Path, output_path: Path) -> str:
+    plots_dir = source.with_name("plots")
+    if not plots_dir.is_dir():
+        return ""
+
+    images = sorted(plots_dir.glob("*.png"))
+    if not images:
+        return ""
+
+    base_dir = output_path.parent
+    figures = []
+    for image in images:
+        title = image.stem.replace("_", " ")
+        figures.append(
+            "<figure>"
+            f'<a href="{_rel_link(image, base_dir)}">'
+            f'<img src="{_rel_link(image, base_dir)}" alt="{escape(title)}">'
+            "</a>"
+            f"<figcaption>{escape(title)}</figcaption>"
+            "</figure>"
+        )
+    return '<section class="panel"><h2>Plots</h2><div class="plot-grid">' + "".join(figures) + "</div></section>"
+
+
+def _render_html(results: Dict[str, Dict[str, List[dict]]], source: Path, output_path: Path) -> str:
     scenarios = _scenario_names(results)
     summary = _summary_rows(results)
     generated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -246,6 +295,19 @@ def _render_html(results: Dict[str, Dict[str, List[dict]]], source: Path) -> str
     h2 {{ margin: 0 0 16px; font-size: 18px; }}
     h3 {{ margin: 16px 0 10px; font-size: 15px; }}
     .meta {{ color: var(--muted); display: flex; flex-wrap: wrap; gap: 12px 22px; }}
+    nav {{ display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }}
+    nav a, footer a {{
+      color: var(--accent);
+      text-decoration: none;
+      font-weight: 650;
+    }}
+    nav a {{
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 6px 10px;
+      background: #fbfcfe;
+    }}
+    nav a:hover, footer a:hover {{ text-decoration: underline; }}
     main {{ padding: 24px 32px 40px; max-width: 1440px; margin: 0 auto; }}
     .cards {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; margin-bottom: 18px; }}
     .card, .panel {{
@@ -266,6 +328,20 @@ def _render_html(results: Dict[str, Dict[str, List[dict]]], source: Path) -> str
     td.best {{ background: var(--best); color: #047857; font-weight: 650; }}
     td.worst {{ background: var(--worst); color: #b42318; }}
     td.metric-cell span {{ display: block; margin: -9px -10px; padding: 9px 10px; }}
+    .plot-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 14px;
+    }}
+    figure {{
+      margin: 0;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+      background: #ffffff;
+    }}
+    figure img {{ display: block; width: 100%; height: auto; }}
+    figcaption {{ padding: 9px 10px; color: var(--muted); border-top: 1px solid var(--border); }}
     footer {{ color: var(--muted); padding: 0 32px 30px; max-width: 1440px; margin: 0 auto; }}
   </style>
 </head>
@@ -278,12 +354,14 @@ def _render_html(results: Dict[str, Dict[str, List[dict]]], source: Path) -> str
       <span>candidates: {len(results)}</span>
       <span>scenarios: {len(scenarios)}</span>
     </div>
+    <nav>{_artifact_nav(source, output_path)}</nav>
   </header>
   <main>
     <section class="cards">{_candidate_cards(results)}</section>
     <section class="panel"><h2>Summary</h2>{_summary_table(summary)}</section>
     {''.join(scenario_sections)}
     {_velocity_grid(results)}
+    {_plot_gallery(source, output_path)}
   </main>
   <footer>Green cells mark best values within the current table; red cells mark worst values.</footer>
 </body>
@@ -291,22 +369,155 @@ def _render_html(results: Dict[str, Dict[str, List[dict]]], source: Path) -> str
 """
 
 
+def _find_results_root(path: Path) -> Path:
+    for parent in path.resolve().parents:
+        if parent.name == "results":
+            return parent
+    return path.parent
+
+
+def _read_index_entry(results_path: Path, root: Path) -> Optional[dict]:
+    try:
+        results = _load_results(results_path)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    run_dir = results_path.parent
+    scenarios = _scenario_names(results)
+    points = sum(len(rows) for scenario_map in results.values() for rows in scenario_map.values())
+    candidates = list(results)
+    return {
+        "name": os.path.relpath(run_dir, root),
+        "results": results_path,
+        "report": run_dir / "report.html",
+        "markdown": run_dir / "report.md",
+        "candidates": candidates,
+        "scenarios": scenarios,
+        "points": points,
+    }
+
+
+def _render_index(entries: List[dict], root: Path) -> str:
+    generated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    rows = []
+    for entry in entries:
+        report = entry["report"]
+        report_link = report if report.exists() else entry["results"]
+        markdown = entry["markdown"]
+        artifacts = [
+            f'<a href="{_rel_link(report_link, root)}">open</a>',
+            f'<a href="{_rel_link(entry["results"], root)}">json</a>',
+        ]
+        if markdown.exists():
+            artifacts.append(f'<a href="{_rel_link(markdown, root)}">md</a>')
+        rows.append(
+            "<tr>"
+            f'<td><a href="{_rel_link(report_link, root)}"><strong>{escape(entry["name"])}</strong></a></td>'
+            f"<td>{escape(', '.join(entry['candidates']))}</td>"
+            f"<td>{escape(', '.join(SCENARIO_TITLES.get(s, s) for s in entry['scenarios']))}</td>"
+            f"<td>{entry['points']}</td>"
+            f"<td>{' '.join(artifacts)}</td>"
+            "</tr>"
+        )
+
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RoboDuet Benchmark Results</title>
+  <style>
+    body {{ margin: 0; font: 14px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f6f7f9; color: #1f2933; }}
+    header {{ padding: 28px 32px 18px; background: #fff; border-bottom: 1px solid #d9dee7; }}
+    main {{ padding: 24px 32px 40px; max-width: 1440px; margin: 0 auto; }}
+    h1 {{ margin: 0 0 8px; font-size: 28px; }}
+    .meta {{ color: #667085; }}
+    table {{ width: 100%; border-collapse: collapse; background: #fff; border: 1px solid #d9dee7; border-radius: 8px; overflow: hidden; }}
+    th, td {{ padding: 11px 12px; border-bottom: 1px solid #d9dee7; text-align: left; vertical-align: top; }}
+    th {{ color: #667085; background: #fbfcfe; font-weight: 600; }}
+    a {{ color: #0f766e; text-decoration: none; font-weight: 600; margin-right: 10px; }}
+    a:hover {{ text-decoration: underline; }}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>RoboDuet Benchmark Results</h1>
+    <div class="meta">generated: {escape(generated)} | result sets: {len(entries)}</div>
+  </header>
+  <main>
+    <table>
+      <thead><tr><th>result</th><th>candidates</th><th>scenarios</th><th>points</th><th>artifacts</th></tr></thead>
+      <tbody>{''.join(rows)}</tbody>
+    </table>
+  </main>
+</body>
+</html>
+"""
+
+
+def _write_index_for_root(root: Path):
+    entries = []
+    for path in sorted(root.rglob("results.json"), reverse=True):
+        entry = _read_index_entry(path, root)
+        if entry is not None:
+            entries.append(entry)
+    index_path = root / "index.html"
+    index_path.write_text(_render_index(entries, root), encoding="utf-8")
+    print(f"[Benchmark] Results index saved -> {index_path}")
+
+
+def _write_index(results_path: Path):
+    _write_index_for_root(_find_results_root(results_path))
+
+
+def _write_report(results_path: Path, output_path: Path):
+    results = _load_results(results_path)
+    html = _render_html(results, results_path, output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(html, encoding="utf-8")
+    print(f"[Benchmark] HTML report saved -> {output_path}")
+
+
 def parse_args(argv: Optional[List[str]] = None):
     parser = argparse.ArgumentParser(description="Generate standalone HTML report from benchmark results.json")
-    parser.add_argument("--results", required=True, help="Path to benchmark results.json")
+    parser.add_argument("--results", default=None, help="Path to benchmark results.json")
+    parser.add_argument(
+        "--results_root",
+        default=None,
+        help="Generate report.html for every results.json under this benchmark results root",
+    )
     parser.add_argument("--output", default=None, help="Output HTML path. Defaults to report.html next to results.json")
+    parser.add_argument(
+        "--no_index",
+        action="store_true",
+        help="Do not update the benchmark results index.html next to the results root",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: Optional[List[str]] = None):
     args = parse_args(argv)
+    if args.results_root:
+        root = Path(args.results_root)
+        result_paths = sorted(root.rglob("results.json"))
+        if not result_paths:
+            raise ValueError(f"{root}: no results.json files found")
+        if args.output:
+            raise ValueError("--output cannot be used with --results_root")
+        for results_path in result_paths:
+            _write_report(results_path, results_path.with_name("report.html"))
+        if not args.no_index:
+            _write_index_for_root(root)
+        return
+
+    if not args.results:
+        raise ValueError("Provide either --results or --results_root")
+
     results_path = Path(args.results)
     output_path = Path(args.output) if args.output else results_path.with_name("report.html")
-    results = _load_results(results_path)
-    html = _render_html(results, results_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(html, encoding="utf-8")
-    print(f"[Benchmark] HTML report saved -> {output_path}")
+    _write_report(results_path, output_path)
+    if not args.no_index:
+        _write_index(results_path)
 
 
 if __name__ == "__main__":
