@@ -6,13 +6,14 @@ import numpy as np
 import pytorch3d.transforms as pt3d
 import torch
 from isaacgym import gymapi, gymtorch, gymutil
-from isaacgym.torch_utils import *
+from isaacgym.torch_utils import quat_apply, quat_from_euler_xyz, quat_mul, quat_rotate, to_torch, torch_rand_float
 
 from go1_gym.utils.global_switch import global_switch
 from go1_gym.utils.math_utils import (
     ee_twist_body_6d,
     get_scale_shift,
     pose_world_to_body_9d,
+    quat_conjugate,
     quat_to_angle,
     quat_xyzw_to_rot6d,
 )
@@ -500,6 +501,9 @@ class WBCEnv(LeggedRobot):
     def _get_stage1_arm_curriculum_intensity(self):
         if not self._stage1_arm_curriculum_active():
             return 0.0
+        play_intensity = getattr(self, "stage1_arm_play_intensity", None)
+        if play_intensity is not None:
+            return min(1.0, max(0.0, float(play_intensity)))
         ramp_iters = max(
             1,
             int(getattr(global_switch, "stage1_arm_ramp_iterations", global_switch.pretrained_to_hybrid_start)),

@@ -6,7 +6,15 @@ import sys
 import xml.etree.ElementTree as ET
 
 from isaacgym import gymapi, gymtorch, gymutil
-from isaacgym.torch_utils import *
+from isaacgym.torch_utils import (
+    get_axis_params,
+    quat_apply,
+    quat_from_angle_axis,
+    quat_mul,
+    quat_rotate_inverse,
+    to_torch,
+    torch_rand_float,
+)
 
 assert gymtorch
 
@@ -16,7 +24,7 @@ import torch
 from go1_gym import MINI_GYM_ROOT_DIR
 from go1_gym.envs.base.base_task import BaseTask
 from go1_gym.utils import global_switch, quaternion_to_rpy
-from go1_gym.utils.math_utils import get_scale_shift, quat_apply_yaw, wrap_to_pi
+from go1_gym.utils.math_utils import get_scale_shift, quat_apply_yaw
 from go1_gym.utils.terrain import Terrain
 
 from .wbc_env_config import RoboDuetCfg as Cfg
@@ -52,6 +60,7 @@ class LeggedRobot(BaseTask):
         super().__init__(self.cfg, sim_params, physics_engine, sim_device, headless, self.eval_cfg, graphics_device_id)
 
         self._init_command_distribution(torch.arange(self.num_envs, device=self.device))
+        self._init_reset_curriculum()
         # self.rand_buffers_eval = self._init_custom_buffers__(self.num_eval_envs)
         if not self.headless:
             self.set_camera(self.cfg.viewer.pos, self.cfg.viewer.lookat)
@@ -451,6 +460,27 @@ class LeggedRobot(BaseTask):
                 bin_weights = torch.tensor(curriculum.weights[bins], device=self.device, dtype=torch.float)
                 if bin_weights.numel() > 0:
                     self.extras["train/episode"]["command_curriculum_weight"] = torch.mean(bin_weights)
+            if getattr(self, 'reset_curriculum_enabled', False):
+                self.extras["train/episode"]["reset_curriculum_intensity"] = torch.tensor(
+                    float(self.reset_curriculum_intensity),
+                    device=self.device,
+                )
+                self.extras["train/episode"]["reset_curriculum_lin_progress"] = torch.tensor(
+                    float(self.reset_curriculum_lin_progress),
+                    device=self.device,
+                )
+                self.extras["train/episode"]["reset_curriculum_ang_progress"] = torch.tensor(
+                    float(self.reset_curriculum_ang_progress),
+                    device=self.device,
+                )
+                self.extras["train/episode"]["reset_curriculum_started"] = torch.tensor(
+                    float(self.reset_curriculum_started),
+                    device=self.device,
+                )
+                self.extras["train/episode"]["reset_curriculum_success_ema"] = torch.tensor(
+                    float(self.reset_curriculum_success_ema),
+                    device=self.device,
+                )
 
         # log additional curriculum info
         if self.cfg.terrain.curriculum:
@@ -903,6 +933,73 @@ class LeggedRobot(BaseTask):
 
         return props
 
+    def _init_reset_curriculum(self):
+        self.reset_curriculum_enabled = bool(getattr(self.cfg.terrain, 'reset_curriculum', False))
+        self.reset_curriculum_started = False
+        self.reset_curriculum_start_iteration = -1
+        self.reset_curriculum_intensity = 1.0
+        self.reset_curriculum_lin_progress = 0.0
+        self.reset_curriculum_ang_progress = 0.0
+        self.reset_curriculum_success_ema = 0.0
+        if self.reset_curriculum_enabled:
+            self.reset_curriculum_intensity = float(
+                getattr(self.cfg.terrain, 'reset_curriculum_initial_fraction', 0.0)
+            )
+
+    def _update_reset_curriculum(self, tracking_task_rewards=None, tracking_reward_scales=None):
+        if not getattr(self, 'reset_curriculum_enabled', False):
+            return
+
+        if tracking_task_rewards is None or tracking_reward_scales is None:
+            return
+
+        valid = []
+        reward_threshold = float(getattr(self.cfg.terrain, 'reset_curriculum_reward_threshold', 0.9))
+        for key in ("tracking_lin_vel", "tracking_ang_vel"):
+            reward = tracking_task_rewards.get(key)
+            reward_scale = float(tracking_reward_scales.get(key, 0.0))
+            if reward is None or reward_scale <= 0.0:
+                continue
+            valid.append(reward > (reward_threshold * reward_scale))
+
+        if len(valid) == 0:
+            return
+
+        success = valid[0]
+        for item in valid[1:]:
+            success = success & item
+        batch_success = float(success.float().mean().item())
+
+        alpha = float(getattr(self.cfg.terrain, 'reset_curriculum_success_ema_alpha', 0.05))
+        alpha = float(np.clip(alpha, 0.0, 1.0))
+        self.reset_curriculum_success_ema = (
+            (1.0 - alpha) * self.reset_curriculum_success_ema + alpha * batch_success
+        )
+        self.reset_curriculum_lin_progress = batch_success
+        self.reset_curriculum_ang_progress = self.reset_curriculum_success_ema
+
+        start_threshold = float(getattr(self.cfg.terrain, 'reset_curriculum_start_threshold', 0.9))
+        if not self.reset_curriculum_started and self.reset_curriculum_success_ema >= start_threshold:
+            self.reset_curriculum_started = True
+            self.reset_curriculum_start_iteration = int(getattr(global_switch, 'count', 0))
+
+        initial_fraction = float(getattr(self.cfg.terrain, 'reset_curriculum_initial_fraction', 0.0))
+        initial_fraction = float(np.clip(initial_fraction, 0.0, 1.0))
+        if not self.reset_curriculum_started:
+            self.reset_curriculum_intensity = initial_fraction
+            return
+
+        growth_iterations = max(1, int(getattr(self.cfg.terrain, 'reset_curriculum_growth_iterations', 2000)))
+        elapsed = max(0, int(getattr(global_switch, 'count', 0)) - self.reset_curriculum_start_iteration)
+        progress = min(1.0, elapsed / growth_iterations)
+        self.reset_curriculum_intensity = initial_fraction + (1.0 - initial_fraction) * progress
+
+    def _get_reset_curriculum_range(self, range_name):
+        max_range = float(getattr(self.cfg.terrain, range_name))
+        if not getattr(self, 'reset_curriculum_enabled', False):
+            return max_range
+        return max_range * float(getattr(self, 'reset_curriculum_intensity', 1.0))
+
     def _resample_commands(self, env_ids):
         if len(env_ids) == 0:
             return
@@ -914,6 +1011,7 @@ class LeggedRobot(BaseTask):
         curriculum = self.curricula[0]
         # update curricula based on terminated environment bins and categories
         task_rewards, success_thresholds = [], []
+        tracking_task_rewards, tracking_reward_scales = {}, {}
         for key in [
             "tracking_lin_vel",
             "tracking_ang_vel",
@@ -921,8 +1019,12 @@ class LeggedRobot(BaseTask):
             "tracking_contacts_shaped_vel",
         ]:
             if key in self.command_sums.keys():
-                task_rewards.append(self.command_sums[key][env_ids] / ep_len)
+                task_reward = self.command_sums[key][env_ids] / ep_len
+                task_rewards.append(task_reward)
                 success_thresholds.append(self.curriculum_thresholds[key] * self.pretrained_reward_scales[key])
+                if key in ("tracking_lin_vel", "tracking_ang_vel"):
+                    tracking_task_rewards[key] = task_reward
+                    tracking_reward_scales[key] = self.pretrained_reward_scales[key]
 
         old_bins = self.env_command_bins[env_ids.cpu().numpy()]
         if len(success_thresholds) > 0:
@@ -935,6 +1037,7 @@ class LeggedRobot(BaseTask):
                 success_thresholds,
                 local_range=local_range,
             )
+        self._update_reset_curriculum(tracking_task_rewards, tracking_reward_scales)
 
         # sample from new category curricula
         new_commands, new_bin_inds = curriculum.sample(batch_size=len(env_ids))
@@ -1204,6 +1307,11 @@ class LeggedRobot(BaseTask):
         Args:
             env_ids (List[int]): Environemnt ids
         """
+        z_init_range = self._get_reset_curriculum_range("z_init_range")
+        yaw_init_range = self._get_reset_curriculum_range("yaw_init_range")
+        pitch_init_range = self._get_reset_curriculum_range("pitch_init_range")
+        roll_init_range = self._get_reset_curriculum_range("roll_init_range")
+
         # base position
         if self.custom_origins:
             self.root_states[env_ids] = self.base_init_state
@@ -1217,24 +1325,24 @@ class LeggedRobot(BaseTask):
             self.root_states[env_ids, 0] += cfg.terrain.x_init_offset
             self.root_states[env_ids, 1] += cfg.terrain.y_init_offset
             self.root_states[env_ids, 2:3] += torch_rand_float(
-                0, cfg.terrain.z_init_range, (len(env_ids), 1), device=self.device
+                0, z_init_range, (len(env_ids), 1), device=self.device
             )
         else:
             self.root_states[env_ids] = self.base_init_state
             self.root_states[env_ids, :3] += self.env_origins[env_ids]
             self.root_states[env_ids, 2:3] += torch_rand_float(
-                0, cfg.terrain.z_init_range, (len(env_ids), 1), device=self.device
+                0, z_init_range, (len(env_ids), 1), device=self.device
             )
 
         # base orientation: yaw / pitch / roll each randomized independently
         init_yaws = torch_rand_float(
-            -cfg.terrain.yaw_init_range, cfg.terrain.yaw_init_range, (len(env_ids), 1), device=self.device
+            -yaw_init_range, yaw_init_range, (len(env_ids), 1), device=self.device
         )
         init_pitches = torch_rand_float(
-            -cfg.terrain.pitch_init_range, cfg.terrain.pitch_init_range, (len(env_ids), 1), device=self.device
+            -pitch_init_range, pitch_init_range, (len(env_ids), 1), device=self.device
         )
         init_rolls = torch_rand_float(
-            -cfg.terrain.roll_init_range, cfg.terrain.roll_init_range, (len(env_ids), 1), device=self.device
+            -roll_init_range, roll_init_range, (len(env_ids), 1), device=self.device
         )
         q_yaw = quat_from_angle_axis(init_yaws, torch.Tensor([0, 0, 1]).to(self.device))[:, 0, :]
         q_pitch = quat_from_angle_axis(init_pitches, torch.Tensor([0, 1, 0]).to(self.device))[:, 0, :]
@@ -2300,11 +2408,9 @@ class LeggedRobot(BaseTask):
         if self.cfg.commands.use_dynamic_gait:
             frequencies = self.commands_dog[:, 6]  # (num_envs,)
             durations = self.commands_dog[:, 10]  # (num_envs,)
-            footswing_height_cmd = self.commands_dog[:, 7]  # (num_envs,)
         else:
             frequencies = 3.0
             durations = 0.5
-            footswing_height_cmd = 0.04
 
         self.gait_indices = torch.remainder(self.gait_indices + self.dt * frequencies, 1.0)
 

@@ -8,6 +8,7 @@ from isaacgym.torch_utils import *
 from go1_gym.envs import *
 from go1_gym.envs.roboduet.wbc_env_config import configure_privileged_obs_dims
 from go1_gym.envs.roboduet.wbc_env_wrapper import KeyboardStage1Wrapper
+from go1_gym.utils.viz import add_rerun_args, make_rerun_logger
 from scripts.load_policy import load_arm_policy, load_dog_policy, load_env
 
 x_vel_cmd, y_vel_cmd, yaw_vel_cmd = 0.0, 0.0, 0.0
@@ -20,9 +21,9 @@ body_roll_cmd = 0.0
 body_height_delta_cmd = 0.0
 # gait params (only used when use_dynamic_gait=True)
 gait_freq_cmd = 4.0
-footswing_height_cmd = 0.3
+footswing_height_cmd = 0.06
 stance_width_cmd = 0.3
-stance_length_cmd = 0.45
+stance_length_cmd = 0.4
 gait_duration_cmd = 0.5
 
 
@@ -77,6 +78,8 @@ def main(args):
     configure_privileged_obs_dims(cfg)
 
     env.env.enable_viewer_sync = True
+
+    rerun_logger = make_rerun_logger(args, app_id="roboduet_play_by_key_stage1")
 
     num_eval_steps = getattr(args, "num_eval_steps", 30000)
 
@@ -133,6 +136,8 @@ def main(args):
         else:
             env.step(actions_dog, actions_arm[..., :-2].to(env.env.device))
 
+        rerun_logger.log(env)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="RoboDuet — keyboard inference")
@@ -166,6 +171,7 @@ if __name__ == "__main__":
         default=False,
         help="Send zero arm actions every step (hold arm at default position), ignoring any loaded arm policy.",
     )
+    add_rerun_args(parser)
 
     args = parser.parse_args()
     main(args)

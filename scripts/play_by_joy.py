@@ -8,8 +8,9 @@ import joylink_client
 import torch
 
 from go1_gym.envs import *  # noqa: F403
-from go1_gym.envs.roboduet import WBCEnv
+from go1_gym.envs.roboduet.wbc_env import WBCEnv
 from go1_gym.envs.roboduet.wbc_env_config import configure_privileged_obs_dims
+from go1_gym.utils.viz import add_rerun_args, make_rerun_logger
 from scripts.load_policy import load_arm_policy, load_dog_policy, load_env
 
 COMMAND_KEYS = {
@@ -56,14 +57,14 @@ JOYSTICK_COMMAND_MAP = {
         "mode": "absolute",
         "command": {"target": "dog", "cmd_key": "y_vel"},
         "deadzone": 0.08,
-        "clamp": (-0.5, 0.5),
+        "clamp": (-1, 1),
     },
     "right_stick_y": {
         "source": "axis",
         "mode": "absolute",
         "command": {"target": "dog", "cmd_key": "yaw_vel"},
         "deadzone": 0.08,
-        "clamp": (-1.5, 1.5),
+        "clamp": (-1, 1),
     },
     "right_stick_x": {
         "source": "axis",
@@ -100,7 +101,7 @@ JOYSTICK_COMMAND_MAP = {
         "command": {"target": "dog", "cmd_key": "stance_length"},
         "direction": -1,
         "step": 0.05,
-        "clamp": (0.2, 0.8),
+        "clamp": (0.2, 0.5),
     },
     "b": {
         "source": "button",
@@ -108,7 +109,7 @@ JOYSTICK_COMMAND_MAP = {
         "command": {"target": "dog", "cmd_key": "stance_length"},
         "direction": 1,
         "step": 0.05,
-        "clamp": (0.2, 0.8),
+        "clamp": (0.2, 0.5),
     },
     "x": {
         "source": "button",
@@ -116,7 +117,7 @@ JOYSTICK_COMMAND_MAP = {
         "command": {"target": "dog", "cmd_key": "stance_width"},
         "direction": -1,
         "step": 0.05,
-        "clamp": (-1.5, 1.5),
+        "clamp": (0.25, 0.45),
     },
     "y": {
         "source": "button",
@@ -124,43 +125,43 @@ JOYSTICK_COMMAND_MAP = {
         "command": {"target": "dog", "cmd_key": "stance_width"},
         "direction": 1,
         "step": 0.05,
-        "clamp": (-1.5, 1.5),
+        "clamp": (0.25, 0.45),
     },
     "dpad_x:up": {
         "source": "axis_combo",
         "mode": "step_once",
         "axis": "dpad_x",
-        "direction": "positive",
+        "axis_direction": "positive",
         "command": {"target": "dog", "cmd_key": "body_height_delta"},
-        "step": 0.05,
+        "delta": 0.05,
         "clamp": (-0.3, 0.3),
     },
     "dpad_x:down": {
         "source": "axis_combo",
         "mode": "step_once",
         "axis": "dpad_x",
-        "direction": "negative",
+        "axis_direction": "negative",
         "command": {"target": "dog", "cmd_key": "body_height_delta"},
-        "step": 0.05,
+        "delta": -0.05,
         "clamp": (-0.3, 0.3),
     },
     "dpad_y:left": {
         "source": "axis_combo",
         "mode": "step_once",
         "axis": "dpad_y",
-        "direction": "positive",
+        "axis_direction": "positive",
         "command": {"target": "dog", "cmd_key": "gait_freq"},
-        "step": 0.5,
-        "clamp": (1.0, 4.0),
+        "delta": -0.5,
+        "clamp": (1.0, 8.0),
     },
     "dpad_y:right": {
         "source": "axis_combo",
         "mode": "step_once",
         "axis": "dpad_y",
-        "direction": "negative",
+        "axis_direction": "negative",
         "command": {"target": "dog", "cmd_key": "gait_freq"},
-        "step": 0.5,
-        "clamp": (1.0, 4.0),
+        "delta": 0.5,
+        "clamp": (1.0, 8.0),
     },
 }
 
@@ -181,10 +182,10 @@ class DogInitCmd:
     body_roll: float = 0.0
     body_height_delta: float = 0.0
     gait_freq: float = 4.0
-    footswing_height: float = 0.08
+    footswing_height: float = 0.06
     stance_width: float = 0.30
-    stance_length: float = 0.45
-    gait_duration: float = 0.5
+    stance_length: float = 0.4
+    gait_duration: float = 0.49
 
 
 @dataclass
@@ -264,21 +265,30 @@ def add_mapped_command(env, mapping, delta):
 
 
 def apply_all_dog_commands(env, cfg, cmd: DogInitCmd):
-    """Write DogInitCmd values to env.commands_dog (respects n_cmd and use_dynamic_gait)."""
+    """Write DogInitCmd values to env.commands_dog, guarded by the runtime command width."""
     n_cmd = env.commands_dog.shape[1]
-    env.commands_dog[:, 0] = cmd.x_vel
-    env.commands_dog[:, 1] = cmd.y_vel
-    env.commands_dog[:, 2] = cmd.yaw_vel
-    env.commands_dog[:, 3] = cmd.body_pitch
-    env.commands_dog[:, 4] = cmd.body_roll
-    env.commands_dog[:, 5] = cmd.body_height_delta
-    use_dg = getattr(getattr(cfg, "commands", None), "use_dynamic_gait", False)
-    if use_dg:
-        env.commands_dog[:, 6] = cmd.gait_freq
-        env.commands_dog[:, 7] = cmd.footswing_height
-        env.commands_dog[:, 8] = cmd.stance_width
-        env.commands_dog[:, 9] = cmd.stance_length
-        env.commands_dog[:, 10] = cmd.gait_duration
+    values = [
+        cmd.x_vel,
+        cmd.y_vel,
+        cmd.yaw_vel,
+        cmd.body_pitch,
+        cmd.body_roll,
+        cmd.body_height_delta,
+        cmd.gait_freq,
+        cmd.footswing_height,
+        cmd.stance_width,
+        cmd.stance_length,
+        cmd.gait_duration,
+    ]
+    for index, value in enumerate(values[:n_cmd]):
+        env.commands_dog[:, index] = value
+
+
+def apply_all_arm_commands(env, cmd: ArmInitCmd):
+    values = [cmd.l, cmd.p, cmd.y, cmd.roll, cmd.pitch, cmd.yaw]
+    for index, value in enumerate(values[: env.commands_arm.shape[1]]):
+        env.commands_arm[:, index] = value
+    env.env.sync_arm_commands_to_obs(env_ids=slice(0, 1))
 
 
 def format_robot_state(env):
@@ -301,10 +311,12 @@ def format_robot_state(env):
 class JoystickController:
     """Owns the JoyLink client and translates joystick input into env commands."""
 
-    def __init__(self, config_path: str):
+    def __init__(self, config_path: str, dog_init_cmd: DogInitCmd, arm_init_cmd: ArmInitCmd):
         self._client = joylink_client.JoylinkClient(config_path)
         self._client.connect()
         self._config_path = config_path
+        self._dog_init_cmd = dog_init_cmd
+        self._arm_init_cmd = arm_init_cmd
         self._prev_buttons: dict = {}
         self._prev_axes: dict = {}
 
@@ -332,13 +344,23 @@ class JoystickController:
                 )
                 continue
             if mapping["mode"] in ("step_once", "step_button"):
-                direction = mapping.get("direction", 1)
-                sign = "+" if direction in (1, "positive") else "-"
-                print(
-                    "    "
-                    f"{joystick_key:<16} -> {command_desc} "
-                    f"mode=step_once {sign}{mapping.get('step', '?')} clamp={mapping.get('clamp', 'none')}"
-                )
+                if mapping["source"] == "axis_combo":
+                    trigger = mapping.get("axis_direction", mapping.get("direction", "?"))
+                    delta = mapping.get("delta", mapping.get("step", "?"))
+                    print(
+                        "    "
+                        f"{joystick_key:<16} -> {command_desc} "
+                        f"mode=step_once trigger={mapping.get('axis', '?')}:{trigger} "
+                        f"delta={delta} clamp={mapping.get('clamp', 'none')}"
+                    )
+                else:
+                    direction = mapping.get("direction", 1)
+                    sign = "+" if direction in (1, "positive") else "-"
+                    print(
+                        "    "
+                        f"{joystick_key:<16} -> {command_desc} "
+                        f"mode=step_once {sign}{mapping.get('step', '?')} clamp={mapping.get('clamp', 'none')}"
+                    )
                 continue
             print(
                 "    "
@@ -398,7 +420,8 @@ class JoystickController:
 
             if mapping["mode"] == "reset" and rising_edge:
                 env.reset()
-                env.commands_dog[:, :3] = 0.0
+                apply_all_dog_commands(env, env.env.cfg, self._dog_init_cmd)
+                apply_all_arm_commands(env, self._arm_init_cmd)
                 continue
 
             if mapping["mode"] in ("step_once", "step_button") and rising_edge:
@@ -417,17 +440,24 @@ class JoystickController:
             axis_value = float(axes.get(axis_name, 0.0) or 0.0)
             prev_axis_value = float(self._prev_axes.get(axis_name, 0.0))
 
+            axis_direction = mapping.get("axis_direction", mapping.get("direction", "positive"))
             if mapping["mode"] == "step_once":
-                if mapping["direction"] == "positive":
+                delta = mapping.get("delta")
+                if delta is None:
+                    delta = mapping.get("step", 0.05)
+                    if axis_direction == "negative":
+                        delta = -delta
+
+                if axis_direction == "positive":
                     if axis_value > DPAD_THRESHOLD and prev_axis_value <= DPAD_THRESHOLD:
-                        add_mapped_command(env, mapping, mapping.get("step", 0.05))
-                elif mapping["direction"] == "negative":
+                        add_mapped_command(env, mapping, delta)
+                elif axis_direction == "negative":
                     if axis_value < -DPAD_THRESHOLD and prev_axis_value >= -DPAD_THRESHOLD:
-                        add_mapped_command(env, mapping, -mapping.get("step", 0.05))
+                        add_mapped_command(env, mapping, delta)
             elif mapping["mode"] == "step_with_trigger" and abs(trigger_delta) > 1e-6:
-                if mapping["direction"] == "positive" and axis_value <= DPAD_THRESHOLD:
+                if axis_direction == "positive" and axis_value <= DPAD_THRESHOLD:
                     continue
-                if mapping["direction"] == "negative" and axis_value >= -DPAD_THRESHOLD:
+                if axis_direction == "negative" and axis_value >= -DPAD_THRESHOLD:
                     continue
                 add_mapped_command(env, mapping, trigger_delta * mapping["step"])
 
@@ -454,27 +484,31 @@ def main(args):
     from go1_gym.utils.global_switch import global_switch
 
     stage1_only = bool(getattr(args, "stage1_only", False))
+    stage1_arm_intensity = max(0.0, min(1.0, float(getattr(args, "stage1_arm_intensity", 1.0))))
     if stage1_only:
         global_switch.switch_flag = False
         global_switch.count = 0
-        ramp_iters = max(1, int(getattr(args, "stage1_arm_ramp_iterations", 1)))
-        global_switch.stage1_arm_ramp_iterations = ramp_iters
-        stage1_arm_intensity = float(getattr(args, "stage1_arm_intensity", 1.0))
-        global_switch.stage1_count = int(max(0.0, min(1.0, stage1_arm_intensity)) * ramp_iters)
-        global_switch.pretrained_to_hybrid_start = getattr(args, "num_eval_steps", 30000) + 1
+        global_switch.stage1_count = 0
+        global_switch.pretrained_to_hybrid_start = 10**12
         global_switch.pretrained_to_hybrid_end = global_switch.pretrained_to_hybrid_start + 1
     else:
         global_switch.open_switch()
 
+    dog_cmd = DogInitCmd()
+    arm_cmd = ArmInitCmd()
+
     config_path = os.path.join(os.path.dirname(joylink_client.__file__), "../../config/loco_ctrl.yaml")
-    joy_ctrl = JoystickController(config_path)
+    joy_ctrl = JoystickController(config_path, dog_cmd, arm_cmd)
     joy_ctrl.print_command_mapping()
 
     env, cfg = load_env(
-        logdir, wrapper=WBCEnv, headless=args.headless, device=args.sim_device, robot=getattr(args, "robot", None)
+        logdir, wrapper=WBCEnv, headless=False, device=args.sim_device, robot=getattr(args, "robot", None)
     )
     dog_policy = load_dog_policy(logdir, ckpt_id, cfg)
     arm_policy = None if stage1_only else load_arm_policy(logdir, ckpt_id, cfg)
+    if stage1_only:
+        env.env.cfg.env.stage1_arm_curriculum = True
+        env.env.stage1_arm_play_intensity = stage1_arm_intensity
     if stage1_only and getattr(args, "disable_stage1_arm_curriculum", False):
         env.env.cfg.env.stage1_arm_curriculum = False
     if lock_arm:
@@ -482,20 +516,23 @@ def main(args):
     configure_privileged_obs_dims(cfg)
 
     env.env.enable_viewer_sync = True
-    num_eval_steps = getattr(args, "num_eval_steps", 30000)
 
-    dog_cmd = DogInitCmd()
-    arm_cmd = ArmInitCmd()
+    rerun_logger = make_rerun_logger(
+        args,
+        dog_command_names=COMMAND_KEYS["dog"],
+        app_id="roboduet_play_by_joy",
+    )
 
     env.reset()
     apply_all_dog_commands(env, cfg, dog_cmd)
-    env.commands_arm[:, 0] = arm_cmd.l
-    env.commands_arm[:, 1] = arm_cmd.p
-    env.commands_arm[:, 2] = arm_cmd.y
-    env.commands_arm[:, 3] = arm_cmd.roll
-    env.commands_arm[:, 4] = arm_cmd.pitch
-    env.commands_arm[:, 5] = arm_cmd.yaw
-    env.env.sync_arm_commands_to_obs(env_ids=slice(0, 1))
+    apply_all_arm_commands(env, arm_cmd)
+
+    if env.commands_dog.shape[1] >= 11 and not getattr(env.env.cfg.commands, "use_dynamic_gait", False):
+        print(
+            "[warn] commands_dog has gait fields, but cfg.commands.use_dynamic_gait=False; "
+            "freq/swing/width/length/duration will display but the gait clock uses fixed defaults.",
+            flush=True,
+        )
 
     if lock_arm:
         print("[arm] LOCKED — zero actions sent every step", flush=True)
@@ -506,7 +543,7 @@ def main(args):
     _CMD_PRINT_INTERVAL = 0.1  # seconds
     _last_print = time.monotonic()
 
-    for _ in range(num_eval_steps):
+    while True:
         joy_ctrl.step(env)
 
         now = time.monotonic()
@@ -533,15 +570,15 @@ def main(args):
         else:
             env.step(actions_dog, actions_arm[..., :-2])
 
+        rerun_logger.log(env)
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="RoboDuet — joystick inference")
-    parser.add_argument("--headless", action="store_true", default=False)
     parser.add_argument("--sim_device", type=str, default="cuda:0")
     parser.add_argument("--logdir", type=str, required=True)
     parser.add_argument("--ckptid", type=str, default="last")
     parser.add_argument("--robot", type=str, default="go2", choices=["go1", "go2"])
-    parser.add_argument("--num_eval_steps", type=int, default=30000)
     parser.add_argument(
         "--stage1_only",
         action="store_true",
@@ -551,20 +588,8 @@ def parse_args():
     parser.add_argument(
         "--stage1_arm_intensity",
         type=float,
-        default=0.3,
-        help="Stage1 arm disturbance curriculum intensity for play, in [0, 1].",
-    )
-    parser.add_argument(
-        "--stage1_arm_ramp_iterations",
-        type=int,
         default=1,
-        help="Synthetic ramp length used to realize --stage1_arm_intensity during play.",
-    )
-    parser.add_argument(
-        "--disable_stage1_arm_curriculum",
-        action="store_true",
-        default=False,
-        help="Keep the arm fixed instead of applying stage1 arm disturbance during stage1-only play.",
+        help="Stage1 arm disturbance intensity for stage1-only play, applied directly in [0, 1].",
     )
     parser.add_argument(
         "--lock_arm",
@@ -572,6 +597,7 @@ def parse_args():
         default=False,
         help="Send zero arm actions every step (hold arm at default position), ignoring any loaded arm policy.",
     )
+    add_rerun_args(parser)
     return parser.parse_args()
 
 

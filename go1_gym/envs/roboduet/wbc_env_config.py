@@ -620,6 +620,7 @@ def materialize_base_cfg(cfg, defaults, options):
     cfg.normalization.dof_damping_range = [0.0, 10.0]
 
     cfg.terrain.teleport_robots = False
+    cfg.terrain.reset_curriculum = True
 
     cfg.asset.render_sphere = defaults.asset.render_sphere
 
