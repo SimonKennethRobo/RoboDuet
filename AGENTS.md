@@ -144,6 +144,45 @@ Common play-time overrides include:
 - terminal conditions disabled
 - `Cfg.control.control_type = "M"`
 
+## Play Scripts
+
+`play` scripts are interactive operator tools, not bounded evaluation jobs.
+
+- `scripts/play_by_joy.py` should open the IsaacGym viewer (`headless=False`) and run until interrupted. Do not reintroduce `--headless` or `--num_eval_steps` there unless the user explicitly asks for an evaluation mode.
+- `--stage1_only` means pure stage-1 play: keep `global_switch` closed, do not load/call the arm policy, and use `env.env.stage1_arm_play_intensity` as the direct arm disturbance intensity. Do not synthesize training ramp iterations in play.
+- `--lock_arm` is stricter than stage-1 disturbance: it disables the stage-1 arm curriculum/disturbance and sends fake/zero arm actions.
+- For checkpoint-backed play, always reason from the runtime `Cfg` loaded by `scripts/load_policy.py`; source config defaults may not be active.
+
+## Joystick Commands
+
+`scripts/play_by_joy.py` uses `COMMAND_KEYS` for dog/arm command indices and `_COMMAND_INDEX` for reverse lookup.
+
+- For D-pad axis combos, the dictionary key name such as `"dpad_y:left"` is only a label. The physical trigger is the JoyLink axis value sign.
+- Use `axis_direction` for which axis sign triggers the edge, and `delta` for how much the command changes. Do not use one `direction` field to mean both trigger sign and command sign.
+- Apply dog defaults by runtime `env.commands_dog.shape[1]`, not by only checking `cfg.commands.use_dynamic_gait`; checkpoint command width and config flags can disagree.
+- Actual gait frequency is consumed in `LeggedRobot._step_contact_targets()` only when `cfg.commands.use_dynamic_gait=True`. If it is false, `commands_dog[:, 6]` may display but the gait clock uses fixed defaults.
+- Even with dynamic gait enabled, when `torch.norm(commands_dog[:, :3]) < 0.1`, contact targets are forced to stand phase. Do not judge gait frequency behavior while all velocity commands are zero.
+
+## Rerun Visualization
+
+Reusable Rerun telemetry lives in `go1_gym/utils/viz.py`.
+
+- Use `add_rerun_args(parser)` to add common `--rerun*` CLI flags.
+- Use `make_rerun_logger(args, ...)` or `RerunLogger` directly, then call `rerun_logger.log(env)` after `env.step(...)`.
+- The logger is optional: without `--rerun`, it is inert; if `rerun-sdk` is missing or an older API is unsupported, play should continue.
+- Default visible panes are `vx`, `vy`, `pitch`, and `joint torque`. `height` and `roll` panes are created hidden by default. Full `base` and `command` panes are only created/logged with `--rerun_extra_panes`.
+- Default torque logging is the first 12 joints. Use `--rerun_torque_joints` to change this and `--rerun_joint_state` to also log joint positions/velocities.
+- `--rerun_window_seconds` controls the visible sliding time window where the installed Rerun blueprint API supports `VisibleTimeRange`; old Rerun versions may require manual viewer configuration.
+
+## Reward and Curriculum Notes
+
+Reward scale signs matter.
+
+- Penalty reward scales are usually negative. For `action_rate`, a more negative absolute scale means a stronger penalty; smaller early-training penalty should be closer to zero.
+- The current action-rate curriculum is intended to switch from weaker to stronger penalty only after stage-1 arm disturbance intensity exceeds its threshold and the configured delay has elapsed.
+- “Active reward scale” means the runtime scale after curriculum/global-switch logic, not necessarily the raw class default in config.
+- Reset randomization curricula for root `z`, roll, pitch, and yaw should be justified by locomotion tracking progress. If instability is actually caused by collisions or play-time config mismatch, prefer the smaller targeted fix over adding curriculum complexity.
+
 ## Debug Checklist
 
 Related skills: isaac-skill

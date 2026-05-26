@@ -85,10 +85,10 @@ def config_wtw(Cnfg: Any):
     Cnfg.terrain.terrain_length = 5.0
     Cnfg.terrain.x_init_range = 0.2
     Cnfg.terrain.y_init_range = 0.2
-    Cnfg.terrain.z_init_range = 1.0
-    Cnfg.terrain.roll_init_range = 3.14
-    Cnfg.terrain.pitch_init_range = 3.14
-    Cnfg.terrain.yaw_init_range = 3.14
+    Cnfg.terrain.z_init_range = 0.5
+    Cnfg.terrain.roll_init_range = 1.57
+    Cnfg.terrain.pitch_init_range = 1.57
+    Cnfg.terrain.yaw_init_range = 1.57
     Cnfg.terrain.teleport_thresh = 0.3
     Cnfg.terrain.teleport_robots = False
     Cnfg.terrain.center_robots = True
@@ -136,8 +136,8 @@ def config_wtw(Cnfg: Any):
     Cnfg.commands.lin_vel_x = [-1.0, 1.0]
     Cnfg.commands.lin_vel_y = [-0.6, 0.6]
     Cnfg.commands.ang_vel_yaw = [-1.0, 1.0]
-    Cnfg.commands.body_height_cmd = [-0.15, 0.15]
-    Cnfg.commands.gait_frequency_cmd_range = [1.0, 8.0]
+    Cnfg.commands.body_height_cmd = [-0.2, 0.2]
+    Cnfg.commands.gait_frequency_cmd_range = [1.0, 6.0]
     Cnfg.commands.gait_phase_cmd_range = [0.0, 0.01]
     Cnfg.commands.gait_offset_cmd_range = [0.0, 0.01]
     Cnfg.commands.gait_bound_cmd_range = [0.0, 0.01]
@@ -151,8 +151,8 @@ def config_wtw(Cnfg: Any):
     Cnfg.commands.limit_vel_x = [-1.0, 1.0]
     Cnfg.commands.limit_vel_y = [-0.6, 0.6]
     Cnfg.commands.limit_vel_yaw = [-1.0, 1.0]
-    Cnfg.commands.limit_body_height = [-0.15, 0.15]
-    Cnfg.commands.limit_gait_frequency = [1.0, 8.0]
+    Cnfg.commands.limit_body_height = [-0.2, 0.2]
+    Cnfg.commands.limit_gait_frequency = [1.0, 6.0]
     Cnfg.commands.limit_gait_phase = [0.0, 0.01]
     Cnfg.commands.limit_gait_offset = [0.0, 0.01]
     Cnfg.commands.limit_gait_bound = [0.0, 0.01]

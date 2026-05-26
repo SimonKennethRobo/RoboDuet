@@ -169,6 +169,8 @@ class RerunLogger:
                 rrb.TimeSeriesView(origin="/pane_vy", name="vy", **view_kwargs),
                 rrb.TimeSeriesView(origin="/pane_pitch", name="pitch", **view_kwargs),
                 rrb.TimeSeriesView(origin="/pane_joint_torque", name="joint torque", **view_kwargs),
+                rrb.TimeSeriesView(origin="/pane_height", name="height", visible=False, **view_kwargs),
+                rrb.TimeSeriesView(origin="/pane_roll", name="roll", visible=False, **view_kwargs),
             ]
             if self._log_extra_panes:
                 views.extend(
@@ -247,6 +249,12 @@ class RerunLogger:
         if len(command) > 3:
             self._log_scalar("pane_pitch/base", pitch)
             self._log_scalar("pane_pitch/command", command[3])
+        self._log_scalar("pane_height/base", height)
+        if len(command) > 5:
+            self._log_scalar("pane_height/command", command[5])
+        self._log_scalar("pane_roll/base", roll)
+        if len(command) > 4:
+            self._log_scalar("pane_roll/command", command[4])
 
         if self._log_extra_panes:
             self._log_scalar("pane_base/lin_vel/x", lin_vel[0])
