@@ -501,6 +501,9 @@ class WBCEnv(LeggedRobot):
     def _get_stage1_arm_curriculum_intensity(self):
         if not self._stage1_arm_curriculum_active():
             return 0.0
+        play_intensity = getattr(self, "stage1_arm_play_intensity", None)
+        if play_intensity is not None:
+            return min(1.0, max(0.0, float(play_intensity)))
         ramp_iters = max(
             1,
             int(getattr(global_switch, "stage1_arm_ramp_iterations", global_switch.pretrained_to_hybrid_start)),

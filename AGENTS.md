@@ -146,6 +146,8 @@ Common play-time overrides include:
 
 ## Debug Checklist
 
+Related skills: isaac-skill
+
 When reset height/orientation looks wrong:
 
 1. Print runtime `Cfg.init_state.pos`, `Cfg.terrain.z_init_range`, `roll_init_range`, `pitch_init_range`, and `yaw_init_range`.
