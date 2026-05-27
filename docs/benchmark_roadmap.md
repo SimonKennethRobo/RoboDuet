@@ -22,7 +22,7 @@
 | --- | --- |
 | `benchmark/cli.py` | 统一 benchmark 入口，负责选择 `dog_only`、`arm_only` 或 `hybrid` 模式。 |
 | `benchmark/dog_policy/cli.py` | dog-only policy 质量评估入口，支持多个 policy 在同一个 IsaacGym simulation 中并行评估。 |
-| `benchmark/dog_policy/evaluation.py` | dog-only evaluation 实现，包括 policy/env 加载、配置兼容性检查、metric 累积、结果保存、markdown report 和 matplotlib plot。 |
+| `benchmark/dog_policy/evaluation.py` | dog-only evaluation 实现，包括 policy/env 加载、配置兼容性检查、metric 累积和结构化结果保存。 |
 | `benchmark/env_fps.py` | 环境吞吐 benchmark，用不同 env count 测量 FPS、耗时和显存。 |
 
 `benchmark/dog_policy/cli.py` 当前定位是 dog-only policy benchmark。它把多个候选 policy 放到同一个共享 simulation 中运行：
@@ -121,25 +121,24 @@ benchmark/candidates/<date>/<run_name>/
 
 ```text
 benchmark/results/<timestamp>/
+  index.html
   results.json
   metadata.json
-  report.md
-  report.html
-  plots/
-    *.png
 ```
 
 当前输出形式包括：
 
 - terminal comparison table
 - 结构化 `results.json`
-- 结构化 `metadata.json`，记录 seed、profile、candidate path、ckpt id、env count、git commit 等运行上下文
-- markdown report
-- matplotlib 静态图片
-- 单文件 HTML report，包含 summary cards、metadata panel、可排序 metric table、velocity-grid detail、plot gallery 和 plot lightbox
-- `benchmark/results/index.html`，用于在本地静态 server 中浏览不同 result
+- 结构化 `metadata.json`，记录 benchmark protocol、命令行、candidate path、ckpt id、robot、seed、env count、git branch/commit/dirty 状态、Python/PyTorch/CUDA runtime 等运行上下文
+- 单文件 HTML report：`index.html`
+- `benchmark/results/index.html`，直接渲染最新 result，并在左侧 `Results` 导航中切换历史 result
 
-这些结果已经覆盖 dog-only benchmark 的日常使用。当前主要缺口是跨 result 的交互式对比，例如两个不同 benchmark run 之间的 side-by-side summary、delta table 和 regression verdict。
+当前默认不再生成 `report.md` 和 `plots/*.png`。HTML report 已经覆盖旧 markdown 信息，并额外提供 summary cards、metadata panel、scenario mean table、scenario detail tables、heatmap、表格排序和交互式 SVG charts。`results.json` 和 `metadata.json` 作为机器可读 artifact 保留，HTML report 作为主要人工查看入口。
+
+当前 `benchmark.cli --compare_results` 已经可以比较两个已落盘 result 的 summary-level primary metrics，不需要重新加载 checkpoint 或启动 IsaacGym。后续更完整的跨 result dashboard 仍然值得继续做，例如 scenario-level / test-point-level diff、regression verdict 和 result annotation。
+
+这些结果已经覆盖 dog-only benchmark 的日常使用。当前主要缺口是更深入的跨 result 交互式对比，例如两个不同 benchmark run 之间的 side-by-side scenario table、delta chart、test-point-level regression verdict 和 candidate promotion / retirement 记录。
 
 ## 当前优点
 
@@ -207,17 +206,18 @@ scenario grid 和 metric selection 都写在 Python 文件里。这样导致：
 - CI/Jenkins 很难根据配置触发不同 benchmark profile。
 - scenario 本身不容易版本化和 review。
 
-未来更适合把 scenario 定义放进 YAML/TOML/JSON 配置中，Python runner 只负责执行。
+未来更适合把 scenario 定义放进 YAML/TOML/JSON 配置中，Python runner 只负责执行。当前已经有 `benchmark/profiles/smoke.json` 这类 profile，用于控制 seed、env 数、step 数和启用哪些 scenario；后续可以继续把 scenario grid 本身也配置化。
 
 ### 3. 输出不够适合快速比较
 
-当前 HTML report 已经可以覆盖单次 result 的浏览和检查。单个 result 内可以查看 summary、metadata、scenario table、velocity detail、plots，并支持表格排序和 plot lightbox。
+当前 HTML report 已经可以覆盖单次 result 的浏览和检查。单个 result 内可以查看 summary、metadata、scenario mean、scenario detail table 和交互式 SVG chart，并支持表格排序、heatmap、左侧 result 切换和滚动位置保持。
 
-目前更明显的不足是跨 result 对比。也就是说，如果要比较两个历史 benchmark run，目前仍需要人工打开多个页面或手工对比 JSON。下一步更合适的是增加 compare report：
+目前已经有基础 `--compare_results`，可以比较两个历史 benchmark run 的 summary-level primary metrics。下一步更合适的是把 compare 能力扩展到 HTML dashboard 内：
 
 ```bash
-python -m benchmark.reports.html \
-  --compare benchmark/results/A/results.json benchmark/results/B/results.json
+python -m benchmark.cli --compare_results \
+  --baseline benchmark/results/A \
+  --target benchmark/results/B
 ```
 
 compare report 应该提供：
@@ -385,17 +385,15 @@ python -m benchmark.cli \
 benchmark/results/<timestamp>/
   results.json
   metadata.json
-  report.md
-  report.html
-  plots/
-    *.png
+  index.html
 benchmark/results/index.html
 ```
 
 HTML dashboard 应该包含：
 
 - Summary
-  - candidate ranking
+  - candidate cards
+  - scenario-level metric mean table
   - baseline comparison
   - pass/fail/regression verdict
 - Scenario tabs
@@ -422,7 +420,7 @@ HTML dashboard 应该包含：
   - relative change
   - threshold status
 
-技术上可以先用静态 HTML + embedded JSON 实现，不需要引入服务器。后续如果 dashboard 复杂，再考虑 React/Vite 或轻量前端框架。
+当前实现已经使用静态 HTML + embedded JSON / data attributes，不需要引入服务器；图表直接基于 `results.json` 渲染 SVG，不再依赖 PNG plot。后续如果 dashboard 复杂，再考虑 React/Vite 或轻量前端框架。
 
 ## 代码结构重构建议
 
@@ -569,12 +567,13 @@ Full benchmark 不应该阻塞所有开发 PR，但可以作为模型相关 PR �
 
 ### Phase 2: HTML Report
 
-- 基于现有 `results.json` 和 `metadata.json` 生成 `report.html`。
-- 自动更新 `benchmark/results/index.html`。
+- 基于现有 `results.json` 和 `metadata.json` 生成 `index.html`。
+- 自动更新 `benchmark/results/index.html`，并直接渲染最新 result 的完整 report。
 - 先实现静态 HTML，不引入复杂服务。
-- 支持 summary cards、metadata panel、scenario metric table、velocity detail、plot gallery、plot lightbox。
-- markdown 和 PNG plot 继续保留，但 HTML 成为主要查看入口。
-- 跨 result compare report 后续单独实现。
+- 支持 summary cards、metadata panel、scenario mean table、scenario detail table、heatmap 和交互式 SVG charts。
+- 左侧 Results 导航支持历史 result 切换，并保持页面滚动位置。
+- 默认产物收敛为 `index.html`、`results.json`、`metadata.json`，不再默认生成 markdown 和 PNG plot。
+- 已有基础 `--compare_results`，后续继续扩展为 report 内交互式对比。
 
 ### Phase 3: Benchmark 代码结构整理
 
@@ -624,3 +623,24 @@ Full benchmark 不应该阻塞所有开发 PR，但可以作为模型相关 PR �
    所有后续 dashboard、历史比较、CI regression 都依赖稳定结构化结果。
 
 不建议马上做大规模并行重构。当前 shared-sim 多 policy 评估已经有价值，先把候选管理和可视化补上，会更快改善实际工作流。
+
+## 当前已完成的增量
+
+截至 `feat/benchmark-result-tracking`，以下能力已经落地：
+
+- `benchmark.cli --dog_only` 作为 dog-only benchmark 主入口。
+- `benchmark.cli --inspect` 可轻量检查 dog/arm checkpoint shape 与配置是否自洽。
+- `benchmark.cli --compare_results` 可比较两个已保存 result 的 summary-level primary metrics。
+- candidate discovery 支持多级目录和本地目录 symlink，并用 resolved path 去重。
+- benchmark seed 独立于训练 seed。
+- 默认 result artifact 收敛为 `index.html`、`results.json`、`metadata.json`。
+- `metadata.json` 记录 benchmark protocol、命令行、candidate、ckpt id、robot、seed、env 数量、git/runtime 信息；remote URL 中的 credentials 会被 redaction。
+- HTML report 支持 summary cards、scenario metric mean table、metadata panel、scenario detail table、heatmap、表格排序、交互式 SVG charts 和左侧 Results 导航。
+- heatmap 对 reward / `*_rew` 这类 higher-is-better metric 做方向处理。
+
+后续最值得继续推进的是：
+
+- 把 `--compare_results` 扩展到 scenario-level 和 test-point-level diff。
+- 在 report 中加入 result annotation，例如 baseline、candidate、promoted、deprecated。
+- 把 metric schema 和 direction 从 report 代码中抽出来，减少字段硬编码。
+- 在 arm policy 稳定后实现 `--arm_only` 和 `--hybrid`。
