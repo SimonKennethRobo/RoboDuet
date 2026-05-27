@@ -68,6 +68,8 @@ DETAIL_METRICS = {
     ],
 }
 
+NEUTRAL_HEATMAP_METRICS = {"base_height_mean"}
+
 
 def _load_results(path: Path) -> Dict[str, Dict[str, List[dict]]]:
     with path.open("r", encoding="utf-8") as f:
@@ -172,6 +174,10 @@ def _metric_prefers_higher(metric: str) -> bool:
     return "reward" in metric or metric.endswith("_rew")
 
 
+def _metric_has_heatmap(metric: str) -> bool:
+    return metric not in NEUTRAL_HEATMAP_METRICS
+
+
 def _compact_axis_label(scenario: str, label: str) -> str:
     if scenario == "vel_grid":
         return label.replace(" yaw=", "/y").replace("vx=", "vx")
@@ -244,7 +250,7 @@ def _scenario_detail_sections(results: Dict[str, Dict[str, List[dict]]], scenari
         if not metric_defs:
             continue
         run_sections = []
-        heat_metrics = [metric for _, metric in metric_defs[:3]]
+        heat_metrics = [metric for _, metric in metric_defs if _metric_has_heatmap(metric)]
         for run_name, scenario_map in results.items():
             rows = scenario_map.get(scenario, [])
             if not rows:
