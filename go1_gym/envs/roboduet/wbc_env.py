@@ -212,7 +212,7 @@ class WBCEnv(LeggedRobot):
     def _resample_trajectory_commands(self, env_ids):
         self._resample_user_commands(env_ids)
         length, s_amplitude = self._traj_curriculum_params(env_ids)
-        traj_pos, traj_quat, target_time = sample_trajectory_commands(
+        traj_pos, traj_quat, target_time, traj_type = sample_trajectory_commands(
             self.cfg,
             self.end_effector_state,
             self.base_quat,
@@ -225,6 +225,7 @@ class WBCEnv(LeggedRobot):
         self.traj_pos_world[env_ids] = traj_pos
         self.traj_quat_world[env_ids] = traj_quat
         self.traj_target_time[env_ids] = target_time
+        self.traj_type[env_ids] = traj_type
         self.T_trajs[env_ids] = self.traj_target_time[env_ids]
         self.arm_time_buf[env_ids] = 0
         self.traj_elapsed_time[env_ids] = 0.0
@@ -376,6 +377,54 @@ class WBCEnv(LeggedRobot):
         error = error * self.traj_visited_mask.float()
         denom = torch.clamp(self.traj_visited_mask.float().sum(dim=-1), min=1.0)
         return torch.sum(error, dim=-1) / denom
+
+    def get_trajectory_current_l2_error(self):
+        env_ids = torch.arange(self.num_envs, device=self.device)
+        target = self._pose_world_to_body_9d(
+            self.traj_pos_world[env_ids, self.traj_progress_idx],
+            self.traj_quat_world[env_ids, self.traj_progress_idx],
+            env_ids,
+        )
+        ee_pose = self.get_ee_pose_body_9d()
+        pos_error = torch.sum(torch.square(ee_pose[:, :3] - target[:, :3]), dim=-1)
+        rot_error = torch.sum(torch.square(ee_pose[:, 3:] - target[:, 3:]), dim=-1)
+        return self.cfg.arm.trajectory.pos_error_scale * pos_error + self.cfg.arm.trajectory.rot_error_scale * rot_error
+
+    def get_trajectory_window_min_l2_error(self):
+        waypoint_ids = torch.clamp(
+            self.traj_progress_idx[:, None] + self.traj_window_offsets[None, :],
+            min=0,
+            max=self.traj_num_waypoints - 1,
+        )
+        env_ids = torch.arange(self.num_envs, device=self.device)
+        flat_env_ids = env_ids[:, None].expand(-1, waypoint_ids.shape[1]).reshape(-1)
+        flat_wp_ids = waypoint_ids.reshape(-1)
+        targets = self._pose_world_to_body_9d(
+            self.traj_pos_world[flat_env_ids, flat_wp_ids],
+            self.traj_quat_world[flat_env_ids, flat_wp_ids],
+            flat_env_ids,
+        ).view(self.num_envs, waypoint_ids.shape[1], 9)
+        ee_pose = self.get_ee_pose_body_9d().unsqueeze(1)
+        pos_error = torch.sum(torch.square(ee_pose[..., :3] - targets[..., :3]), dim=-1)
+        rot_error = torch.sum(torch.square(ee_pose[..., 3:] - targets[..., 3:]), dim=-1)
+        error = self.cfg.arm.trajectory.pos_error_scale * pos_error + self.cfg.arm.trajectory.rot_error_scale * rot_error
+        return torch.min(error, dim=-1).values
+
+    def get_trajectory_tracking_reward(self):
+        reward = torch.exp(-self.get_trajectory_error_sum())
+        point_mask = self.traj_type == 3
+        if torch.any(point_mask):
+            reward = reward.clone()
+            reward[point_mask] = -self.get_trajectory_window_min_l2_error()[point_mask]
+        return reward
+
+    def get_trajectory_current_tracking_reward(self):
+        reward = torch.exp(-self.get_trajectory_current_l2_error())
+        point_mask = self.traj_type == 3
+        if torch.any(point_mask):
+            reward = reward.clone()
+            reward[point_mask] = -self.get_trajectory_window_min_l2_error()[point_mask]
+        return reward
 
     # ============================================================
     # Arm command helpers (shared by wrappers and external controllers)
@@ -678,6 +727,7 @@ class WBCEnv(LeggedRobot):
         )
         self.traj_quat_world[..., 3] = 1.0
         self.traj_progress_idx = torch.zeros(self.num_envs, dtype=torch.long, device=self.device, requires_grad=False)
+        self.traj_type = torch.zeros(self.num_envs, dtype=torch.long, device=self.device, requires_grad=False)
         self.traj_target_time = torch.ones(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
         self.traj_elapsed_time = torch.zeros(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
         self.traj_complete_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device, requires_grad=False)

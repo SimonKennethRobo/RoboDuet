@@ -73,11 +73,12 @@ class ArmCommandConfig:
 @dataclass(frozen=True)
 class ArmTrajectoryConfig:
     enabled: bool = False
-    traj_type: list = field(default_factory=lambda: ["line", "s_curve"])
+    # traj_type: list = field(default_factory=lambda: ["line", "s_curve", "point"])
+    traj_type: list = field(default_factory=lambda: ["point"])
     window_offsets: tuple = (0, 1, 2, 4, 8, 16, 32, 64)
     num_waypoints: int = 96
     start_radius: float = 0.0
-    length_range: tuple = (0.10, 0.45)
+    length_range: tuple = (0.05, 1.0)
     s_curve_amplitude_range: tuple = (0.02, 0.12)
     s_curve_frequency: float = 1.0
     circle_radius: float = 0.5

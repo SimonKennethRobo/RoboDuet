@@ -86,24 +86,10 @@ class Rewards:
         return torch.sum(diff, dim=1)
 
     def _reward_traj_track(self):
-        return torch.exp(-self.env.get_trajectory_error_sum())
+        return self.env.get_trajectory_tracking_reward()
 
     def _reward_trajectory_current_tracking(self):
-        env_ids = torch.arange(self.env.num_envs, device=self.env.device)
-        target = self.env._pose_world_to_body_9d(
-            self.env.traj_pos_world[env_ids, self.env.traj_progress_idx],
-            self.env.traj_quat_world[env_ids, self.env.traj_progress_idx],
-            env_ids,
-        )
-        ee_pose = self.env.get_ee_pose_body_9d()
-        pos_error = torch.sum(torch.square(ee_pose[:, :3] - target[:, :3]), dim=-1)
-        rot_error = torch.sum(torch.square(ee_pose[:, 3:] - target[:, 3:]), dim=-1)
-        return torch.exp(
-            -(
-                self.env.cfg.arm.trajectory.pos_error_scale * pos_error
-                + self.env.cfg.arm.trajectory.rot_error_scale * rot_error
-            )
-        )
+        return self.env.get_trajectory_current_tracking_reward()
 
     def _reward_trajectory_completion_time(self):
         low, high = self.env.cfg.arm.trajectory.completion_time_range
