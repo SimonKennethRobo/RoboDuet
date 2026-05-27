@@ -2,6 +2,8 @@
 
 这个目录存放 benchmark 运行配置和长期保留的 candidate checkpoints。
 
+更长期的设计记录和后续计划见 [ROADMAP.md](ROADMAP.md)。
+
 ## Candidate Checkpoints
 
 Candidate 使用 run-like logdir 结构。目录名可以来自训练 run 名，但 benchmark mode 不使用 `stage1` 这类训练阶段语义：
@@ -146,30 +148,26 @@ python -m benchmark.reports.html \
   --results benchmark/results/<timestamp>/results.json
 ```
 
-默认输出到同目录下的 `report.html`。第一版 HTML report 只读取已有结果文件，不改变 benchmark 计算逻辑。
+默认输出到同目录下的 `index.html`。HTML report 只读取已有结果文件，不改变 benchmark 计算逻辑。
 
 通过 `python -m benchmark.cli --dog_only ...` 正常跑 benchmark 时，会自动生成：
 
 ```text
 benchmark/results/<timestamp>/
+  index.html
   results.json
   metadata.json
-  report.md
-  report.html
-  plots/
 ```
 
-HTML report 会嵌入同目录下的 `plots/*.png`，并自动更新结果根目录的索引页：
+`metadata.json` 会记录复现实验所需的上下文，包括 benchmark protocol、命令行、candidate logdir、ckpt id、robot、seed、env 数量、git branch/commit/dirty 状态、Python/PyTorch/CUDA 运行时信息等。这样即使未来代码结构变化，也可以根据 metadata 快速 checkout 到对应 commit 复现或追踪结果。
+
+HTML report 直接基于 `results.json` 渲染交互式 SVG charts，不再默认生成 `report.md` 或 `plots/*.png`。生成 report 时会同时维护结果根目录的 `index.html`，它会直接渲染最新 result 的完整 Report 内容：
 
 ```text
-benchmark/results/index.html
+http://127.0.0.1:8765/
 ```
 
-如果本地静态 server 服务 `benchmark/results/`，可以从索引页进入不同 result：
-
-```text
-http://127.0.0.1:8765/index.html
-```
+历史 result 切换已经整合到每个 report 的左侧 `Results` 导航栏中。
 
 也可以为整个结果目录批量生成 HTML：
 
@@ -180,10 +178,36 @@ python -m benchmark.reports.html \
 
 HTML report 当前包含：
 
-- summary cards: points、vx RMSE、yaw RMSE、fall rate
-- metadata panel: seed、profile、candidate path、ckpt id、env count、git commit 等
-- scenario metric tables: 支持点击表头排序
-- velocity-grid detail table: 带 metric heatmap
-- plot gallery: 直接嵌入 matplotlib plots
-- plot lightbox: 点击图片后可放大、关闭、上一张/下一张切换
-- results index: `benchmark/results/index.html` 可跳转不同 result
+- summary cards: points、fall rate、vx/yaw RMSE、lin/yaw reward、base height、max torque 的 overall mean
+- summary metric-mean table: 按 scenario 汇总主要 metric 均值，overall mean 放在 candidate card 中
+- metadata panel: seed、profile、candidate path、ckpt id、env count、git/runtime 信息等
+- left navigation: Report sections 和历史 result 切换入口，包含 Summary、Metadata、各 scenario 和 Results
+- scenario detail tables: 展示每个测试点的关键指标，并对主要列加 heatmap
+- interactive metric charts: 每个 scenario 内直接切换 metric，并基于 `results.json` 渲染 SVG 图表；x 轴使用短语义标签，完整测试点 label 保留在 hover tooltip 和下方表格中
+
+## Result Comparison
+
+可以直接比较两个已经落盘的 benchmark result，不需要重新加载 ckpt 或启动 IsaacGym：
+
+```bash
+python -m benchmark.cli --compare_results \
+  --baseline benchmark/results/<old_result> \
+  --target benchmark/results/<new_result>
+```
+
+默认会在 target result 目录下生成：
+
+```text
+compare_<old_result>_to_<new_result>.html
+```
+
+也可以显式指定输出位置：
+
+```bash
+python -m benchmark.cli --compare_results \
+  --baseline benchmark/results/<old_result>/results.json \
+  --target benchmark/results/<new_result>/results.json \
+  --output benchmark/results/compare_old_to_new.html
+```
+
+对比报告基于两个 result 的 `results.json` 和 `metadata.json`，当前比较 summary-level primary metrics，包括 vx RMSE、yaw RMSE、fall rate、tracking reward、base height 和 max torque。它不会尝试重新运行旧 ckpt，因此适合长期保留历史 benchmark 结果并做跨时间对比。
