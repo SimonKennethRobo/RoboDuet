@@ -20,6 +20,8 @@ SCENARIO_TITLES = {
     "gait": "Gait Tracking",
 }
 
+SCENARIO_ORDER = ["vel_grid", "arm_sweep", "body_pose", "gait"]
+
 PRIMARY_METRICS = [
     ("lin_vel_x_rmse", "vx RMSE", "lower"),
     ("ang_vel_yaw_rmse", "yaw RMSE", "lower"),
@@ -29,6 +31,42 @@ PRIMARY_METRICS = [
     ("base_height_mean", "base height", "neutral"),
     ("max_torque_mean", "max torque", "lower"),
 ]
+
+DETAIL_METRICS = {
+    "vel_grid": [
+        ("vx RMSE", "lin_vel_x_rmse"),
+        ("yaw RMSE", "ang_vel_yaw_rmse"),
+        ("lin reward", "tracking_lin_vel_reward"),
+        ("yaw reward", "tracking_ang_vel_reward"),
+        ("base height", "base_height_mean"),
+        ("fall rate", "fall_rate"),
+    ],
+    "arm_sweep": [
+        ("vx RMSE", "lin_vel_x_rmse"),
+        ("yaw RMSE", "ang_vel_yaw_rmse"),
+        ("lin reward", "tracking_lin_vel_reward"),
+        ("yaw reward", "tracking_ang_vel_reward"),
+        ("base height", "base_height_mean"),
+        ("max torque", "max_torque_mean"),
+        ("fall rate", "fall_rate"),
+    ],
+    "body_pose": [
+        ("pitch RMSE deg", "pitch_rmse_deg"),
+        ("roll RMSE deg", "roll_rmse_deg"),
+        ("orientation ctl", "orientation_control_rmse"),
+        ("height RMSE m", "height_rmse_m"),
+        ("base height", "base_height_mean"),
+        ("fall rate", "fall_rate"),
+    ],
+    "gait": [
+        ("contact force", "gait_contact_force_cost"),
+        ("contact vel", "gait_contact_vel_cost"),
+        ("clearance m", "foot_clearance_rmse_m"),
+        ("raibert m", "raibert_rmse_m"),
+        ("max torque", "max_torque_mean"),
+        ("fall rate", "fall_rate"),
+    ],
+}
 
 
 def _load_results(path: Path) -> Dict[str, Dict[str, List[dict]]]:
@@ -76,7 +114,9 @@ def _scenario_names(results: Dict[str, Dict[str, List[dict]]]) -> List[str]:
     names = set()
     for scenarios in results.values():
         names.update(scenarios)
-    return sorted(names)
+    ordered = [name for name in SCENARIO_ORDER if name in names]
+    ordered.extend(sorted(names - set(ordered)))
+    return ordered
 
 
 def _metric_average(rows: Iterable[dict], metric: str) -> Optional[float]:
@@ -84,47 +124,6 @@ def _metric_average(rows: Iterable[dict], metric: str) -> Optional[float]:
     if not values:
         return None
     return mean(values)
-
-
-def _summary_rows(results: Dict[str, Dict[str, List[dict]]]) -> List[dict]:
-    rows = []
-    for run_name, scenarios in results.items():
-        all_rows = [row for scenario_rows in scenarios.values() for row in scenario_rows]
-        row = {
-            "run_name": run_name,
-            "scenarios": len(scenarios),
-            "points": len(all_rows),
-        }
-        for metric, _, _ in PRIMARY_METRICS:
-            row[metric] = _metric_average(all_rows, metric)
-        rows.append(row)
-    return rows
-
-
-def _scenario_metric_rows(results: Dict[str, Dict[str, List[dict]]], scenario: str) -> List[dict]:
-    rows = []
-    for run_name, scenarios in results.items():
-        scenario_rows = scenarios.get(scenario, [])
-        row = {"run_name": run_name, "points": len(scenario_rows)}
-        for metric, _, _ in PRIMARY_METRICS:
-            row[metric] = _metric_average(scenario_rows, metric)
-        rows.append(row)
-    return rows
-
-
-def _rank_class(rows: List[dict], metric: str, direction: str, run_name: str) -> str:
-    if direction == "neutral":
-        return ""
-    values = [(row["run_name"], row.get(metric)) for row in rows if _is_number(row.get(metric))]
-    if len(values) < 2:
-        return ""
-    reverse = direction == "higher"
-    values.sort(key=lambda item: item[1], reverse=reverse)
-    if values[0][0] == run_name:
-        return "best"
-    if values[-1][0] == run_name:
-        return "worst"
-    return ""
 
 
 def _table(headers: List[str], rows: List[List[Tuple[str, str]]], sortable: bool = True) -> str:
@@ -138,31 +137,25 @@ def _table(headers: List[str], rows: List[List[Tuple[str, str]]], sortable: bool
     return f"<table{table_class}><thead><tr>{head}</tr></thead><tbody>{''.join(body)}</tbody></table>"
 
 
-def _summary_table(rows: List[dict]) -> str:
-    headers = ["candidate", "scenarios", "points"] + [label for _, label, _ in PRIMARY_METRICS]
-    body = []
-    for row in rows:
-        cells = [
-            (f"<strong>{escape(row['run_name'])}</strong>", ""),
-            (_fmt(row["scenarios"], 0), ""),
-            (_fmt(row["points"], 0), ""),
-        ]
-        for metric, _, direction in PRIMARY_METRICS:
-            cells.append((_fmt(row.get(metric)), _rank_class(rows, metric, direction, row["run_name"])))
-        body.append(cells)
-    return _table(headers, body)
+def _summary_table(results: Dict[str, Dict[str, List[dict]]], scenarios: List[str]) -> str:
+    headers = ["scope", "points"] + [label for _, label, _ in PRIMARY_METRICS]
+    sections = []
+    for run_name, scenario_map in results.items():
+        body = []
+        for scenario in scenarios:
+            scenario_rows = scenario_map.get(scenario, [])
+            cells = [
+                (f"<strong>{escape(SCENARIO_TITLES.get(scenario, scenario))}</strong>", ""),
+                (_fmt(len(scenario_rows), 0), ""),
+            ]
+            for metric, _, _ in PRIMARY_METRICS:
+                cells.append((_fmt(_metric_average(scenario_rows, metric)), ""))
+            body.append(cells)
 
-
-def _scenario_table(results: Dict[str, Dict[str, List[dict]]], scenario: str) -> str:
-    rows = _scenario_metric_rows(results, scenario)
-    headers = ["candidate", "points"] + [label for _, label, _ in PRIMARY_METRICS]
-    body = []
-    for row in rows:
-        cells = [(f"<strong>{escape(row['run_name'])}</strong>", ""), (_fmt(row["points"], 0), "")]
-        for metric, _, direction in PRIMARY_METRICS:
-            cells.append((_fmt(row.get(metric)), _rank_class(rows, metric, direction, row["run_name"])))
-        body.append(cells)
-    return _table(headers, body)
+        title = f"<h3>{escape(run_name)}</h3>"
+        sections.append(title + _table(headers, body))
+    note = '<p class="summary-note">Metric columns are means over the benchmark test points in each scope.</p>'
+    return note + "".join(sections)
 
 
 def _heat_value(value: Any, min_value: float, max_value: float, invert: bool = False) -> str:
@@ -175,78 +168,183 @@ def _heat_value(value: Any, min_value: float, max_value: float, invert: bool = F
     return f' style="background:hsl({hue} 70% 90%)"'
 
 
-def _velocity_grid(results: Dict[str, Dict[str, List[dict]]]) -> str:
-    sections = []
-    for run_name, scenarios in results.items():
-        rows = scenarios.get("vel_grid", [])
+def _compact_axis_label(scenario: str, label: str) -> str:
+    if scenario == "vel_grid":
+        return label.replace(" yaw=", "/y").replace("vx=", "vx")
+    if scenario == "arm_sweep":
+        return label.replace("intensity=", "a")
+    if scenario == "body_pose":
+        return (
+            label.replace("pitch=", "p")
+            .replace("roll=", "r")
+            .replace("h_target=", "h")
+            .replace("rad", "")
+            .replace("m", "")
+        )
+    if scenario == "gait":
+        return (
+            label.replace("gait_freq=", "f")
+            .replace("swing_h=", "sw")
+            .replace("stance_w=", "w")
+            .replace("Hz", "")
+            .replace("m", "")
+        )
+    return label
+
+
+def _scenario_plot_data(results: Dict[str, Dict[str, List[dict]]], scenario: str, metric_defs: List[Tuple[str, str]]) -> str:
+    payload = {
+        "metrics": [{"label": label, "key": metric} for label, metric in metric_defs],
+        "series": [],
+    }
+    for run_name, scenario_map in results.items():
+        rows = scenario_map.get(scenario, [])
         if not rows:
             continue
-        metrics = ["lin_vel_x_rmse", "ang_vel_yaw_rmse", "fall_rate"]
-        mins = {m: min(_finite_values(rows, m), default=0.0) for m in metrics}
-        maxs = {m: max(_finite_values(rows, m), default=0.0) for m in metrics}
-        headers = ["command", "vx RMSE", "yaw RMSE", "fall rate", "lin reward", "yaw reward"]
-        body = []
-        for row in rows:
-            cells = [(escape(str(row.get("label", "-"))), "")]
-            for metric in metrics:
-                style = _heat_value(row.get(metric), mins[metric], maxs[metric])
-                cells.append((f"<span{style}>{_fmt(row.get(metric))}</span>", "metric-cell"))
-            cells.append((_fmt(row.get("tracking_lin_vel_reward")), ""))
-            cells.append((_fmt(row.get("tracking_ang_vel_reward")), ""))
-            body.append(cells)
-        sections.append(f"<h3>{escape(run_name)}</h3>{_table(headers, body)}")
+        payload["series"].append(
+            {
+                "name": run_name,
+                "labels": [str(row.get("label", "-")) for row in rows],
+                "axis_labels": [_compact_axis_label(scenario, str(row.get("label", "-"))) for row in rows],
+                "values": {
+                    metric: [row.get(metric) if _is_number(row.get(metric)) else None for row in rows]
+                    for _, metric in metric_defs
+                },
+            }
+        )
+    return escape(json.dumps(payload, separators=(",", ":")), quote=True)
+
+
+def _scenario_plot(results: Dict[str, Dict[str, List[dict]]], scenario: str, metric_defs: List[Tuple[str, str]]) -> str:
+    data = _scenario_plot_data(results, scenario, metric_defs)
+    buttons = []
+    for index, (label, metric) in enumerate(metric_defs):
+        active = " active" if index == 0 else ""
+        buttons.append(
+            f'<button type="button" class="metric-tab{active}" data-metric="{escape(metric)}">{escape(label)}</button>'
+        )
+    return (
+        f'<div class="metric-plot" data-plot="{data}">'
+        '<div class="metric-tabs">'
+        + "".join(buttons)
+        + "</div>"
+        '<div class="metric-chart" aria-label="metric chart"></div>'
+        "</div>"
+    )
+
+
+def _scenario_detail_sections(results: Dict[str, Dict[str, List[dict]]], scenarios: List[str]) -> str:
+    sections = []
+    for scenario in scenarios:
+        metric_defs = DETAIL_METRICS.get(scenario)
+        if not metric_defs:
+            continue
+        run_sections = []
+        heat_metrics = [metric for _, metric in metric_defs[:3]]
+        for run_name, scenario_map in results.items():
+            rows = scenario_map.get(scenario, [])
+            if not rows:
+                continue
+            mins = {m: min(_finite_values(rows, m), default=0.0) for m in heat_metrics}
+            maxs = {m: max(_finite_values(rows, m), default=0.0) for m in heat_metrics}
+            headers = ["test point"] + [label for label, _ in metric_defs]
+            body = []
+            for row in rows:
+                cells = [(escape(str(row.get("label", "-"))), "")]
+                for _, metric in metric_defs:
+                    value = _fmt(row.get(metric))
+                    if metric in heat_metrics:
+                        style = _heat_value(row.get(metric), mins[metric], maxs[metric])
+                        cells.append((f"<span{style}>{value}</span>", "metric-cell"))
+                    else:
+                        cells.append((value, ""))
+                body.append(cells)
+            run_sections.append(f"<h3>{escape(run_name)}</h3>{_table(headers, body)}")
+        if run_sections:
+            title = SCENARIO_TITLES.get(scenario, scenario)
+            sections.append(
+                f'<section class="panel" id="detail-{escape(scenario)}"><h2>{escape(title)}</h2>'
+                + _scenario_plot(results, scenario, metric_defs)
+                + "".join(run_sections)
+                + "</section>"
+            )
     if not sections:
         return ""
-    return '<section class="panel"><h2>Velocity Grid Detail</h2>' + "".join(sections) + "</section>"
+    return "".join(sections)
 
 
 def _candidate_cards(results: Dict[str, Dict[str, List[dict]]]) -> str:
     cards = []
-    summary_lookup = {row["run_name"]: row for row in _summary_rows(results)}
     for run_name, scenarios in results.items():
         points = sum(len(rows) for rows in scenarios.values())
-        scenario_text = ", ".join(SCENARIO_TITLES.get(name, name) for name in sorted(scenarios))
-        summary = summary_lookup.get(run_name, {})
+        scenario_names = _scenario_names({run_name: scenarios})
+        scenario_text = ", ".join(SCENARIO_TITLES.get(name, name) for name in scenario_names)
+        all_rows = [row for scenario_rows in scenarios.values() for row in scenario_rows]
         cards.append(
             '<div class="card">'
             f"<h3>{escape(run_name)}</h3>"
             f"<p>{escape(scenario_text)}</p>"
             '<div class="card-stats">'
             f'<div class="stat"><span>{points}</span><label>points</label></div>'
-            f'<div class="stat"><span>{_fmt(summary.get("lin_vel_x_rmse"))}</span><label>vx RMSE</label></div>'
-            f'<div class="stat"><span>{_fmt(summary.get("ang_vel_yaw_rmse"))}</span><label>yaw RMSE</label></div>'
-            f'<div class="stat"><span>{_fmt(summary.get("fall_rate"))}</span><label>fall rate</label></div>'
+            f'<div class="stat"><span>{_fmt(_metric_average(all_rows, "fall_rate"))}</span><label>fall rate mean</label></div>'
+            f'<div class="stat"><span>{_fmt(_metric_average(all_rows, "lin_vel_x_rmse"))}</span><label>vx RMSE mean</label></div>'
+            f'<div class="stat"><span>{_fmt(_metric_average(all_rows, "ang_vel_yaw_rmse"))}</span><label>yaw RMSE mean</label></div>'
+            f'<div class="stat"><span>{_fmt(_metric_average(all_rows, "tracking_lin_vel_reward"))}</span><label>lin reward mean</label></div>'
+            f'<div class="stat"><span>{_fmt(_metric_average(all_rows, "tracking_ang_vel_reward"))}</span><label>yaw reward mean</label></div>'
+            f'<div class="stat"><span>{_fmt(_metric_average(all_rows, "base_height_mean"))}</span><label>base height mean</label></div>'
+            f'<div class="stat"><span>{_fmt(_metric_average(all_rows, "max_torque_mean"))}</span><label>max torque mean</label></div>'
+            '<div class="stat stat-empty" aria-hidden="true"></div>'
             "</div>"
             "</div>"
         )
     return "".join(cards)
 
 
+def _nested_get(data: Dict[str, Any], path: str, default: Any = None) -> Any:
+    current: Any = data
+    for part in path.split("."):
+        if not isinstance(current, dict) or part not in current:
+            return default
+        current = current[part]
+    return current
+
+
 def _metadata_panel(metadata: Dict[str, Any]) -> str:
     if not metadata:
         return ""
-    keys = [
-        "benchmark_mode",
-        "profile",
-        "candidate_dir",
-        "generated_at",
-        "git_commit",
-        "seed",
-        "num_envs_per_policy",
-        "total_envs",
-        "num_eval_steps",
-        "ckptids",
-        "logdirs",
-        "control_dt_s",
+    fields = [
+        ("benchmark_mode", "benchmark_mode", None),
+        ("benchmark_protocol", "benchmark_protocol", None),
+        ("profile", "profile", None),
+        ("candidate_dir", "candidate_dir", None),
+        ("generated_at", "generated_at", None),
+        ("git_commit", "git.short_commit", "git_commit"),
+        ("git_branch", "git.branch", None),
+        ("git_dirty", "git.dirty", None),
+        ("robot", "robot", None),
+        ("sim_device", "sim_device", None),
+        ("seed", "seed", None),
+        ("num_envs_per_policy", "num_envs_per_policy", None),
+        ("total_envs", "total_envs", None),
+        ("num_eval_steps", "num_eval_steps", None),
+        ("ckptids", "ckptids", None),
+        ("logdirs", "logdirs", None),
+        ("control_dt_s", "control_dt_s", None),
+        ("command", "benchmark.command", None),
+        ("runtime_python", "runtime.python", None),
+        ("runtime_torch", "runtime.torch", None),
+        ("cuda_device", "runtime.cuda_device_name", None),
     ]
     rows = []
-    for key in keys:
-        if key not in metadata:
+    for label, path, fallback in fields:
+        value = _nested_get(metadata, path)
+        if value is None and fallback is not None:
+            value = metadata.get(fallback)
+        if value is None:
             continue
-        value = metadata[key]
         if isinstance(value, list):
             value = ", ".join(str(item) for item in value)
-        rows.append(f"<tr><th>{escape(key)}</th><td>{escape(str(value))}</td></tr>")
+        rows.append(f"<tr><th>{escape(label)}</th><td>{escape(str(value))}</td></tr>")
     if not rows:
         return ""
     return '<section class="panel metadata-panel" id="metadata"><h2>Metadata</h2><table><tbody>' + "".join(rows) + "</tbody></table></section>"
@@ -256,76 +354,74 @@ def _rel_link(target: Path, base_dir: Path) -> str:
     return escape(os.path.relpath(target, base_dir))
 
 
-def _artifact_nav(source: Path, output_path: Path) -> str:
-    base_dir = output_path.parent
-    links = []
-    results_root = _find_results_root(source)
-    index_path = results_root / "index.html"
-    if index_path.exists() or results_root.exists():
-        links.append(("All results", index_path))
-    links.append(("results.json", source))
-    report_md = source.with_name("report.md")
-    if report_md.exists():
-        links.append(("report.md", report_md))
-    plots_dir = source.with_name("plots")
-    if plots_dir.exists():
-        links.append(("plots", plots_dir))
-    return "".join(
-        f'<a href="{_rel_link(target, base_dir)}">{escape(label)}</a>'
-        for label, target in links
+def _result_links(source: Path, output_path: Path, limit: int = 16) -> List[dict]:
+    root = _find_results_root(source)
+    if not root.is_dir():
+        return []
+
+    entries = []
+    result_paths = sorted(
+        root.rglob("results.json"),
+        key=lambda path: path.stat().st_mtime if path.exists() else 0.0,
+        reverse=True,
     )
-
-
-def _plot_gallery(source: Path, output_path: Path) -> str:
-    plots_dir = source.with_name("plots")
-    if not plots_dir.is_dir():
-        return ""
-
-    images = sorted(plots_dir.glob("*.png"))
-    if not images:
-        return ""
-
-    base_dir = output_path.parent
-    figures = []
-    for image in images:
-        title = image.stem.replace("_", " ")
-        src = _rel_link(image, base_dir)
-        figures.append(
-            "<figure>"
-            f'<a href="{src}" class="plot-link" data-title="{escape(title)}">'
-            f'<img src="{src}" alt="{escape(title)}">'
-            "</a>"
-            f"<figcaption>{escape(title)}</figcaption>"
-            "</figure>"
+    for results_path in result_paths:
+        entry = _read_index_entry(results_path, root)
+        if entry is None:
+            continue
+        entries.append(
+            {
+                "name": entry["name"],
+                "href": _rel_link(entry["report"], output_path.parent),
+                "active": results_path.resolve() == source.resolve(),
+                "candidate": ", ".join(entry["candidates"][:2]),
+                "points": entry["points"],
+            }
         )
-    return '<section class="panel" id="plots"><h2>Plots</h2><div class="plot-grid">' + "".join(figures) + "</div></section>"
+        if len(entries) >= limit:
+            break
+    return entries
 
 
-def _quick_nav(scenarios: List[str], has_plots: bool, has_metadata: bool) -> str:
-    links = [('<a href="#summary">Summary</a>')]
+def _side_nav(source: Path, output_path: Path, scenarios: List[str], has_metadata: bool) -> str:
+    section_links = [("Summary", "#summary")]
     if has_metadata:
-        links.append('<a href="#metadata">Metadata</a>')
+        section_links.append(("Metadata", "#metadata"))
     for scenario in scenarios:
-        links.append(f'<a href="#scenario-{escape(scenario)}">{escape(SCENARIO_TITLES.get(scenario, scenario))}</a>')
-    if "vel_grid" in scenarios:
-        links.append('<a href="#velocity-grid">Velocity Detail</a>')
-    if has_plots:
-        links.append('<a href="#plots">Plots</a>')
-    return '<div class="quick-nav">' + "".join(links) + "</div>"
+        if scenario in DETAIL_METRICS:
+            section_links.append((SCENARIO_TITLES.get(scenario, scenario), f"#detail-{scenario}"))
+    sections = "".join(f'<a href="{escape(href)}">{escape(label)}</a>' for label, href in section_links)
+    result_items = []
+    for entry in _result_links(source, output_path):
+        active = " active" if entry["active"] else ""
+        title = entry["candidate"] or entry["name"]
+        result_items.append(
+            f'<a class="result-link{active}" href="{entry["href"]}">'
+            f'<span>{escape(entry["name"])}</span>'
+            f'<small>{escape(title)} · {entry["points"]} pts</small>'
+            "</a>"
+        )
+    results_block = (
+        '<div class="nav-group nav-results"><h3>Results</h3>'
+        + "".join(result_items)
+        + "</div>"
+        if result_items
+        else ""
+    )
+    return (
+        '<aside class="side-nav">'
+        '<div class="nav-group"><h3>Report</h3>'
+        f"{sections}"
+        "</div>"
+        f"{results_block}"
+        "</aside>"
+    )
 
 
 def _render_html(results: Dict[str, Dict[str, List[dict]]], source: Path, output_path: Path) -> str:
     scenarios = _scenario_names(results)
-    summary = _summary_rows(results)
     metadata = _load_metadata(source)
-    has_plots = source.with_name("plots").is_dir() and any(source.with_name("plots").glob("*.png"))
     generated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    scenario_sections = []
-    for scenario in scenarios:
-        title = SCENARIO_TITLES.get(scenario, scenario)
-        scenario_sections.append(
-            f'<section class="panel" id="scenario-{escape(scenario)}"><h2>{escape(title)}</h2>{_scenario_table(results, scenario)}</section>'
-        )
 
     return f"""<!doctype html>
 <html lang="en">
@@ -353,49 +449,97 @@ def _render_html(results: Dict[str, Dict[str, List[dict]]], source: Path, output
       color: var(--text);
     }}
     header {{
-      padding: 28px 32px 18px;
-      border-bottom: 1px solid var(--border);
+      max-width: 1520px;
+      margin: 24px auto 0;
+      padding: 0 32px;
+    }}
+    .header-inner {{
+      border: 1px solid var(--border);
+      border-radius: 8px;
       background: #ffffff;
+      padding: 22px 24px;
     }}
     h1 {{ margin: 0 0 8px; font-size: 28px; }}
     h2 {{ margin: 0 0 16px; font-size: 18px; }}
     h3 {{ margin: 16px 0 10px; font-size: 15px; }}
     .meta {{ color: var(--muted); display: flex; flex-wrap: wrap; gap: 12px 22px; }}
-    nav {{ display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }}
-    nav a, footer a {{
+    a, footer a {{
       color: var(--accent);
       text-decoration: none;
       font-weight: 650;
     }}
-    nav a {{
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 6px 10px;
-      background: #fbfcfe;
+    a:hover, footer a:hover {{ text-decoration: underline; }}
+    .layout {{
+      display: grid;
+      grid-template-columns: 220px minmax(0, 1fr);
+      gap: 20px;
+      max-width: 1520px;
+      margin: 0 auto;
+      padding: 24px 32px 40px;
     }}
-    nav a:hover, footer a:hover {{ text-decoration: underline; }}
-    .quick-nav {{
+    .side-nav {{
       position: sticky;
-      top: 0;
-      z-index: 20;
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-      padding: 10px 32px;
-      background: rgba(246,247,249,0.94);
-      border-bottom: 1px solid var(--border);
-      backdrop-filter: blur(8px);
+      top: 18px;
+      align-self: start;
+      display: grid;
+      gap: 12px;
+      max-height: calc(100vh - 36px);
+      overflow-y: auto;
     }}
-    .quick-nav a {{
-      color: var(--accent);
-      text-decoration: none;
+    .nav-group {{
+      padding: 12px;
       border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 5px 9px;
+      border-radius: 8px;
       background: #ffffff;
+    }}
+    .nav-group h3 {{
+      margin: 0 0 8px;
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0;
+    }}
+    .nav-group a {{
+      display: block;
+      border-radius: 6px;
+      padding: 7px 8px;
+      color: var(--text);
+      text-decoration: none;
       font-weight: 650;
     }}
-    main {{ padding: 24px 32px 40px; max-width: 1440px; margin: 0 auto; }}
+    .nav-group a:hover {{
+      background: #eef6f4;
+      color: var(--accent);
+      text-decoration: none;
+    }}
+    .nav-group a.active {{
+      background: #e4f2ef;
+      color: var(--accent);
+    }}
+    .nav-results {{
+      max-height: 46vh;
+      overflow-y: auto;
+    }}
+    .result-link span {{
+      display: block;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }}
+    .result-link small {{
+      display: block;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 500;
+      line-height: 1.3;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }}
+    .result-link:hover small, .result-link.active small {{
+      color: var(--accent);
+    }}
+    main {{ min-width: 0; }}
     .cards {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; margin-bottom: 18px; }}
     .card, .panel {{
       background: var(--panel);
@@ -405,9 +549,10 @@ def _render_html(results: Dict[str, Dict[str, List[dict]]], source: Path, output
     .card {{ padding: 16px; }}
     .card h3 {{ margin-top: 0; }}
     .card p {{ color: var(--muted); }}
-    .card-stats {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }}
+    .card-stats {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }}
     .stat span {{ font-size: 22px; font-weight: 700; color: var(--accent); }}
     .stat label {{ display: block; color: var(--muted); }}
+    .stat-empty {{ visibility: hidden; }}
     .panel {{ padding: 18px; margin-bottom: 18px; overflow-x: auto; }}
     table {{ width: 100%; border-collapse: collapse; min-width: 780px; }}
     th, td {{ padding: 9px 10px; border-bottom: 1px solid var(--border); text-align: right; white-space: nowrap; }}
@@ -418,110 +563,96 @@ def _render_html(results: Dict[str, Dict[str, List[dict]]], source: Path, output
     .metadata-panel table {{ min-width: 0; }}
     .metadata-panel th {{ width: 220px; text-align: left; }}
     .metadata-panel td {{ text-align: left; white-space: normal; word-break: break-word; }}
+    .summary-note {{ color: var(--muted); margin: 0 0 12px; }}
     td.best {{ background: var(--best); color: #047857; font-weight: 650; }}
     td.worst {{ background: var(--worst); color: #b42318; }}
     td.metric-cell span {{ display: block; margin: -9px -10px; padding: 9px 10px; }}
-    .plot-grid {{
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-      gap: 14px;
-    }}
-    figure {{
-      margin: 0;
+    .metric-plot {{
       border: 1px solid var(--border);
       border-radius: 8px;
-      overflow: hidden;
-      background: #ffffff;
+      background: #fbfcfe;
+      padding: 12px;
+      margin-bottom: 18px;
     }}
-    figure img {{ display: block; width: 100%; height: auto; }}
-    .plot-link {{ display: block; cursor: zoom-in; }}
-    figcaption {{ padding: 9px 10px; color: var(--muted); border-top: 1px solid var(--border); }}
-    .lightbox {{
-      position: fixed;
-      inset: 0;
-      z-index: 1000;
-      display: none;
-      align-items: center;
-      justify-content: center;
-      background: rgba(17, 24, 39, 0.88);
-      padding: 28px;
-    }}
-    .lightbox.open {{ display: flex; }}
-    .lightbox-inner {{
-      position: relative;
-      display: grid;
-      grid-template-rows: auto 1fr auto;
-      gap: 10px;
-      width: min(1120px, 96vw);
-      height: min(820px, 94vh);
-    }}
-    .lightbox-title {{ color: #ffffff; font-weight: 650; }}
-    .lightbox img {{
-      align-self: center;
-      justify-self: center;
-      max-width: 100%;
-      max-height: 100%;
-      object-fit: contain;
-      background: #ffffff;
-      border-radius: 8px;
-    }}
-    .lightbox-controls {{
+    .metric-tabs {{
       display: flex;
       align-items: center;
-      justify-content: space-between;
-      gap: 10px;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 10px;
     }}
-    .lightbox button {{
-      border: 1px solid rgba(255,255,255,0.28);
+    .metric-tab {{
+      border: 1px solid var(--border);
       border-radius: 6px;
-      background: rgba(255,255,255,0.12);
-      color: #ffffff;
+      background: #ffffff;
+      color: var(--text);
       font: inherit;
       font-weight: 650;
-      padding: 8px 12px;
+      padding: 6px 9px;
       cursor: pointer;
     }}
-    .lightbox button:hover {{ background: rgba(255,255,255,0.22); }}
-    .lightbox-close {{
-      position: absolute;
-      top: 0;
-      right: 0;
+    .metric-tab:hover, .metric-tab.active {{
+      background: #e4f2ef;
+      color: var(--accent);
     }}
-    .lightbox-count {{ color: rgba(255,255,255,0.78); }}
-    footer {{ color: var(--muted); padding: 0 32px 30px; max-width: 1440px; margin: 0 auto; }}
+    .metric-chart {{
+      min-height: 280px;
+      overflow-x: auto;
+    }}
+    .metric-chart svg {{
+      display: block;
+      width: 100%;
+      min-width: 720px;
+      height: auto;
+    }}
+    .chart-axis {{ stroke: #98a2b3; stroke-width: 1; }}
+    .chart-grid {{ stroke: #d9dee7; stroke-width: 1; }}
+    .chart-label {{ fill: var(--muted); font-size: 11px; }}
+    .chart-line {{ fill: none; stroke-width: 2.4; }}
+    .chart-point {{ stroke: #ffffff; stroke-width: 1.5; }}
+    .chart-legend {{ fill: var(--text); font-size: 12px; }}
+    footer {{ color: var(--muted); padding: 0 32px 30px; max-width: 1520px; margin: 0 auto; }}
+    @media (max-width: 900px) {{
+      .layout {{
+        grid-template-columns: 1fr;
+        padding: 16px;
+      }}
+      .side-nav {{
+        position: static;
+        display: block;
+      }}
+      .nav-group {{
+        margin-bottom: 10px;
+      }}
+      .nav-group a {{
+        display: inline-block;
+        margin: 0 4px 6px 0;
+      }}
+      header {{ margin-top: 16px; padding: 0 16px; }}
+      .header-inner {{ padding: 18px; }}
+    }}
   </style>
 </head>
 <body>
   <header>
-    <h1>RoboDuet Benchmark Report</h1>
-    <div class="meta">
-      <span>source: {escape(str(source))}</span>
-      <span>generated: {escape(generated)}</span>
-      <span>candidates: {len(results)}</span>
-      <span>scenarios: {len(scenarios)}</span>
-    </div>
-    <nav>{_artifact_nav(source, output_path)}</nav>
-  </header>
-  {_quick_nav(scenarios, has_plots, bool(metadata))}
-  <main>
-    <section class="cards">{_candidate_cards(results)}</section>
-    <section class="panel" id="summary"><h2>Summary</h2>{_summary_table(summary)}</section>
-    {_metadata_panel(metadata)}
-    {''.join(scenario_sections)}
-    <div id="velocity-grid">{_velocity_grid(results)}</div>
-    {_plot_gallery(source, output_path)}
-  </main>
-  <div class="lightbox" id="plot-lightbox" aria-hidden="true">
-    <div class="lightbox-inner">
-      <button class="lightbox-close" type="button" data-lightbox-close>Close</button>
-      <div class="lightbox-title" id="lightbox-title"></div>
-      <img id="lightbox-image" src="" alt="">
-      <div class="lightbox-controls">
-        <button type="button" data-lightbox-prev>Previous</button>
-        <span class="lightbox-count" id="lightbox-count"></span>
-        <button type="button" data-lightbox-next>Next</button>
+    <div class="header-inner">
+      <h1>RoboDuet Benchmark Report</h1>
+      <div class="meta">
+        <span>source: {escape(str(source))}</span>
+        <span>generated: {escape(generated)}</span>
+        <span>candidates: {len(results)}</span>
+        <span>scenarios: {len(scenarios)}</span>
       </div>
     </div>
+  </header>
+  <div class="layout">
+    {_side_nav(source, output_path, scenarios, bool(metadata))}
+    <main>
+      <section class="cards">{_candidate_cards(results)}</section>
+      <section class="panel" id="summary"><h2>Summary - Metric Mean</h2>{_summary_table(results, scenarios)}</section>
+      {_metadata_panel(metadata)}
+      {_scenario_detail_sections(results, scenarios)}
+    </main>
   </div>
   <footer>Green cells mark best values within the current table; red cells mark worst values.</footer>
   <script>
@@ -549,63 +680,129 @@ def _render_html(results: Dict[str, Dict[str, List[dict]]], source: Path, output
         }});
       }});
 
-      const links = Array.from(document.querySelectorAll(".plot-link"));
-      const lightbox = document.getElementById("plot-lightbox");
-      const image = document.getElementById("lightbox-image");
-      const title = document.getElementById("lightbox-title");
-      const count = document.getElementById("lightbox-count");
-      let index = 0;
+      const colors = ["#0f766e", "#7c3aed", "#dc6803", "#2563eb", "#c026d3", "#16a34a"];
 
-      function render() {{
-        const link = links[index];
-        if (!link) return;
-        const label = link.dataset.title || link.querySelector("img")?.alt || "plot";
-        image.src = link.getAttribute("href");
-        image.alt = label;
-        title.textContent = label;
-        count.textContent = `${{index + 1}} / ${{links.length}}`;
+      function finite(values) {{
+        return values.filter((value) => Number.isFinite(value));
       }}
 
-      function openAt(nextIndex) {{
-        index = nextIndex;
-        render();
-        lightbox.classList.add("open");
-        lightbox.setAttribute("aria-hidden", "false");
-        document.body.style.overflow = "hidden";
+      function fmt(value) {{
+        if (!Number.isFinite(value)) return "-";
+        return value.toFixed(4);
       }}
 
-      function close() {{
-        lightbox.classList.remove("open");
-        lightbox.setAttribute("aria-hidden", "true");
-        image.src = "";
-        document.body.style.overflow = "";
+      function renderMetricPlot(plot, metricKey) {{
+        const data = JSON.parse(plot.dataset.plot || "{{}}");
+        const metric = (data.metrics || []).find((item) => item.key === metricKey) || (data.metrics || [])[0];
+        const chart = plot.querySelector(".metric-chart");
+        if (!metric || !chart) return;
+
+        const series = (data.series || []).map((item, i) => ({{
+          name: item.name,
+          labels: item.labels || [],
+          axisLabels: item.axis_labels || item.labels || [],
+          values: (item.values && item.values[metric.key] ? item.values[metric.key] : []).map((value) =>
+            value === null ? NaN : Number(value)
+          ),
+          color: colors[i % colors.length],
+        }}));
+        const allValues = series.flatMap((item) => finite(item.values));
+        if (!allValues.length) {{
+          chart.innerHTML = "<p class='summary-note'>No numeric values for this metric.</p>";
+          return;
+        }}
+
+        let yMin = Math.min(...allValues);
+        let yMax = Math.max(...allValues);
+        if (yMin === yMax) {{
+          yMin -= 1;
+          yMax += 1;
+        }}
+        const pad = (yMax - yMin) * 0.08;
+        yMin -= pad;
+        yMax += pad;
+
+        const width = 820;
+        const height = 280;
+        const margin = {{ left: 58, right: 24, top: series.length > 1 ? 34 : 18, bottom: 58 }};
+        const innerW = width - margin.left - margin.right;
+        const innerH = height - margin.top - margin.bottom;
+        const maxPoints = Math.max(...series.map((item) => item.values.length));
+        const x = (index) => margin.left + (maxPoints <= 1 ? innerW / 2 : (index / (maxPoints - 1)) * innerW);
+        const y = (value) => margin.top + (1 - (value - yMin) / (yMax - yMin)) * innerH;
+        const labels = series[0]?.labels || [];
+        const axisLabels = series[0]?.axisLabels || labels;
+        const labelStep = Math.max(1, Math.ceil(maxPoints / 8));
+        const ticks = [0, 0.25, 0.5, 0.75, 1].map((t) => yMin + t * (yMax - yMin));
+
+        const grid = ticks.map((tick) => {{
+          const yy = y(tick);
+          return `<line class="chart-grid" x1="${{margin.left}}" y1="${{yy}}" x2="${{width - margin.right}}" y2="${{yy}}"></line>` +
+            `<text class="chart-label" x="${{margin.left - 8}}" y="${{yy + 4}}" text-anchor="end">${{fmt(tick)}}</text>`;
+        }}).join("");
+
+        const xLabels = Array.from({{ length: maxPoints }}, (_, i) => {{
+          if (i % labelStep !== 0 && i !== maxPoints - 1) return "";
+          const label = axisLabels[i] || labels[i] || String(i + 1);
+          return `<text class="chart-label" x="${{x(i)}}" y="${{height - 16}}" text-anchor="middle">` +
+            `${{label}}<title>${{labels[i] || label}}</title></text>`;
+        }}).join("");
+
+        const paths = series.map((item) => {{
+          const points = item.values
+            .map((value, i) => Number.isFinite(value) ? `${{x(i)}},${{y(value)}}` : null)
+            .filter(Boolean);
+          const circles = item.values.map((value, i) => {{
+            if (!Number.isFinite(value)) return "";
+            return `<circle class="chart-point" cx="${{x(i)}}" cy="${{y(value)}}" r="4" fill="${{item.color}}">` +
+              `<title>${{item.name}} | ${{labels[i] || i}} | ${{metric.label}}: ${{fmt(value)}}</title></circle>`;
+          }}).join("");
+          return `<polyline class="chart-line" stroke="${{item.color}}" points="${{points.join(" ")}}"></polyline>${{circles}}`;
+        }}).join("");
+
+        const legend = series.length <= 1 ? "" : series.map((item, i) => {{
+          const lx = margin.left + i * 170;
+          return `<circle cx="${{lx}}" cy="18" r="5" fill="${{item.color}}"></circle>` +
+            `<text class="chart-legend" x="${{lx + 9}}" y="22">${{item.name}}</text>`;
+        }}).join("");
+
+        chart.innerHTML = `<svg viewBox="0 0 ${{width}} ${{height}}" role="img" aria-label="${{metric.label}}">` +
+          legend +
+          grid +
+          `<line class="chart-axis" x1="${{margin.left}}" y1="${{margin.top + innerH}}" x2="${{width - margin.right}}" y2="${{margin.top + innerH}}"></line>` +
+          `<line class="chart-axis" x1="${{margin.left}}" y1="${{margin.top}}" x2="${{margin.left}}" y2="${{margin.top + innerH}}"></line>` +
+          paths +
+          xLabels +
+          `</svg>`;
       }}
 
-      function move(delta) {{
-        if (!links.length) return;
-        index = (index + delta + links.length) % links.length;
-        render();
-      }}
-
-      links.forEach((link, i) => {{
-        link.addEventListener("click", (event) => {{
-          event.preventDefault();
-          openAt(i);
+      document.querySelectorAll(".metric-plot").forEach((plot) => {{
+        const firstButton = plot.querySelector(".metric-tab");
+        if (firstButton) renderMetricPlot(plot, firstButton.dataset.metric);
+        plot.querySelectorAll(".metric-tab").forEach((button) => {{
+          button.addEventListener("click", () => {{
+            plot.querySelectorAll(".metric-tab").forEach((item) => item.classList.remove("active"));
+            button.classList.add("active");
+            renderMetricPlot(plot, button.dataset.metric);
+          }});
         }});
       }});
 
-      document.querySelector("[data-lightbox-close]")?.addEventListener("click", close);
-      document.querySelector("[data-lightbox-prev]")?.addEventListener("click", () => move(-1));
-      document.querySelector("[data-lightbox-next]")?.addEventListener("click", () => move(1));
-      lightbox.addEventListener("click", (event) => {{
-        if (event.target === lightbox) close();
+      const scrollKey = "roboduet-benchmark-scroll-y";
+      document.querySelectorAll(".result-link").forEach((link) => {{
+        link.addEventListener("click", () => {{
+          sessionStorage.setItem(scrollKey, String(window.scrollY));
+        }});
       }});
-      document.addEventListener("keydown", (event) => {{
-        if (!lightbox.classList.contains("open")) return;
-        if (event.key === "Escape") close();
-        if (event.key === "ArrowLeft") move(-1);
-        if (event.key === "ArrowRight") move(1);
-      }});
+      const savedScroll = sessionStorage.getItem(scrollKey);
+      if (savedScroll !== null) {{
+        sessionStorage.removeItem(scrollKey);
+        const y = Number(savedScroll);
+        if (Number.isFinite(y)) {{
+          requestAnimationFrame(() => window.scrollTo(0, y));
+          window.addEventListener("load", () => window.scrollTo(0, y), {{ once: true }});
+        }}
+      }}
     }})();
   </script>
 </body>
@@ -633,8 +830,7 @@ def _read_index_entry(results_path: Path, root: Path) -> Optional[dict]:
     return {
         "name": os.path.relpath(run_dir, root),
         "results": results_path,
-        "report": run_dir / "report.html",
-        "markdown": run_dir / "report.md",
+        "report": run_dir / "index.html",
         "candidates": candidates,
         "scenarios": scenarios,
         "points": points,
@@ -643,57 +839,50 @@ def _read_index_entry(results_path: Path, root: Path) -> Optional[dict]:
 
 def _render_index(entries: List[dict], root: Path) -> str:
     generated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    rows = []
-    for entry in entries:
-        report = entry["report"]
-        report_link = report if report.exists() else entry["results"]
-        markdown = entry["markdown"]
-        artifacts = [
-            f'<a href="{_rel_link(report_link, root)}">open</a>',
-            f'<a href="{_rel_link(entry["results"], root)}">json</a>',
-        ]
-        if markdown.exists():
-            artifacts.append(f'<a href="{_rel_link(markdown, root)}">md</a>')
-        rows.append(
-            "<tr>"
-            f'<td><a href="{_rel_link(report_link, root)}"><strong>{escape(entry["name"])}</strong></a></td>'
-            f"<td>{escape(', '.join(entry['candidates']))}</td>"
-            f"<td>{escape(', '.join(SCENARIO_TITLES.get(s, s) for s in entry['scenarios']))}</td>"
-            f"<td>{entry['points']}</td>"
-            f"<td>{' '.join(artifacts)}</td>"
-            "</tr>"
-        )
+    if not entries:
+        latest_href = ""
+        latest_name = "No benchmark results found"
+        refresh = ""
+        script = ""
+    else:
+        latest = entries[0]
+        latest_report = latest["report"] if latest["report"].exists() else latest["results"]
+        latest_href = _rel_link(latest_report, root)
+        latest_name = latest["name"]
+        refresh = f'<meta http-equiv="refresh" content="0; url={latest_href}">'
+        script = f'<script>window.location.replace("{latest_href}");</script>'
 
     return f"""<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>RoboDuet Benchmark Results</title>
+  {refresh}
+  <title>RoboDuet Benchmark Report</title>
   <style>
     body {{ margin: 0; font: 14px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f6f7f9; color: #1f2933; }}
     header {{ padding: 28px 32px 18px; background: #fff; border-bottom: 1px solid #d9dee7; }}
-    main {{ padding: 24px 32px 40px; max-width: 1440px; margin: 0 auto; }}
+    main {{ padding: 24px 32px 40px; max-width: 760px; margin: 0 auto; }}
     h1 {{ margin: 0 0 8px; font-size: 28px; }}
-    .meta {{ color: #667085; }}
-    table {{ width: 100%; border-collapse: collapse; background: #fff; border: 1px solid #d9dee7; border-radius: 8px; overflow: hidden; }}
-    th, td {{ padding: 11px 12px; border-bottom: 1px solid #d9dee7; text-align: left; vertical-align: top; }}
-    th {{ color: #667085; background: #fbfcfe; font-weight: 600; }}
+    .meta, p {{ color: #667085; }}
+    .panel {{ background: #fff; border: 1px solid #d9dee7; border-radius: 8px; padding: 18px; }}
     a {{ color: #0f766e; text-decoration: none; font-weight: 600; margin-right: 10px; }}
     a:hover {{ text-decoration: underline; }}
   </style>
 </head>
 <body>
   <header>
-    <h1>RoboDuet Benchmark Results</h1>
+    <h1>RoboDuet Benchmark Report</h1>
     <div class="meta">generated: {escape(generated)} | result sets: {len(entries)}</div>
   </header>
   <main>
-    <table>
-      <thead><tr><th>result</th><th>candidates</th><th>scenarios</th><th>points</th><th>artifacts</th></tr></thead>
-      <tbody>{''.join(rows)}</tbody>
-    </table>
+    <section class="panel">
+      <h2>Opening latest report</h2>
+      <p>{escape(latest_name)}</p>
+      {f'<p><a href="{latest_href}">Open report</a></p>' if latest_href else ''}
+    </section>
   </main>
+  {script}
 </body>
 </html>
 """
@@ -701,13 +890,29 @@ def _render_index(entries: List[dict], root: Path) -> str:
 
 def _write_index_for_root(root: Path):
     entries = []
-    for path in sorted(root.rglob("results.json"), reverse=True):
+    result_paths = sorted(
+        root.rglob("results.json"),
+        key=lambda path: path.stat().st_mtime if path.exists() else 0.0,
+        reverse=True,
+    )
+    for path in result_paths:
         entry = _read_index_entry(path, root)
         if entry is not None:
             entries.append(entry)
+    for entry in entries:
+        report_path = entry["report"]
+        if not report_path.exists():
+            results = _load_results(entry["results"])
+            report_path.write_text(_render_html(results, entry["results"], report_path), encoding="utf-8")
     index_path = root / "index.html"
-    index_path.write_text(_render_index(entries, root), encoding="utf-8")
-    print(f"[Benchmark] Results index saved -> {index_path}")
+    if entries:
+        latest_results = entries[0]["results"]
+        latest = _load_results(latest_results)
+        index_path.write_text(_render_html(latest, latest_results, index_path), encoding="utf-8")
+        print(f"[Benchmark] Latest report index saved -> {index_path}")
+    else:
+        index_path.write_text(_render_index(entries, root), encoding="utf-8")
+        print(f"[Benchmark] Empty results index saved -> {index_path}")
 
 
 def _write_index(results_path: Path):
@@ -724,7 +929,7 @@ def _write_report(results_path: Path, output_path: Path):
 
 def write_report_bundle(results_path: str):
     path = Path(results_path)
-    _write_report(path, path.with_name("report.html"))
+    _write_report(path, path.with_name("index.html"))
     _write_index(path)
 
 
@@ -734,9 +939,9 @@ def parse_args(argv: Optional[List[str]] = None):
     parser.add_argument(
         "--results_root",
         default=None,
-        help="Generate report.html for every results.json under this benchmark results root",
+        help="Generate index.html for every results.json under this benchmark results root",
     )
-    parser.add_argument("--output", default=None, help="Output HTML path. Defaults to report.html next to results.json")
+    parser.add_argument("--output", default=None, help="Output HTML path. Defaults to index.html next to results.json")
     parser.add_argument(
         "--no_index",
         action="store_true",
@@ -755,7 +960,7 @@ def main(argv: Optional[List[str]] = None):
         if args.output:
             raise ValueError("--output cannot be used with --results_root")
         for results_path in result_paths:
-            _write_report(results_path, results_path.with_name("report.html"))
+            _write_report(results_path, results_path.with_name("index.html"))
         if not args.no_index:
             _write_index_for_root(root)
         return
@@ -764,7 +969,7 @@ def main(argv: Optional[List[str]] = None):
         raise ValueError("Provide either --results or --results_root")
 
     results_path = Path(args.results)
-    output_path = Path(args.output) if args.output else results_path.with_name("report.html")
+    output_path = Path(args.output) if args.output else results_path.with_name("index.html")
     _write_report(results_path, output_path)
     if not args.no_index:
         _write_index(results_path)
