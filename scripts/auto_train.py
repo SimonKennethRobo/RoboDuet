@@ -99,10 +99,24 @@ def main(args):
     RunnerArgs.num_steps_per_env = args.num_steps_per_env
     PPO_Args.num_mini_batches = args.num_mini_batches
 
-    DogRunnerArgs.resume = args.resume
-    DogRunnerArgs.resume_path = "your_dog_ckpt_path"
-    ArmRunnerArgs.resume = args.resume
-    ArmRunnerArgs.resume_path = "your_arm_ckpt_path"
+    stage2_freeze_loco_policy = not args.stage2_unfreeze_loco_policy
+    DogRunnerArgs.ckpt_path = args.stage1_ckpt_path
+    if args.train_stage != "stage1" and DogRunnerArgs.ckpt_path is None and stage2_freeze_loco_policy:
+        if stage2_freeze_loco_policy:
+            print(
+                "[warn] --stage2_freeze_loco_policy requires --stage1_ckpt_path for stage2 training; "
+                "forcing --stage2_unfreeze_loco_policy.",
+                flush=True,
+            )
+        stage2_freeze_loco_policy = False
+    DogRunnerArgs.stage2_freeze_loco_policy = stage2_freeze_loco_policy
+    DogRunnerArgs.stage2_loco_learning_rate = args.stage2_loco_learning_rate
+    ArmRunnerArgs.ckpt_path = args.stage2_ckpt_path
+    print("-" * 20 + " Configured Train Stage " + "-" * 20)
+    print(f"DogRunnerArgs: {vars(DogRunnerArgs)}")
+    print("-" * 10)
+    print(f"ArmRunnerArgs: {vars(ArmRunnerArgs)}")
+    print("-" * 50)
 
     configure_train_stage(args)
 
@@ -230,7 +244,7 @@ if __name__ == "__main__":
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--offline", action="store_true")
     parser.add_argument("--no_wandb", action="store_true")
-    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--resume", action="store_true")  # for two_stage
     parser.add_argument("--tags", nargs="+", default=[])
     parser.add_argument("--notes", type=str, default=None)
     parser.add_argument("--seed", type=int, default=-1)
@@ -242,6 +256,12 @@ if __name__ == "__main__":
     parser.add_argument("--num_mini_batches", type=int, default=PPO_Args.num_mini_batches)
 
     parser.add_argument("--train_stage", type=str, default="two_stage", choices=["stage1", "stage2", "two_stage"])
+    stage2_loco_group = parser.add_mutually_exclusive_group()
+    stage2_loco_group.add_argument("--stage2_unfreeze_loco_policy", action="store_true", default=False)
+    parser.add_argument("--stage2_loco_learning_rate", type=float, default=None)
+    parser.add_argument("--stage1_ckpt_path", type=str, default=None)
+    parser.add_argument("--stage2_ckpt_path", type=str, default=None)
+
     parser.add_argument("--dyna_gait", action="store_true", default=False)
     parser.add_argument("--traj_track", action="store_true", default=False)
 

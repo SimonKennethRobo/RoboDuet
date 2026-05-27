@@ -32,27 +32,33 @@ class PPO_Args(PrefixProto):
 class PPO:
     actor_critic: ArmActorCritic
 
-    def __init__(self, actor_critic, device="cpu"):
+    def __init__(self, actor_critic, device="cpu", learning_rate=None, adaptation_module_learning_rate=None):
 
         self.device = device
+        learning_rate = PPO_Args.learning_rate if learning_rate is None else learning_rate
+        adaptation_module_learning_rate = (
+            PPO_Args.adaptation_module_learning_rate
+            if adaptation_module_learning_rate is None
+            else adaptation_module_learning_rate
+        )
 
         # PPO components
         self.actor_critic = actor_critic
         self.actor_critic.to(device)
         self.storage = None  # initialized later
-        self.optimizer = optim.Adam(self.actor_critic.parameters(), lr=PPO_Args.learning_rate)
+        self.optimizer = optim.Adam(self.actor_critic.parameters(), lr=learning_rate)
         self.adaptation_module_optimizer = None
         if getattr(self.actor_critic, "adaptation_module", None) is not None:
             self.adaptation_module_optimizer = optim.Adam(
-                self.actor_critic.parameters(), lr=PPO_Args.adaptation_module_learning_rate
+                self.actor_critic.parameters(), lr=adaptation_module_learning_rate
             )
         if self.actor_critic.decoder:
             self.decoder_optimizer = optim.Adam(
-                self.actor_critic.parameters(), lr=PPO_Args.adaptation_module_learning_rate
+                self.actor_critic.parameters(), lr=adaptation_module_learning_rate
             )
         self.transition = RolloutStorage.Transition()
 
-        self.learning_rate = PPO_Args.learning_rate
+        self.learning_rate = learning_rate
 
     def init_storage(
         self,
@@ -80,6 +86,15 @@ class PPO:
 
     def train_mode(self):
         self.actor_critic.train()
+
+    def set_learning_rate(self, learning_rate):
+        self.learning_rate = learning_rate
+        for param_group in self.optimizer.param_groups:
+            param_group["lr"] = learning_rate
+
+    def clear_storage(self):
+        if self.storage is not None:
+            self.storage.clear()
 
     def act(self, obs, privileged_obs, obs_history):
         # Compute the actions and values
