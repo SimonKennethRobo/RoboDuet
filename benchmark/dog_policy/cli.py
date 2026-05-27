@@ -44,7 +44,7 @@ import datetime
 import json
 import os
 import random
-import subprocess
+import sys
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
@@ -63,15 +63,14 @@ from benchmark.dog_policy.evaluation import (
     load_dog_policy_for_benchmark,
     load_env_benchmark,
     print_comparison_table,
-    save_markdown_report,
     save_metadata,
     save_results,
-    save_visualizations,
     set_gait_cmd,
     set_pose_cmd,
     set_vel_cmd,
     validate_shared_env_compatibility,
 )
+from benchmark.metadata import build_benchmark_metadata
 
 # ---------------------------------------------------------------------------
 # Scenario command grids
@@ -563,13 +562,6 @@ def set_benchmark_seed(seed: int, device: str):
         torch.cuda.manual_seed_all(seed)
 
 
-def _git_commit() -> str:
-    try:
-        return subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], text=True).strip()
-    except Exception:
-        return "unknown"
-
-
 def main(argv: Optional[List[str]] = None):
     args = parse_args(argv)
 
@@ -655,31 +647,22 @@ def main(argv: Optional[List[str]] = None):
 
     json_path = os.path.join(run_dir, "results.json")
     metadata_path = os.path.join(run_dir, "metadata.json")
-    markdown_path = os.path.join(run_dir, "report.md")
-    plots_dir = os.path.join(run_dir, "plots")
-    metadata = {
-        "candidate_dir": args.candidate_dir or "cli",
-        "benchmark_mode": "dog_only",
-        "profile": args.profile or "cli",
-        "generated_at": datetime.datetime.now().isoformat(timespec="seconds"),
-        "git_commit": _git_commit(),
-        "runs": names,
-        "logdirs": args.logdirs,
-        "ckptids": ckptids,
-        "num_envs_per_policy": args.num_envs_per_policy,
-        "total_envs": total_envs,
-        "num_eval_steps": args.num_eval_steps,
-        "seed": args.seed,
-        "control_dt_s": getattr(env.env, "dt", "unknown"),
-        "headless": args.headless,
-        "dog_num_commands": getattr(cfg.dog, "dog_num_commands", "unknown"),
-        "use_dynamic_gait": getattr(cfg.commands, "use_dynamic_gait", "unknown"),
-        "scenario_d_enabled": layout.has_dynamic_gait and not args.skip_d,
-    }
+    metadata = build_benchmark_metadata(
+        mode="dog_only",
+        protocol="dog_only_v1",
+        profile=args.profile or "cli",
+        candidate_dir=args.candidate_dir or "cli",
+        names=names,
+        logdirs=args.logdirs,
+        ckptids=ckptids,
+        args=args,
+        total_envs=total_envs,
+        control_dt_s=getattr(env.env, "dt", "unknown"),
+        layout=layout,
+        command_argv=sys.argv,
+    )
     save_results(all_results, json_path)
     save_metadata(metadata, metadata_path)
-    save_visualizations(all_results, plots_dir)
-    save_markdown_report(all_results, markdown_path, metadata=metadata, plot_dir=plots_dir)
     try:
         from benchmark.reports.html import write_report_bundle
 

@@ -884,7 +884,6 @@ def save_markdown_report(
     all_results: Dict[str, Dict[str, List[ScenarioResult]]],
     output_path: str,
     metadata: Optional[Dict[str, object]] = None,
-    plot_dir: Optional[str] = None,
 ):
     run_names = list(all_results.keys())
     lines = ["# RoboDuet Policy Benchmark", ""]
@@ -917,72 +916,11 @@ def save_markdown_report(
                     row.append(_format_metric_value(result, attr))
             lines.append("| " + " | ".join(row) + " |")
         lines.append("")
-        if plot_dir is not None:
-            rel_plot_dir = os.path.relpath(plot_dir, os.path.dirname(os.path.abspath(output_path)))
-            plot_links = [f"[{col_name}]({rel_plot_dir}/{scenario}_{col_name}.png)" for col_name, _ in cols]
-            lines.extend(["Plots: " + " · ".join(plot_links), ""])
 
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
     print(f"[Benchmark] Markdown report saved → {output_path}")
-
-
-def save_visualizations(all_results: Dict[str, Dict[str, List[ScenarioResult]]], output_dir: str) -> List[str]:
-    try:
-        import matplotlib
-
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-    except Exception as exc:
-        print(f"[Benchmark] Skipping plots: matplotlib unavailable ({exc})")
-        return []
-
-    os.makedirs(output_dir, exist_ok=True)
-    run_names = list(all_results.keys())
-    saved_paths = []
-    for scenario, (title, cols) in SCENARIO_META.items():
-        labels = _scenario_labels(all_results, scenario)
-        if not labels:
-            continue
-        lookup = {run_name: {r.label: r for r in all_results[run_name].get(scenario, [])} for run_name in run_names}
-        x = list(range(len(labels)))
-
-        for col_name, attr in cols:
-            has_value = False
-            fig, ax = plt.subplots(figsize=(max(8.0, len(labels) * 0.75), 4.8))
-            for run_name in run_names:
-                values = []
-                for label in labels:
-                    result = lookup[run_name].get(label)
-                    value = float("nan") if result is None else getattr(result, attr)
-                    if attr == "fall_rate" and not math.isnan(value):
-                        value *= 100.0
-                    if not math.isnan(value):
-                        has_value = True
-                    values.append(value)
-                ax.plot(x, values, marker="o", label=run_name)
-            if not has_value:
-                plt.close(fig)
-                continue
-
-            ax.set_title(f"{title}: {col_name}")
-            ax.set_ylabel("percent" if attr == "fall_rate" else col_name)
-            ax.set_xticks(x)
-            ax.set_xticklabels(labels, rotation=35, ha="right")
-            ax.grid(True, alpha=0.3)
-            ax.legend()
-            fig.tight_layout()
-            path = os.path.join(output_dir, f"{scenario}_{col_name}.png")
-            fig.savefig(path, dpi=150)
-            plt.close(fig)
-            saved_paths.append(path)
-
-    if saved_paths:
-        print(f"[Benchmark] Plots saved → {output_dir}")
-    else:
-        print("[Benchmark] No plots generated")
-    return saved_paths
 
 
 # ---------------------------------------------------------------------------
