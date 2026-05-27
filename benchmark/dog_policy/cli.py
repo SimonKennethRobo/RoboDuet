@@ -52,6 +52,7 @@ import isaacgym  # noqa: F401 – must precede torch
 import numpy as np
 import torch
 
+from benchmark.candidates import discover_run_logdirs
 from benchmark.dog_policy.evaluation import (
     CommandLayout,
     HistoryWrapper,
@@ -463,14 +464,8 @@ def _apply_profile(args):
 
 def _discover_candidate_logdirs(candidate_dir: str) -> List[Path]:
     root = Path(candidate_dir)
-    if not root.exists():
-        raise ValueError(f"{candidate_dir}: candidate directory does not exist")
-    if not root.is_dir():
-        raise ValueError(f"{candidate_dir}: candidate path is not a directory")
-
     logdirs = []
-    for params_path in sorted(root.rglob("parameters.pkl")):
-        logdir = params_path.parent
+    for logdir in discover_run_logdirs(root):
         has_dog = (logdir / "checkpoints_dog").is_dir()
         if has_dog:
             logdirs.append(logdir)

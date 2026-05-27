@@ -28,7 +28,7 @@ benchmark/candidates/
 - `checkpoints_arm/ac_weights_*_arm.pt`
 - 可选 `README.md` / `candidate.json`
 
-不要使用 symlink 指向 `runs/`。`runs/` 已被仓库全局 ignore，symlink 不能可靠表达需要长期保留的 candidate 内容。
+长期保留 candidate 时推荐复制 run-like 目录，而不是只提交 symlink。`runs/` 已被仓库全局 ignore，symlink 不能可靠表达需要长期保留的 candidate 内容。不过本地 benchmark 扫描会 follow 目录 symlink，方便临时把 `benchmark/candidates/<date>/<run_name>` 指向本机已有 `runs/...` 做评估。
 
 当前启动前会检查每个 dog-only candidate 至少包含：
 
@@ -65,7 +65,7 @@ python -m benchmark.cli \
 
 旧入口 `python scripts/benchmark_policy.py ...` 仍然保留为兼容 wrapper。
 
-统一入口 `benchmark.cli` 负责选择 benchmark 模式。当前 `--dog_only` 已实现，`--candidate_dir` 会递归扫描所有包含 `parameters.pkl` 的 run-like 目录，并只选择包含 `checkpoints_dog/` 的 candidate。
+统一入口 `benchmark.cli` 负责选择 benchmark 模式。当前 `--dog_only` 已实现，`--candidate_dir` 会递归扫描所有包含 `parameters.pkl` 的 run-like 目录，支持多级目录和本地目录 symlink，并只选择包含 `checkpoints_dog/` 的 candidate。
 
 未来模式：
 

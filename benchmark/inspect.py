@@ -10,6 +10,8 @@ from typing import Any, Dict, Iterable, List, Optional
 
 import torch
 
+from benchmark.candidates import discover_run_logdirs
+
 
 def _load_cfg(logdir: Path) -> Dict[str, Any]:
     path = logdir / "parameters.pkl"
@@ -208,9 +210,7 @@ def inspect_logdir(logdir: Path, ckpt_id: str) -> Dict[str, Any]:
 
 
 def _discover_logdirs(candidate_dir: Path) -> List[Path]:
-    if not candidate_dir.is_dir():
-        raise ValueError(f"{candidate_dir}: candidate directory does not exist")
-    return sorted(path.parent for path in candidate_dir.rglob("parameters.pkl"))
+    return discover_run_logdirs(candidate_dir)
 
 
 def _print_text(reports: List[Dict[str, Any]]):

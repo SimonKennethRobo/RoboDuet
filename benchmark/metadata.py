@@ -10,6 +10,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit, urlunsplit
 
 
 def _git_output(args: List[str]) -> Optional[str]:
@@ -17,6 +18,24 @@ def _git_output(args: List[str]) -> Optional[str]:
         return subprocess.check_output(["git", *args], cwd=Path.cwd(), text=True, stderr=subprocess.DEVNULL).strip()
     except Exception:
         return None
+
+
+def _redact_url_credentials(url: str) -> str:
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return url
+    if not parts.netloc or "@" not in parts.netloc:
+        return url
+    host = parts.hostname or ""
+    if parts.port is not None:
+        host = f"{host}:{parts.port}"
+    return urlunsplit((parts.scheme, f"<redacted>@{host}", parts.path, parts.query, parts.fragment))
+
+
+def _redact_remote_line(line: str) -> str:
+    parts = line.split()
+    return " ".join(_redact_url_credentials(part) if "://" in part else part for part in parts)
 
 
 def git_snapshot() -> Dict[str, Any]:
@@ -28,7 +47,7 @@ def git_snapshot() -> Dict[str, Any]:
         "branch": _git_output(["branch", "--show-current"]) or "unknown",
         "dirty": bool(status),
         "status_short": status or "",
-        "remotes": remotes.splitlines() if remotes else [],
+        "remotes": [_redact_remote_line(line) for line in remotes.splitlines()] if remotes else [],
     }
 
 

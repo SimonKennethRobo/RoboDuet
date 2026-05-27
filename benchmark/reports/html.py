@@ -168,6 +168,10 @@ def _heat_value(value: Any, min_value: float, max_value: float, invert: bool = F
     return f' style="background:hsl({hue} 70% 90%)"'
 
 
+def _metric_prefers_higher(metric: str) -> bool:
+    return "reward" in metric or metric.endswith("_rew")
+
+
 def _compact_axis_label(scenario: str, label: str) -> str:
     if scenario == "vel_grid":
         return label.replace(" yaw=", "/y").replace("vx=", "vx")
@@ -254,7 +258,12 @@ def _scenario_detail_sections(results: Dict[str, Dict[str, List[dict]]], scenari
                 for _, metric in metric_defs:
                     value = _fmt(row.get(metric))
                     if metric in heat_metrics:
-                        style = _heat_value(row.get(metric), mins[metric], maxs[metric])
+                        style = _heat_value(
+                            row.get(metric),
+                            mins[metric],
+                            maxs[metric],
+                            invert=_metric_prefers_higher(metric),
+                        )
                         cells.append((f"<span{style}>{value}</span>", "metric-cell"))
                     else:
                         cells.append((value, ""))
@@ -654,7 +663,7 @@ def _render_html(results: Dict[str, Dict[str, List[dict]]], source: Path, output
       {_scenario_detail_sections(results, scenarios)}
     </main>
   </div>
-  <footer>Green cells mark best values within the current table; red cells mark worst values.</footer>
+  <footer>Heatmap colors are normalized within each candidate and scenario table; green indicates better relative values for highlighted metrics, red indicates worse relative values.</footer>
   <script>
     (() => {{
       document.querySelectorAll("table.sortable").forEach((table) => {{
@@ -827,10 +836,13 @@ def _read_index_entry(results_path: Path, root: Path) -> Optional[dict]:
     scenarios = _scenario_names(results)
     points = sum(len(rows) for scenario_map in results.values() for rows in scenario_map.values())
     candidates = list(results)
+    report_path = run_dir / "index.html"
+    if not report_path.exists() and (run_dir / "report.html").exists():
+        report_path = run_dir / "report.html"
     return {
         "name": os.path.relpath(run_dir, root),
         "results": results_path,
-        "report": run_dir / "index.html",
+        "report": report_path,
         "candidates": candidates,
         "scenarios": scenarios,
         "points": points,
