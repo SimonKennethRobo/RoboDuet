@@ -25,6 +25,62 @@ from go1_gym_learn.ppo_cse_automatic.ppo import PPO_Args
 os.environ["WANDB_SILENT"] = "true"
 
 
+_DOG_COMMAND_LIMIT_FIELDS = (
+    "limit_vel_x",
+    "limit_vel_y",
+    "limit_vel_yaw",
+    "limit_body_pitch",
+    "limit_body_roll",
+    "limit_body_height",
+    "limit_gait_frequency",
+    "limit_footswing_height",
+    "limit_stance_width",
+    "limit_stance_length",
+    "limit_gait_duration",
+)
+
+
+def _logdir_from_dog_ckpt_path(ckpt_path):
+    if ckpt_path is None:
+        return None
+    ckpt_path = osp.abspath(ckpt_path)
+    parent = osp.basename(osp.dirname(ckpt_path))
+    if parent == "checkpoints_dog":
+        return osp.dirname(osp.dirname(ckpt_path))
+    if osp.isdir(ckpt_path):
+        return ckpt_path
+    return osp.dirname(ckpt_path)
+
+
+def apply_dog_checkpoint_command_limits(cfg, ckpt_path):
+    logdir = _logdir_from_dog_ckpt_path(ckpt_path)
+    if logdir is None:
+        return
+    params_path = osp.join(logdir, "parameters.pkl")
+    if not osp.exists(params_path):
+        print(f"[warn] dog parameters.pkl not found at {params_path}; using current command limits.", flush=True)
+        return
+    with open(params_path, "rb") as f:
+        params = pickle.load(f)
+    dog_cfg = params.get("Cfg") if isinstance(params, dict) else None
+    dog_commands = getattr(dog_cfg, "commands", None)
+    if dog_commands is None:
+        print(f"[warn] dog parameters.pkl has no Cfg.commands; using current command limits.", flush=True)
+        return
+    copied = []
+    print(f"Loaded dog policy parameters from {params_path}", flush=True)
+    print("Dog command limits applied to stage2:", flush=True)
+    for name in _DOG_COMMAND_LIMIT_FIELDS:
+        if hasattr(dog_commands, name):
+            value = getattr(dog_commands, name)
+            value = list(value) if isinstance(value, tuple) else value
+            setattr(cfg.commands, name, value)
+            copied.append(name)
+            print(f"  {name}: {value}", flush=True)
+    if not copied:
+        print("  [warn] no dog command limit fields were found; using current command limits.", flush=True)
+
+
 def _serializable_config_value(value):
     if isinstance(value, tuple):
         return [_serializable_config_value(item) for item in value]
@@ -109,6 +165,7 @@ def main(args):
                 flush=True,
             )
         stage2_freeze_loco_policy = False
+    apply_dog_checkpoint_command_limits(Cfg, DogRunnerArgs.ckpt_path)
     DogRunnerArgs.stage2_freeze_loco_policy = stage2_freeze_loco_policy
     DogRunnerArgs.stage2_loco_learning_rate = args.stage2_loco_learning_rate
     ArmRunnerArgs.ckpt_path = args.stage2_ckpt_path

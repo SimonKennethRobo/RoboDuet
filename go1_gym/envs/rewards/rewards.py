@@ -26,17 +26,24 @@ class Rewards:
         return pitch_error + roll_error
 
     def _reward_arm_control_limits(self):
-        out_of_limits = -(self.env.plan_actions[:, 0] - self.env.cfg.commands.limit_body_pitch[0]).clip(max=0.)  # lower limit
-        out_of_limits += (self.env.plan_actions[:, 0] - self.env.cfg.commands.limit_body_pitch[1]).clip(min=0.)
-        out_of_limits += -(self.env.plan_actions[:, 1] - self.env.cfg.commands.limit_body_roll[0]).clip(max=0.)  # lower limit
-        out_of_limits += (self.env.plan_actions[:, 1] - self.env.cfg.commands.limit_body_roll[1]).clip(min=0.)
-        return out_of_limits
+        plan_actions_raw = getattr(self.env, "plan_actions_raw", self.env.plan_actions)
+        return torch.sum(torch.square((torch.abs(plan_actions_raw) - 1.0).clip(min=0.0)), dim=1)
 
     def _reward_arm_control_smoothness_1(self):
         # Penalize changes in actions
         diff = torch.square(self.env.plan_actions - self.env.last_plan_actions)
         diff = diff * (self.env.last_plan_actions != 0)  # ignore first step
-        return torch.sum(diff, dim=1)
+        if not getattr(self.env.cfg.arm.trajectory, "enabled", False):
+            return torch.sum(diff, dim=1)
+
+        reward = self.env.cfg.arm.trajectory.dog_command_smoothness_weight_delta_vel * torch.sum(diff[:, :3], dim=1)
+        if diff.shape[1] > 3:
+            reward += self.env.cfg.arm.trajectory.dog_command_smoothness_weight_body_pose * torch.sum(
+                diff[:, 3 : min(6, diff.shape[1])], dim=1
+            )
+        if diff.shape[1] > 6:
+            reward += self.env.cfg.arm.trajectory.dog_command_smoothness_weight_gait * torch.sum(diff[:, 6:], dim=1)
+        return reward
 
     def _reward_arm_control_smoothness_2(self):
         # Penalize changes in actions

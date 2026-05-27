@@ -96,6 +96,10 @@ class ArmTrajectoryConfig:
     pos_error_scale: float = 4.0
     rot_error_scale: float = 1.0
     completion_time_sigma: float = 0.35
+    dog_command_smoothing_alpha: float = 0.2
+    dog_command_smoothness_weight_delta_vel: float = 5.0
+    dog_command_smoothness_weight_body_pose: float = 1.0
+    dog_command_smoothness_weight_gait: float = 2.0
 
 
 @dataclass(frozen=True)
@@ -271,7 +275,7 @@ class Stage1ArmDisturbanceConfig:
 @dataclass(frozen=True)
 class DynaGaitFeatureConfig:
     num_gait_dims: int = 5
-    plan_action_dims: int = 7
+    plan_action_dims: int = 6
     num_bins_gait_frequency: int = 11
     num_bins_footswing_height: int = 5
     num_bins_gait_duration: int = 3
@@ -473,6 +477,10 @@ class RoboDuetCfg(LeggedRobotCfg):
             pos_error_scale = ROBODUET_DEFAULTS.arm.trajectory.pos_error_scale
             rot_error_scale = ROBODUET_DEFAULTS.arm.trajectory.rot_error_scale
             completion_time_sigma = ROBODUET_DEFAULTS.arm.trajectory.completion_time_sigma
+            dog_command_smoothing_alpha = ROBODUET_DEFAULTS.arm.trajectory.dog_command_smoothing_alpha
+            dog_command_smoothness_weight_delta_vel = ROBODUET_DEFAULTS.arm.trajectory.dog_command_smoothness_weight_delta_vel
+            dog_command_smoothness_weight_body_pose = ROBODUET_DEFAULTS.arm.trajectory.dog_command_smoothness_weight_body_pose
+            dog_command_smoothness_weight_gait = ROBODUET_DEFAULTS.arm.trajectory.dog_command_smoothness_weight_gait
             curriculum_levels = ROBODUET_DEFAULTS.arm.trajectory.curriculum_levels
             curriculum_success_threshold = ROBODUET_DEFAULTS.arm.trajectory.curriculum_success_threshold
 
@@ -673,12 +681,12 @@ def env_obs_dim_parts(cfg):
     if cfg.arm.trajectory.enabled:
         parts.update(
             {
+                "arm_dof_vel": cfg.arm.num_actions_arm,
                 "base_height": 1,
-                "foot_contact_states": 4,
                 "ee_pose_body": 9,
                 "ee_twist_body": 6,
                 "trajectory_window": len(cfg.arm.trajectory.window_offsets) * 9,
-                "trajectory_remaining_time": 1,
+                "trajectory_progress_index": 1,
             }
         )
     return parts
@@ -688,27 +696,31 @@ def arm_obs_dim_parts(cfg):
     if cfg.arm.trajectory.enabled:
         parts = {
             "arm_dof_pos": cfg.arm.num_actions_arm,
-            "arm_actions": cfg.arm.num_actions_arm,
+            "arm_dof_vel": cfg.arm.num_actions_arm,
+            "arm_actions": cfg.arm.num_actions_arm_cd,
             "base_height": 1,
-            "foot_contact_states": 4,
             "base_ang_vel": 3,
             "dog_velocity_commands": 3,
+            "trajectory_completion_time_command": 1,
             "ee_pose_body": 9,
             "ee_twist_body": 6,
             "trajectory_window": len(cfg.arm.trajectory.window_offsets) * 9,
-            "trajectory_remaining_time": 1,
+            "trajectory_progress_index": 1,
         }
         if cfg.commands.use_dynamic_gait:
+            parts["dog_body_pose_commands"] = 3
             parts["dynamic_gait_commands"] = cfg.dog.dog_num_commands - 6
         return parts
 
     parts = {
         "arm_dof_pos": cfg.arm.num_actions_arm,
-        "arm_actions": cfg.arm.num_actions_arm,
+        "arm_dof_vel": cfg.arm.num_actions_arm,
+        "arm_actions": cfg.arm.num_actions_arm_cd,
         "arm_commands": cfg.arm.arm_num_commands,
         "base_roll_pitch": 2,
     }
     if cfg.commands.use_dynamic_gait:
+        parts["dog_body_pose_commands"] = 3
         parts["dynamic_gait_commands"] = cfg.dog.dog_num_commands - 6
     if cfg.env.observe_two_prev_actions:
         parts["two_prev_actions"] = cfg.env.num_actions
@@ -797,6 +809,7 @@ def configure_privileged_obs_dims(cfg):
     dog_parts = privileged_obs_dim_parts(cfg, cfg.dog.num_actions_loco, policy="dog")
     arm_parts = privileged_obs_dim_parts(cfg, ROBODUET_DEFAULTS.arm.num_actions_arm_cd, policy="arm")
     if cfg.arm.trajectory.enabled:
+        arm_parts["foot_contact_states"] = 4
         arm_parts["full_trajectory"] = cfg.arm.trajectory.num_waypoints * 9
 
     dog_dim = sum_dim_parts(dog_parts)
