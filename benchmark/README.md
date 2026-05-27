@@ -2,7 +2,7 @@
 
 这个目录存放 benchmark 运行配置和长期保留的 candidate checkpoints。
 
-更长期的设计记录和后续计划见 [ROADMAP.md](ROADMAP.md)。
+更长期的设计记录和后续计划见 [docs/benchmark_roadmap.md](../docs/benchmark_roadmap.md)。
 
 ## Candidate Checkpoints
 
