@@ -197,7 +197,7 @@ class WBCEnv(LeggedRobot):
             self.user_vel_cmd[env_ids] = 0.0
 
     def _traj_curriculum_params(self, env_ids):
-        """Interpolate length and s_curve_amplitude from curriculum level."""
+        """Interpolate length, s_curve_amplitude, and orientation range from curriculum level."""
         max_level = max(1, self.cfg.arm.trajectory.curriculum_levels - 1)
         difficulty = self.traj_curriculum_level[env_ids].float() / max_level  # (n,)
 
@@ -207,11 +207,11 @@ class WBCEnv(LeggedRobot):
         lo_a, hi_a = self.cfg.arm.trajectory.s_curve_amplitude_range
         s_amplitude = lo_a + (hi_a - lo_a) * difficulty
 
-        return length, s_amplitude
+        return length, s_amplitude, difficulty
 
     def _resample_trajectory_commands(self, env_ids):
         self._resample_user_commands(env_ids)
-        length, s_amplitude = self._traj_curriculum_params(env_ids)
+        length, s_amplitude, orientation_scale = self._traj_curriculum_params(env_ids)
         traj_pos, traj_quat, target_time, traj_type = sample_trajectory_commands(
             self.cfg,
             self.end_effector_state,
@@ -221,6 +221,7 @@ class WBCEnv(LeggedRobot):
             self.device,
             length=length,
             s_curve_amplitude=s_amplitude,
+            orientation_scale=orientation_scale,
         )
         self.traj_pos_world[env_ids] = traj_pos
         self.traj_quat_world[env_ids] = traj_quat
@@ -876,7 +877,8 @@ class WBCEnv(LeggedRobot):
     def _arm_reset_hook(self, env_ids):
         if self.cfg.arm.trajectory.enabled and global_switch.switch_open:
             self._update_traj_curriculum(env_ids)
-            self._reset_dog_command_smoothing(env_ids)
+            # dog command smoothing buffers are reset inside
+            # _resample_trajectory_commands; do not call it again here.
         elif not self.cfg.arm.trajectory.enabled:
             self._resample_arm_commands(env_ids)
         # stage1_arm_target_offset / vel / accel are re-initialised in
@@ -1564,16 +1566,43 @@ class WBCEnv(LeggedRobot):
     def _reset_dog_command_smoothing(self, env_ids):
         if len(env_ids) == 0:
             return
-        self.dog_command_plan_targets[env_ids] = self.commands_dog[env_ids]
-        self.dog_command_plan_smoothed[env_ids] = self.commands_dog[env_ids]
+
+        def _midpoint(limits):
+            return 0.5 * (float(limits[0]) + float(limits[1]))
+
+        # Neutralize stale body_pose/gait carried over from previous episode so
+        # the first plan() after reset is not EMA-blended with the prior policy
+        # output. Velocity is set by the caller (resample) and preserved.
+        neutral_assignments = []
+        if self.commands_dog.shape[1] > dog_cmd_idx["body_pitch"]:
+            neutral_assignments.append((dog_cmd_idx["body_pitch"], 0.0))
+        if self.commands_dog.shape[1] > dog_cmd_idx["body_roll"]:
+            neutral_assignments.append((dog_cmd_idx["body_roll"], 0.0))
+        if self.commands_dog.shape[1] > dog_cmd_idx["body_height"]:
+            neutral_assignments.append((dog_cmd_idx["body_height"], 0.0))
+        if self.cfg.commands.use_dynamic_gait:
+            if self.commands_dog.shape[1] > dog_cmd_idx["gait_frequency"]:
+                neutral_assignments.append(
+                    (dog_cmd_idx["gait_frequency"], _midpoint(self.cfg.commands.limit_gait_frequency))
+                )
+            if self.commands_dog.shape[1] > dog_cmd_idx["stance_width"]:
+                neutral_assignments.append(
+                    (dog_cmd_idx["stance_width"], _midpoint(self.cfg.commands.limit_stance_width))
+                )
+            if self.commands_dog.shape[1] > dog_cmd_idx["stance_length"]:
+                neutral_assignments.append(
+                    (dog_cmd_idx["stance_length"], _midpoint(self.cfg.commands.limit_stance_length))
+                )
+        for idx, value in neutral_assignments:
+            self.commands_dog[env_ids, idx] = value
+
         if self.commands_dog.shape[1] > dog_cmd_idx["footswing_height"]:
             self.commands_dog[env_ids, dog_cmd_idx["footswing_height"]] = 0.06
-            self.dog_command_plan_targets[env_ids, dog_cmd_idx["footswing_height"]] = 0.06
-            self.dog_command_plan_smoothed[env_ids, dog_cmd_idx["footswing_height"]] = 0.06
         if self.commands_dog.shape[1] > dog_cmd_idx["gait_duration"]:
             self.commands_dog[env_ids, dog_cmd_idx["gait_duration"]] = 0.49
-            self.dog_command_plan_targets[env_ids, dog_cmd_idx["gait_duration"]] = 0.49
-            self.dog_command_plan_smoothed[env_ids, dog_cmd_idx["gait_duration"]] = 0.49
+
+        self.dog_command_plan_targets[env_ids] = self.commands_dog[env_ids]
+        self.dog_command_plan_smoothed[env_ids] = self.commands_dog[env_ids]
 
     def _apply_body_pose_plan(self, scaled_plan):
         values = [

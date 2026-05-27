@@ -30,6 +30,7 @@ def sample_trajectory_commands(
     device,
     length=None,
     s_curve_amplitude=None,
+    orientation_scale=None,
     grasper_local_offset=(0.1, 0.0, 0.0),
 ):
     """Sample trajectory waypoints starting from the grasper position.
@@ -79,9 +80,19 @@ def sample_trajectory_commands(
     start_offset = start_radius * sphere_direction[:, None, :]
     start_pos = grasper_pos[:, None, :] + start_offset
 
-    roll = torch_rand_float(cfg.arm.commands.roll_ee[0], cfg.arm.commands.roll_ee[1], (n_envs, 1), device=device).squeeze(-1)
-    pitch = torch_rand_float(cfg.arm.commands.pitch_ee[0], cfg.arm.commands.pitch_ee[1], (n_envs, 1), device=device).squeeze(-1)
-    yaw = torch_rand_float(cfg.arm.commands.yaw_ee[0], cfg.arm.commands.yaw_ee[1], (n_envs, 1), device=device).squeeze(-1)
+    # Per-env orientation curriculum: shrink roll/pitch/yaw range around 0 by `orientation_scale`.
+    if orientation_scale is None:
+        ori_scale = torch.ones(n_envs, device=device)
+    else:
+        ori_scale = orientation_scale.view(n_envs).to(device)
+
+    def _scaled_uniform(lo, hi):
+        u = torch_rand_float(float(lo), float(hi), (n_envs, 1), device=device).squeeze(-1)
+        return u * ori_scale
+
+    roll = _scaled_uniform(cfg.arm.commands.roll_ee[0], cfg.arm.commands.roll_ee[1])
+    pitch = _scaled_uniform(cfg.arm.commands.pitch_ee[0], cfg.arm.commands.pitch_ee[1])
+    yaw = _scaled_uniform(cfg.arm.commands.yaw_ee[0], cfg.arm.commands.yaw_ee[1])
     zero = torch.zeros_like(roll)
     random_local_quat = quat_mul(
         quat_from_euler_xyz(zero, zero, yaw),

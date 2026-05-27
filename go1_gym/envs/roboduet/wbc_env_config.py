@@ -95,9 +95,9 @@ class ArmTrajectoryConfig:
     user_ang_vel_yaw: tuple = (-0.4, 0.4)
     pos_error_scale: float = 4.0
     rot_error_scale: float = 1.0
-    completion_time_sigma: float = 0.35
+    completion_time_sigma: float = 1
     dog_command_smoothing_alpha: float = 0.2
-    dog_command_smoothness_weight_delta_vel: float = 5.0
+    dog_command_smoothness_weight_delta_vel: float = 1.0
     dog_command_smoothness_weight_body_pose: float = 1.0
     dog_command_smoothness_weight_gait: float = 2.0
 
