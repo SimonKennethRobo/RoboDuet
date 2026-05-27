@@ -747,7 +747,7 @@ def dog_obs_dim_parts(cfg):
     return parts
 
 
-def privileged_obs_dim_parts(cfg, dof_dim):
+def privileged_obs_dim_parts(cfg, dof_dim, policy=None):
     parts = {}
     if cfg.env.priv_observe_friction:
         parts["friction"] = 1
@@ -785,13 +785,16 @@ def privileged_obs_dim_parts(cfg, dof_dim):
         parts["high_freq_goal"] = 6
     if getattr(cfg.env, "priv_observe_arm_mount_tf", False):
         parts["arm_mount_tf"] = 6
+    if policy == "dog":
+        parts["arm_dof_pos"] = cfg.arm.num_actions_arm
+        parts["arm_dof_vel"] = cfg.arm.num_actions_arm
 
     return parts
 
 
 def configure_privileged_obs_dims(cfg):
-    dog_parts = privileged_obs_dim_parts(cfg, cfg.dog.num_actions_loco)
-    arm_parts = privileged_obs_dim_parts(cfg, ROBODUET_DEFAULTS.arm.num_actions_arm_cd)
+    dog_parts = privileged_obs_dim_parts(cfg, cfg.dog.num_actions_loco, policy="dog")
+    arm_parts = privileged_obs_dim_parts(cfg, ROBODUET_DEFAULTS.arm.num_actions_arm_cd, policy="arm")
     if cfg.arm.trajectory.enabled:
         arm_parts["full_trajectory"] = cfg.arm.trajectory.num_waypoints * 9
 

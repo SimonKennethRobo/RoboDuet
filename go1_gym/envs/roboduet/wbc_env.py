@@ -1067,6 +1067,12 @@ class WBCEnv(LeggedRobot):
         if getattr(self.cfg.env, "priv_observe_arm_mount_tf", False):
             privileged_obs_buf = torch.cat((privileged_obs_buf, self.arm_mount_tfs), dim=1)
 
+        if policy == "dog":
+            arm_slice = slice(self.num_actions_loco, self.num_actions_loco + self.num_actions_arm)
+            arm_dof_pos = (self.dof_pos[:, arm_slice] - self.default_dof_pos[:, arm_slice]) * self.obs_scales.dof_pos
+            arm_dof_vel = self.dof_vel[:, arm_slice] * self.obs_scales.dof_vel
+            privileged_obs_buf = torch.cat((privileged_obs_buf, arm_dof_pos, arm_dof_vel), dim=1)
+
         if policy == "arm" and self.cfg.arm.trajectory.enabled:
             privileged_obs_buf = torch.cat((privileged_obs_buf, self.get_full_trajectory_privileged_obs()), dim=1)
 
@@ -1666,7 +1672,7 @@ class WBCEnv(LeggedRobot):
                 (
                     obs_buf,
                     (self.commands_dog * self.commands_scale_dog)[:, : self.cfg.dog.dog_num_commands],
-                    (self.commands_arm_obs[:, :idx])
+                    (self.commands_arm_obs[:, :idx])  # l,p,y,rot6d
                     if global_switch.switch_open
                     else torch.zeros_like(self.commands_arm_obs[:, :idx]),
                     roll.unsqueeze(1),
