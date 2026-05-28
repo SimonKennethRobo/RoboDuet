@@ -317,7 +317,10 @@ class Runner:
 
                     # add reward
                     actions_dog = self.alg_dog.act(
-                        dog_obs_dict["obs"], dog_obs_dict["privileged_obs"], dog_obs_dict["obs_history"]
+                        dog_obs_dict["obs"],
+                        dog_obs_dict["privileged_obs"],
+                        dog_obs_dict["obs_history"],
+                        deterministic=not self._dog_policy_trainable_this_iteration(),
                     )
 
                     if global_switch.switch_open and self.env.num_plan_actions > 0:

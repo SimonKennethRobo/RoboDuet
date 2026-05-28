@@ -207,7 +207,7 @@ class LeggedRobot(BaseTask):
         """Apply actions, simulate, call self.post_physics_step()
 
         Args:
-            actions (torch.Tensor): Tensor of shape (num_envs, num_actions_per_env)
+            actions (torch.Tensor): Tensor of shape (num_envs, num_actions_per_env). 18D, 12 for loco and 6 for arm.
         """
         clip_actions = self.cfg.normalization.clip_actions
         self.actions = torch.clip(actions, -clip_actions, clip_actions).to(self.device)

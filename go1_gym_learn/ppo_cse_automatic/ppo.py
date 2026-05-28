@@ -96,9 +96,13 @@ class PPO:
         if self.storage is not None:
             self.storage.clear()
 
-    def act(self, obs, privileged_obs, obs_history):
+    def act(self, obs, privileged_obs, obs_history, deterministic=False):
         # Compute the actions and values
-        self.transition.actions = self.actor_critic.act(obs_history).detach()
+        if deterministic:
+            self.actor_critic.update_distribution(obs_history)
+            self.transition.actions = self.actor_critic.action_mean.detach()
+        else:
+            self.transition.actions = self.actor_critic.act(obs_history).detach()
         self.transition.values = self.actor_critic.evaluate(obs_history, privileged_obs).detach()
         self.transition.actions_log_prob = self.actor_critic.get_actions_log_prob(self.transition.actions).detach()
         self.transition.action_mean = self.actor_critic.action_mean.detach()
