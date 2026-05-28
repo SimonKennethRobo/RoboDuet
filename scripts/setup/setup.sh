@@ -231,6 +231,33 @@ conda_exe() {
   fi
 }
 
+configure_conda_package_cache() {
+  local conda_bin="$1"
+  local dir
+  while IFS= read -r dir; do
+    [[ -n "$dir" ]] || continue
+    if mkdir -p "$dir" 2>/dev/null && [[ -w "$dir" ]]; then
+      log "using conda package cache: $dir"
+      return
+    fi
+  done < <("$conda_bin" config --show pkgs_dirs 2>/dev/null | awk '
+    /^[[:space:]]*-[[:space:]]/ {
+      sub(/^[[:space:]]*-[[:space:]]*/, "")
+      print
+    }
+  ')
+
+  for dir in "$CONDA_DIR/pkgs" "$HOME/.conda/pkgs"; do
+    if mkdir -p "$dir" 2>/dev/null && [[ -w "$dir" ]]; then
+      log "adding writable conda package cache: $dir"
+      "$conda_bin" config --prepend pkgs_dirs "$dir" >/dev/null
+      return
+    fi
+  done
+
+  die "no writable conda package cache found; grant write access or add a writable pkgs_dirs entry with conda config"
+}
+
 run_in_env() {
   local conda_bin
   local prefix
@@ -328,6 +355,7 @@ setup_conda_env() {
     configure_env_library_path "$conda_bin"
   else
     confirm "Create conda env $ENV_NAME with python=$PYTHON_VERSION?" || return
+    configure_conda_package_cache "$conda_bin"
     accept_conda_tos "$conda_bin"
     "$conda_bin" create -y -n "$ENV_NAME" "python=$PYTHON_VERSION" pip
     configure_env_library_path "$conda_bin"
