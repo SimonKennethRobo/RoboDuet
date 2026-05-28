@@ -39,7 +39,7 @@ class HybridRewardScaleConfig:
     hip_action_l2: float = -0.05
     raibert_heuristic: float = -0.0
     arm_control_smoothness_1: float = -0.1
-    arm_control_limits: float = -5.0
+    arm_control_limits: float = -0.0001
     traj_track: float = 0.0
     trajectory_current_tracking: float = 0.0
     trajectory_completion_time: float = 0.0
@@ -101,7 +101,7 @@ class ArmTrajectoryConfig:
     dog_command_smoothness_weight_body_pose: float = 1.0
     dog_command_smoothness_weight_gait: float = 2.0
     stage2_base_unlock_curriculum: bool = True
-    stage2_base_unlock_success_threshold: float = 0.6
+    stage2_base_unlock_success_threshold: float = 0.9
     stage2_base_unlock_success_ema_alpha: float = 0.05
     stage2_base_unlock_ramp_iterations: int = 1000
     stage2_base_unlock_force_point_until_unlocked: bool = True
@@ -257,11 +257,11 @@ class HybridRewardScaleOverrideConfig:
     tracking_lin_vel_multiplier: float = 0.7
     tracking_ang_vel_multiplier: float = 0.5
     arm_energy: float = -0.00004
-    arm_dof_vel_multiplier: float = 10.0
-    arm_dof_acc_multiplier: float = 10.0
-    arm_action_rate_multiplier: float = 10.0
-    arm_action_smoothness_1_multiplier: float = 5.0
-    arm_action_smoothness_2_multiplier: float = 5.0
+    arm_dof_vel_multiplier: float = 0.01
+    arm_dof_acc_multiplier: float = 0.01
+    arm_action_rate_multiplier: float = 0.001
+    arm_action_smoothness_1_multiplier: float = 0.001
+    arm_action_smoothness_2_multiplier: float = 0.001
 
 
 @dataclass(frozen=True)
@@ -483,8 +483,12 @@ class RoboDuetCfg(LeggedRobotCfg):
             rot_error_scale = ROBODUET_DEFAULTS.arm.trajectory.rot_error_scale
             completion_time_sigma = ROBODUET_DEFAULTS.arm.trajectory.completion_time_sigma
             dog_command_smoothing_alpha = ROBODUET_DEFAULTS.arm.trajectory.dog_command_smoothing_alpha
-            dog_command_smoothness_weight_delta_vel = ROBODUET_DEFAULTS.arm.trajectory.dog_command_smoothness_weight_delta_vel
-            dog_command_smoothness_weight_body_pose = ROBODUET_DEFAULTS.arm.trajectory.dog_command_smoothness_weight_body_pose
+            dog_command_smoothness_weight_delta_vel = (
+                ROBODUET_DEFAULTS.arm.trajectory.dog_command_smoothness_weight_delta_vel
+            )
+            dog_command_smoothness_weight_body_pose = (
+                ROBODUET_DEFAULTS.arm.trajectory.dog_command_smoothness_weight_body_pose
+            )
             dog_command_smoothness_weight_gait = ROBODUET_DEFAULTS.arm.trajectory.dog_command_smoothness_weight_gait
             stage2_base_unlock_curriculum = ROBODUET_DEFAULTS.arm.trajectory.stage2_base_unlock_curriculum
             stage2_base_unlock_success_threshold = ROBODUET_DEFAULTS.arm.trajectory.stage2_base_unlock_success_threshold

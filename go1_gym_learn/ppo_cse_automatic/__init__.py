@@ -203,11 +203,13 @@ class Runner:
             self._set_dog_policy_requires_grad(False)
             self.dog_model.eval()
             self.stage2_loco_policy_frozen = True
-            print("Stage2 locomotion policy is frozen; dog PPO updates are skipped.")
+            self.env.env.disable_dog_policy_rewards = True
+            print("Stage2 locomotion policy is frozen; dog PPO updates and dog rewards are disabled.")
         else:
             self._set_dog_policy_requires_grad(True)
             self.dog_model.train()
             self.stage2_loco_policy_frozen = False
+            self.env.env.disable_dog_policy_rewards = False
             if DogRunnerArgs.stage2_loco_learning_rate is not None:
                 self.alg_dog.set_learning_rate(float(DogRunnerArgs.stage2_loco_learning_rate))
                 print(f"Stage2 locomotion policy learning rate set to {self.alg_dog.learning_rate}.")
@@ -355,7 +357,7 @@ class Runner:
                         if "train/episode" in infos:
                             ep_infos.append(infos["train/episode"])
 
-                        cur_reward_sum += rewards_dog
+                        cur_reward_sum += rewards_dog + rewards_arm
                         cur_episode_length += 1
 
                         new_ids = (dones > 0).nonzero(as_tuple=False)

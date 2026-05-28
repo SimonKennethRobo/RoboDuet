@@ -417,7 +417,15 @@ class LeggedRobot(BaseTask):
         train_env_ids = env_ids[env_ids < self.num_train_envs]
         if len(train_env_ids) > 0:
             self.extras["train/episode"] = {}
+            disable_dog_rewards = bool(getattr(self, "disable_dog_policy_rewards", False))
             for key in self.episode_sums.keys():
+                if (
+                    disable_dog_rewards
+                    and key != "total"
+                    and not self._reward_enabled_when_dog_policy_frozen(key)
+                ):
+                    self.episode_sums[key][train_env_ids] = 0.0
+                    continue
                 self.extras["train/episode"]["rew_" + key] = torch.mean(self.episode_sums[key][train_env_ids])
                 self.episode_sums[key][train_env_ids] = 0.0
             if hasattr(self, "stage1_arm_curriculum_intensity"):
@@ -684,12 +692,26 @@ class LeggedRobot(BaseTask):
         if privileged_obs_buf is not None:
             privileged_obs_buf = torch.clip(privileged_obs_buf, -clip_obs, clip_obs)
 
+    def _reward_enabled_when_dog_policy_frozen(self, name):
+        if name.startswith("arm_"):
+            return True
+        return name in {
+            "traj_track",
+            "trajectory_current_tracking",
+            "trajectory_completion_time",
+            "ee_smoothness",
+            "vis_manip_commands_tracking_lpy",
+            "vis_manip_commands_tracking_rpy",
+        }
+
     def compute_reward(self):
         """Compute rewards
         Calls each reward function which had a non-zero scale (processed in self._prepare_reward_function())
         adds each terms to the episode sums and to the total reward
         """
         reward_scales = global_switch.get_reward_scales()
+
+        disable_dog_rewards = bool(getattr(self, "disable_dog_policy_rewards", False))
 
         self.rew_buf_dog[:] = 0.0
         self.rew_buf_pos_dog[:] = 0.0
@@ -699,20 +721,24 @@ class LeggedRobot(BaseTask):
         self.rew_buf_neg_arm[:] = 0.0
         for i in range(len(self.reward_names)):
             name = self.reward_names[i]
+            if disable_dog_rewards and not self._reward_enabled_when_dog_policy_frozen(name):
+                continue
+
             rew = self.reward_functions[i]() * reward_scales[name]
 
             if name in ["vis_manip_commands_tracking_lpy", "vis_manip_commands_tracking_rpy"]:
                 self.episode_sums[name] += rew
                 continue
 
-            self.rew_buf_dog += rew
-            if torch.sum(rew) >= 0:
-                self.rew_buf_pos_dog += rew
-            elif torch.sum(rew) <= 0:
-                self.rew_buf_neg_dog += rew
+            if not disable_dog_rewards:
+                self.rew_buf_dog += rew
+                if torch.sum(rew) >= 0:
+                    self.rew_buf_pos_dog += rew
+                elif torch.sum(rew) <= 0:
+                    self.rew_buf_neg_dog += rew
             self.episode_sums[name] += rew
 
-            # arm ignore the walking reward
+            # arm ignores pure velocity-tracking rewards; frozen-dog mode filters dog-only terms above.
             if not name in ["tracking_lin_vel", "tracking_ang_vel"]:
                 self.rew_buf_arm += rew
                 if torch.sum(rew) >= 0:
@@ -736,15 +762,16 @@ class LeggedRobot(BaseTask):
                 self.rew_buf_neg_arm[:] / self.cfg.rewards.sigma_rew_neg
             )
 
-        self.episode_sums["total"] += self.rew_buf_dog
-
         # add termination reward after clipping
         if "termination" in reward_scales:
             rew = self.reward_container._reward_termination() * reward_scales["termination"]
-            self.rew_buf_dog += rew
-            self.rew_buf_arm += rew
-            self.episode_sums["termination"] += rew
-            self.command_sums["termination"] += rew
+            if not disable_dog_rewards:
+                self.rew_buf_dog += rew
+                self.rew_buf_arm += rew
+                self.episode_sums["termination"] += rew
+                self.command_sums["termination"] += rew
+
+        self.episode_sums["total"] += self.rew_buf_dog + self.rew_buf_arm
 
         self.command_sums["lin_vel_raw"] += self.base_lin_vel[:, 0]
         self.command_sums["ang_vel_raw"] += self.base_ang_vel[:, 2]
