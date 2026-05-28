@@ -15,6 +15,7 @@ It is conservative by default:
 - downloads IsaacGym Preview 4 from NVIDIA's redirecting download page if no local archive is found;
 - keeps optional IsaacGym archive path / URL overrides for unusual layouts.
 - accepts Anaconda default channel Terms of Service before creating the conda env when the installed conda version requires it.
+- adds a user-level writable conda package cache under `$CONDA_DIR/pkgs` or `~/.conda/pkgs` when existing shared cache settings are read-only.
 
 The script uses colored output and emoji by default. Disable them with:
 
@@ -47,6 +48,13 @@ Environment variables can override defaults, which is useful for `curl | bash`:
 BRANCH=develop \
 INSTALL_ROOT=~/roboduet \
 curl -fsSL https://raw.githubusercontent.com/SimonKennethRobo/RoboDuet/develop/scripts/setup/setup.sh | bash
+```
+
+If your system conda config points `pkgs_dirs` at a shared read-only cache, setup will add a writable user-level cache automatically. To do the same manually:
+
+```bash
+mkdir -p "$HOME/.conda/pkgs"
+conda config --prepend pkgs_dirs "$HOME/.conda/pkgs"
 ```
 
 For IsaacGym Preview 4, setup first searches for a local archive:
