@@ -1,0 +1,36 @@
+name: Benchmark Static Checks
+
+on:
+  pull_request:
+    paths:
+      - "benchmark/**"
+      - "scripts/benchmark_*.py"
+      - ".github/workflows/benchmark-static.yml"
+  push:
+    branches:
+      - develop
+    paths:
+      - "benchmark/**"
+      - "scripts/benchmark_*.py"
+      - ".github/workflows/benchmark-static.yml"
+  workflow_dispatch:
+
+jobs:
+  benchmark-static:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Compile benchmark modules
+        run: |
+          python -m compileall -q benchmark scripts/benchmark_policy.py scripts/benchmark_env_fps.py
+
+      - name: Validate offline benchmark report tools
+        run: |
+          python benchmark/ci/static_check.py

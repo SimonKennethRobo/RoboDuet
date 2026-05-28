@@ -211,3 +211,56 @@ python -m benchmark.cli --compare_results \
 ```
 
 对比报告基于两个 result 的 `results.json` 和 `metadata.json`，当前比较 summary-level primary metrics，包括 vx RMSE、yaw RMSE、fall rate、tracking reward、base height 和 max torque。它不会尝试重新运行旧 ckpt，因此适合长期保留历史 benchmark 结果并做跨时间对比。
+
+## CI Integration
+
+Benchmark CI 分成两层：
+
+- GitHub Actions 静态检查：不依赖 GPU、IsaacGym、torch 或 checkpoint，只检查 benchmark Python 文件可编译、profile JSON 合法、HTML report 和 result comparison 能从离线 fixture 正常生成。
+- GPU smoke benchmark：在有 IsaacGym/NVIDIA 环境的服务器上运行，验证 candidate loading、IsaacGym env step、metric accumulation 和 HTML report 全链路。
+
+GitHub Actions workflow 位于：
+
+```text
+.github/workflows/benchmark-static.yml
+```
+
+它会在 PR 或 `develop` push 涉及 `benchmark/**` / benchmark wrapper 时运行：
+
+```bash
+python -m compileall -q benchmark scripts/benchmark_policy.py scripts/benchmark_env_fps.py
+python benchmark/ci/static_check.py
+```
+
+GPU smoke benchmark 使用服务器侧脚本：
+
+```bash
+benchmark/ci/run_gpu_smoke.sh
+```
+
+默认命令等价于：
+
+```bash
+python -m benchmark.cli \
+  --dog_only \
+  --candidate_dir benchmark/candidates \
+  --profile benchmark/profiles/smoke.json \
+  --sim_device cuda:0 \
+  --ckptids last \
+  --output_dir benchmark/results \
+  --headless
+```
+
+常用环境变量：
+
+```bash
+CANDIDATE_DIR=/data/roboduet/benchmark/candidates \
+PROFILE=benchmark/profiles/smoke.json \
+SIM_DEVICE=cuda:0 \
+OUTPUT_DIR=/data/roboduet/benchmark/results \
+NUM_EVAL_STEPS=100 \
+SEED=1 \
+benchmark/ci/run_gpu_smoke.sh
+```
+
+Jenkins 或 GitHub self-hosted runner 可以直接调用这个脚本，并把 `OUTPUT_DIR` 下的 `index.html`、`results.json`、`metadata.json` 和 compare report 作为 artifact 保存。不要在普通 GitHub-hosted runner 上跑 GPU smoke；它没有 IsaacGym、NVIDIA driver 和本地 checkpoint/candidate 环境。
