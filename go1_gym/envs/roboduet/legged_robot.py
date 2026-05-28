@@ -460,6 +460,23 @@ class LeggedRobot(BaseTask):
                 bin_weights = torch.tensor(curriculum.weights[bins], device=self.device, dtype=torch.float)
                 if bin_weights.numel() > 0:
                     self.extras["train/episode"]["command_curriculum_weight"] = torch.mean(bin_weights)
+            if hasattr(self, "stage2_base_unlock_success_ema"):
+                self.extras["train/episode"]["stage2_base_unlock_weight"] = torch.tensor(
+                    float(self._stage2_base_unlock_weight()),
+                    device=self.device,
+                )
+                self.extras["train/episode"]["stage2_base_unlock_success_ema"] = torch.tensor(
+                    float(self.stage2_base_unlock_success_ema),
+                    device=self.device,
+                )
+                self.extras["train/episode"]["stage2_base_unlock_batch_success"] = torch.tensor(
+                    float(self.stage2_base_unlock_batch_success),
+                    device=self.device,
+                )
+                self.extras["train/episode"]["stage2_base_unlock_started"] = torch.tensor(
+                    float(self.stage2_base_unlock_started),
+                    device=self.device,
+                )
             if getattr(self, 'reset_curriculum_enabled', False):
                 self.extras["train/episode"]["reset_curriculum_intensity"] = torch.tensor(
                     float(self.reset_curriculum_intensity),

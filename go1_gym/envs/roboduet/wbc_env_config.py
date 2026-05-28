@@ -100,6 +100,11 @@ class ArmTrajectoryConfig:
     dog_command_smoothness_weight_delta_vel: float = 1.0
     dog_command_smoothness_weight_body_pose: float = 1.0
     dog_command_smoothness_weight_gait: float = 2.0
+    stage2_base_unlock_curriculum: bool = True
+    stage2_base_unlock_success_threshold: float = 0.6
+    stage2_base_unlock_success_ema_alpha: float = 0.05
+    stage2_base_unlock_ramp_iterations: int = 1000
+    stage2_base_unlock_force_point_until_unlocked: bool = True
 
 
 @dataclass(frozen=True)
@@ -481,6 +486,13 @@ class RoboDuetCfg(LeggedRobotCfg):
             dog_command_smoothness_weight_delta_vel = ROBODUET_DEFAULTS.arm.trajectory.dog_command_smoothness_weight_delta_vel
             dog_command_smoothness_weight_body_pose = ROBODUET_DEFAULTS.arm.trajectory.dog_command_smoothness_weight_body_pose
             dog_command_smoothness_weight_gait = ROBODUET_DEFAULTS.arm.trajectory.dog_command_smoothness_weight_gait
+            stage2_base_unlock_curriculum = ROBODUET_DEFAULTS.arm.trajectory.stage2_base_unlock_curriculum
+            stage2_base_unlock_success_threshold = ROBODUET_DEFAULTS.arm.trajectory.stage2_base_unlock_success_threshold
+            stage2_base_unlock_success_ema_alpha = ROBODUET_DEFAULTS.arm.trajectory.stage2_base_unlock_success_ema_alpha
+            stage2_base_unlock_ramp_iterations = ROBODUET_DEFAULTS.arm.trajectory.stage2_base_unlock_ramp_iterations
+            stage2_base_unlock_force_point_until_unlocked = (
+                ROBODUET_DEFAULTS.arm.trajectory.stage2_base_unlock_force_point_until_unlocked
+            )
             curriculum_levels = ROBODUET_DEFAULTS.arm.trajectory.curriculum_levels
             curriculum_success_threshold = ROBODUET_DEFAULTS.arm.trajectory.curriculum_success_threshold
 

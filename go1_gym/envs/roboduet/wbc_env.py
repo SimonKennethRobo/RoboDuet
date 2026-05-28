@@ -196,6 +196,36 @@ class WBCEnv(LeggedRobot):
         else:
             self.user_vel_cmd[env_ids] = 0.0
 
+    def _stage2_base_unlock_curriculum_enabled(self):
+        return (
+            self.cfg.arm.trajectory.enabled
+            and global_switch.switch_open
+            and bool(getattr(self.cfg.arm.trajectory, "stage2_base_unlock_curriculum", False))
+        )
+
+    def _stage2_base_unlock_weight(self):
+        if not self._stage2_base_unlock_curriculum_enabled():
+            return 1.0
+        if not self.stage2_base_unlock_started:
+            return 0.0
+        ramp_iters = max(1, int(getattr(self.cfg.arm.trajectory, "stage2_base_unlock_ramp_iterations", 1)))
+        elapsed = max(0, int(global_switch.count) - int(self.stage2_base_unlock_start_iteration))
+        return min(1.0, float(elapsed) / float(ramp_iters))
+
+    def _stage2_base_locked(self):
+        return self._stage2_base_unlock_curriculum_enabled() and self._stage2_base_unlock_weight() <= 0.0
+
+    def _stage2_force_point_trajectory(self):
+        return (
+            self._stage2_base_unlock_curriculum_enabled()
+            and bool(getattr(self.cfg.arm.trajectory, "stage2_base_unlock_force_point_until_unlocked", True))
+            and self._stage2_base_unlock_weight() < 1.0
+        )
+
+    def _scaled_user_vel_cmd(self):
+        return self.user_vel_cmd * self._stage2_base_unlock_weight()
+
+
     def _traj_curriculum_params(self, env_ids):
         """Interpolate length, s_curve_amplitude, and orientation range from curriculum level."""
         max_level = max(1, self.cfg.arm.trajectory.curriculum_levels - 1)
@@ -212,6 +242,7 @@ class WBCEnv(LeggedRobot):
     def _resample_trajectory_commands(self, env_ids):
         self._resample_user_commands(env_ids)
         length, s_amplitude, orientation_scale = self._traj_curriculum_params(env_ids)
+        traj_type_override = "point" if self._stage2_force_point_trajectory() else None
         traj_pos, traj_quat, target_time, traj_type = sample_trajectory_commands(
             self.cfg,
             self.end_effector_state,
@@ -222,6 +253,7 @@ class WBCEnv(LeggedRobot):
             length=length,
             s_curve_amplitude=s_amplitude,
             orientation_scale=orientation_scale,
+            traj_type_override=traj_type_override,
         )
         self.traj_pos_world[env_ids] = traj_pos
         self.traj_quat_world[env_ids] = traj_quat
@@ -238,7 +270,7 @@ class WBCEnv(LeggedRobot):
         self.traj_target_body_history[env_ids] = 0.0
         self.traj_visited_mask[env_ids] = False
         self.arm_delta_vel_cmd[env_ids] = 0.0
-        self.commands_dog[env_ids, dog_cmd_idx["velocity"]] = self.user_vel_cmd[env_ids]
+        self.commands_dog[env_ids, dog_cmd_idx["velocity"]] = self._scaled_user_vel_cmd()[env_ids]
         self._reset_dog_command_smoothing(env_ids)
 
     def _resample_T_traj(self, env_ids):
@@ -826,6 +858,11 @@ class WBCEnv(LeggedRobot):
         self.traj_curriculum_level = torch.zeros(
             self.num_envs, dtype=torch.long, device=self.device, requires_grad=False
         )
+        self.stage2_base_unlock_success_ema = 0.0
+        self.stage2_base_unlock_batch_success = 0.0
+        self.stage2_base_unlock_started = False
+        self.stage2_base_unlock_start_iteration = 0
+
 
     def _arm_pre_step_hook(self):
         self._apply_stage1_arm_curriculum_actions()
@@ -890,12 +927,38 @@ class WBCEnv(LeggedRobot):
             return
         max_level = self.cfg.arm.trajectory.curriculum_levels - 1
         completed = self.traj_episode_success_buf[env_ids]
+        self._update_stage2_base_unlock_curriculum(env_ids, completed)
         advance_ids = env_ids[completed]
         if len(advance_ids) > 0:
             self.traj_curriculum_level[advance_ids] = torch.clamp(
                 self.traj_curriculum_level[advance_ids] + 1, max=max_level
             )
         self.traj_episode_success_buf[env_ids] = False
+
+    def _update_stage2_base_unlock_curriculum(self, env_ids, completed):
+        if not self._stage2_base_unlock_curriculum_enabled():
+            self.stage2_base_unlock_batch_success = 1.0
+            self.stage2_base_unlock_success_ema = 1.0
+            self.stage2_base_unlock_started = True
+            return
+
+        point_mask = self.traj_type[env_ids] == 3
+        if torch.any(point_mask):
+            batch_success = completed[point_mask].float().mean().item()
+        else:
+            batch_success = completed.float().mean().item()
+
+        alpha = float(getattr(self.cfg.arm.trajectory, "stage2_base_unlock_success_ema_alpha", 0.05))
+        alpha = max(0.0, min(1.0, alpha))
+        self.stage2_base_unlock_batch_success = float(batch_success)
+        self.stage2_base_unlock_success_ema = (
+            (1.0 - alpha) * float(self.stage2_base_unlock_success_ema) + alpha * float(batch_success)
+        )
+
+        threshold = float(getattr(self.cfg.arm.trajectory, "stage2_base_unlock_success_threshold", 0.6))
+        if (not self.stage2_base_unlock_started) and self.stage2_base_unlock_success_ema >= threshold:
+            self.stage2_base_unlock_started = True
+            self.stage2_base_unlock_start_iteration = int(global_switch.count)
 
     def _ensure_arm_rigid_body_rand_buffers(self, props):
         if hasattr(self, "arm_link_mass_scales"):
@@ -1021,7 +1084,7 @@ class WBCEnv(LeggedRobot):
     def _arm_resample_commands_train_hook(self, env_ids):
         if self.cfg.arm.trajectory.enabled and global_switch.switch_open:
             self._resample_user_commands(env_ids)
-            target_velocity = self.user_vel_cmd[env_ids] + self.arm_delta_vel_cmd[env_ids]
+            target_velocity = self._scaled_user_vel_cmd()[env_ids] + self.arm_delta_vel_cmd[env_ids]
             self.commands_dog[env_ids, dog_cmd_idx["velocity"]] = target_velocity
             self.dog_command_plan_targets[env_ids, dog_cmd_idx["velocity"]] = target_velocity
             self.dog_command_plan_smoothed[env_ids, dog_cmd_idx["velocity"]] = target_velocity
@@ -1633,15 +1696,57 @@ class WBCEnv(LeggedRobot):
         self._set_fixed_dog_command_value(dog_cmd_idx["footswing_height"], 0.06)
         self._set_fixed_dog_command_value(dog_cmd_idx["gait_duration"], 0.49)
 
+    def _apply_locked_base_plan(self):
+        zero = torch.zeros(self.num_envs, device=self.device)
+        for idx in (dog_cmd_idx["x_vel"], dog_cmd_idx["y_vel"], dog_cmd_idx["yaw_vel"]):
+            self._set_fixed_dog_command_value(idx, zero)
+
+        if self.commands_dog.shape[1] > dog_cmd_idx["body_pitch"]:
+            self._set_fixed_dog_command_value(dog_cmd_idx["body_pitch"], zero)
+        if self.commands_dog.shape[1] > dog_cmd_idx["body_roll"]:
+            self._set_fixed_dog_command_value(dog_cmd_idx["body_roll"], zero)
+        if self.commands_dog.shape[1] > dog_cmd_idx["body_height"]:
+            self._set_fixed_dog_command_value(dog_cmd_idx["body_height"], zero)
+
+        if self.cfg.commands.use_dynamic_gait:
+            def _midpoint(limits):
+                return 0.5 * (float(limits[0]) + float(limits[1]))
+
+            self._set_fixed_dog_command_value(
+                dog_cmd_idx["gait_frequency"],
+                torch.full_like(zero, _midpoint(self.cfg.commands.limit_gait_frequency)),
+            )
+            self._set_fixed_dog_command_value(
+                dog_cmd_idx["stance_width"],
+                torch.full_like(zero, _midpoint(self.cfg.commands.limit_stance_width)),
+            )
+            self._set_fixed_dog_command_value(
+                dog_cmd_idx["stance_length"],
+                torch.full_like(zero, _midpoint(self.cfg.commands.limit_stance_length)),
+            )
+            self._set_fixed_dog_command_value(dog_cmd_idx["footswing_height"], torch.full_like(zero, 0.06))
+            self._set_fixed_dog_command_value(dog_cmd_idx["gait_duration"], torch.full_like(zero, 0.49))
+
+        self.arm_delta_vel_cmd.zero_()
+        self.plan_actions.zero_()
+
     def _apply_trajectory_plan(self, obs):
+        unlock_weight = self._stage2_base_unlock_weight()
         limits = torch.tensor(
             self.cfg.arm.trajectory.delta_vel_limit,
             dtype=torch.float,
             device=self.device,
         ).view(1, 3)
         self.plan_actions_raw[:, :3] = obs[..., :3]
-        delta_vel = torch.clip(obs[..., :3], -1.0, 1.0) * limits
-        target_velocity = self.user_vel_cmd + delta_vel
+        if unlock_weight <= 0.0:
+            if self.cfg.commands.use_dynamic_gait and obs.shape[-1] >= 9:
+                self.plan_actions_raw[:, 3:9] = obs[..., 3:9]
+            self._apply_locked_base_plan()
+            return
+
+        delta_vel = torch.clip(obs[..., :3], -1.0, 1.0) * limits * unlock_weight
+        scaled_user_cmd = self._scaled_user_vel_cmd()
+        target_velocity = scaled_user_cmd + delta_vel
         target_velocity = torch.stack(
             (
                 self._clip_to_command_limit(target_velocity[..., 0], self.cfg.commands.limit_vel_x),
@@ -1650,14 +1755,16 @@ class WBCEnv(LeggedRobot):
             ),
             dim=-1,
         )
-        self.arm_delta_vel_cmd[:] = target_velocity - self.user_vel_cmd
-        self._smooth_dog_command_values([dog_cmd_idx["x_vel"], dog_cmd_idx["y_vel"], dog_cmd_idx["yaw_vel"]], target_velocity)
+        self.arm_delta_vel_cmd[:] = target_velocity - scaled_user_cmd
+        self._smooth_dog_command_values(
+            [dog_cmd_idx["x_vel"], dog_cmd_idx["y_vel"], dog_cmd_idx["yaw_vel"]], target_velocity
+        )
         self.plan_actions[:, :3] = self.arm_delta_vel_cmd
 
         if self.cfg.commands.use_dynamic_gait and obs.shape[-1] >= 9:
             self.plan_actions_raw[:, 3:9] = obs[..., 3:9]
-            body_pose_plan = obs[..., 3:6] * 0.4
-            gait_plan = obs[..., 6:9]
+            body_pose_plan = obs[..., 3:6] * 0.4 * unlock_weight
+            gait_plan = obs[..., 6:9] * unlock_weight
             self._apply_body_pose_plan(body_pose_plan)
             self._apply_dynamic_gait_plan(gait_plan)
             self.plan_actions[:, 3:9] = torch.cat((body_pose_plan, gait_plan), dim=-1)

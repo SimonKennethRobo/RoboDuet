@@ -31,6 +31,7 @@ def sample_trajectory_commands(
     length=None,
     s_curve_amplitude=None,
     orientation_scale=None,
+    traj_type_override=None,
     grasper_local_offset=(0.1, 0.0, 0.0),
 ):
     """Sample trajectory waypoints starting from the grasper position.
@@ -43,6 +44,7 @@ def sample_trajectory_commands(
     Args:
         length: per-env arc length (n_envs,) tensor, or None to use cfg default range.
         s_curve_amplitude: per-env S-curve amplitude (n_envs,) tensor, or None for cfg default.
+        traj_type_override: optional single trajectory type or type list used instead of cfg.
         grasper_local_offset: (x, y, z) offset from EE link origin to grasper tip in EE frame.
     """
     n_envs = len(env_ids)
@@ -115,7 +117,9 @@ def sample_trajectory_commands(
     )
 
     # Traj type selection (supports cfg whitelist)
-    traj_type_name = getattr(cfg.arm.trajectory, "traj_type", [])
+    traj_type_name = (
+        traj_type_override if traj_type_override is not None else getattr(cfg.arm.trajectory, "traj_type", [])
+    )
     valid_types = {"line": 0, "s_curve": 1, "circle": 2, "point": 3}
 
     if isinstance(traj_type_name, str):

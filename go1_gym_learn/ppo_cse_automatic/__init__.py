@@ -445,6 +445,9 @@ class Runner:
                             wandb_dict["Curriculum/threshold_" + name] = mean
                         elif key == "command_curriculum_weight":
                             wandb_dict["Curriculum/command_bin_weight"] = mean
+                        elif key.startswith("stage2_base_unlock_"):
+                            name = key.replace("stage2_base_unlock_", "", 1)
+                            wandb_dict["Curriculum/stage2_base_unlock_" + name] = mean
                         elif key.startswith("global_switch_"):
                             name = key.replace("global_switch_", "", 1)
                             wandb_dict["Global_Switch/" + name] = mean
