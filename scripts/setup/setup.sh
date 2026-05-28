@@ -231,12 +231,41 @@ conda_exe() {
   fi
 }
 
+is_conda_writable_dir() {
+  local dir="$1"
+  local probe
+  mkdir -p "$dir" 2>/dev/null || return 1
+  probe="$dir/.roboduet_write_probe_$$"
+  if touch "$probe" 2>/dev/null; then
+    rm -f "$probe"
+    return 0
+  fi
+  return 1
+}
+
 configure_conda_package_cache() {
   local conda_bin="$1"
   local dir
+  local user_cache_dir="$CONDA_DIR/pkgs"
+  [[ "$CONDA_DIR" == "$HOME"* ]] || user_cache_dir="$HOME/.conda/pkgs"
+
+  # Ensure a user-writable cache is always prepended so conda can use it,
+  # regardless of whether a shared cache passes filesystem permission checks.
+  # (bash -w can return true for dirs where conda's own write probe fails.)
+  if is_conda_writable_dir "$user_cache_dir"; then
+    if ! "$conda_bin" config --show pkgs_dirs 2>/dev/null | grep -qF "$user_cache_dir"; then
+      log "adding writable conda package cache: $user_cache_dir"
+      "$conda_bin" config --prepend pkgs_dirs "$user_cache_dir" >/dev/null
+    else
+      log "using conda package cache: $user_cache_dir"
+    fi
+    return
+  fi
+
+  # Fallback: check existing configured dirs with an actual write probe.
   while IFS= read -r dir; do
     [[ -n "$dir" ]] || continue
-    if mkdir -p "$dir" 2>/dev/null && [[ -w "$dir" ]]; then
+    if is_conda_writable_dir "$dir"; then
       log "using conda package cache: $dir"
       return
     fi
@@ -247,15 +276,7 @@ configure_conda_package_cache() {
     }
   ')
 
-  for dir in "$CONDA_DIR/pkgs" "$HOME/.conda/pkgs"; do
-    if mkdir -p "$dir" 2>/dev/null && [[ -w "$dir" ]]; then
-      log "adding writable conda package cache: $dir"
-      "$conda_bin" config --prepend pkgs_dirs "$dir" >/dev/null
-      return
-    fi
-  done
-
-  die "no writable conda package cache found; grant write access or add a writable pkgs_dirs entry with conda config"
+  die "no writable conda package cache found; grant write access or add a writable entry with: conda config --prepend pkgs_dirs \$HOME/.conda/pkgs"
 }
 
 run_in_env() {
