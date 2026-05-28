@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
+# Save caller's shell options and restore them on exit when sourced.
+_ROBODUET_SAVED_OPTS="$(set +o)"
 set -euo pipefail
+_roboduet_restore_opts() { eval "$_ROBODUET_SAVED_OPTS"; unset _ROBODUET_SAVED_OPTS _roboduet_restore_opts; }
+trap _roboduet_restore_opts RETURN 2>/dev/null || true  # RETURN fires when sourced
 
 # RoboDuet workstation / GPU node setup helper.
 #
@@ -367,10 +371,22 @@ setup_repo() {
   git clone --branch "$BRANCH" "$REPO_URL" "$REPO_DIR"
 }
 
+ensure_conda_init() {
+  local conda_bin="$1"
+  local shell_rc="$HOME/.bashrc"
+  if grep -q "conda initialize" "$shell_rc" 2>/dev/null; then
+    return
+  fi
+  log "running conda init bash (adds conda to $shell_rc)"
+  "$conda_bin" init bash >/dev/null
+  ok "conda init bash complete; conda will be available in new shells"
+}
+
 setup_conda_env() {
   [[ "$SKIP_ENV" -eq 1 ]] && return
   local conda_bin
   conda_bin="$(conda_exe)" || die "conda is required to create/update $ENV_NAME"
+  ensure_conda_init "$conda_bin"
   if env_exists; then
     log "conda env exists: $ENV_NAME"
     configure_env_library_path "$conda_bin"
@@ -811,6 +827,41 @@ run_step() {
   fi
 }
 
+_is_sourced() {
+  # True when this file is being sourced rather than executed as a subprocess.
+  [[ "${BASH_SOURCE[0]}" != "$0" ]]
+}
+
+activate_env() {
+  env_exists || return 0
+  printf '\n'
+  if _is_sourced; then
+    # Running inside the user's interactive shell via `source` or `.`
+    # so conda activate will modify the current shell environment.
+    if declare -F conda >/dev/null 2>&1; then
+      conda activate "$ENV_NAME" \
+        && ok "conda env $ENV_NAME activated" \
+        || warn "conda activate failed; try: conda activate $ENV_NAME"
+    else
+      # conda shell integration not loaded yet – init it then activate.
+      local conda_bin
+      conda_bin="$(conda_exe)" || return 0
+      # shellcheck disable=SC1090
+      source "$("$conda_bin" info --base)/etc/profile.d/conda.sh" 2>/dev/null || true
+      conda activate "$ENV_NAME" 2>/dev/null \
+        && ok "conda env $ENV_NAME activated" \
+        || warn "conda activate failed; try: conda activate $ENV_NAME"
+    fi
+  else
+    # Running as a subprocess (bash setup.sh, curl | bash, etc.).
+    # Cannot modify the parent shell; print the command instead.
+    log "to activate the roboduet environment in your shell, run:"
+    printf '    %bconda activate %s%b\n' "$BOLD" "$ENV_NAME" "$RESET"
+    log "or run this script with source to activate automatically:"
+    printf '    %bsource %s%b\n' "$BOLD" "${BASH_SOURCE[0]:-setup.sh}" "$RESET"
+  fi
+}
+
 print_summary() {
   printf '\n'
   log "summary"
@@ -825,6 +876,7 @@ print_summary() {
     return 1
   fi
   ok "RoboDuet setup finished"
+  activate_env
 }
 
 print_configuration
