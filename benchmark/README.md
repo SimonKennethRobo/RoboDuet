@@ -38,6 +38,8 @@ benchmark/candidates/
 
 其中 `--ckptids last` 对应 `checkpoints_dog/ac_weights_last_dog.pt`。
 
+注意：checkpoint 权重通常是本地 benchmark artifact，不建议在普通代码 PR 中随分支上传。需要长期共享的 candidate 可以保留 `parameters.pkl` / `params.txt` 等轻量元数据，真实 `ac_weights_*.pt` 由本机或服务器侧 artifact 目录提供。`benchmark/candidates/.gitignore` 默认忽略未 allowlist 的训练产物；如果临时复制新权重到 candidate 目录，本地 benchmark 会读取它，但发布 PR 前应确认是否真的需要提交该权重。
+
 ## Run Dog-Only Benchmark
 
 当前已实现的是 dog-only benchmark：
@@ -61,6 +63,21 @@ python -m benchmark.cli \
   --num_eval_steps 20 \
   --seed 7 \
   --skip_b
+```
+
+完整 dog-only 对比可以直接扫描 candidate pool，并把多个 policy 放进同一个 IsaacGym simulation 中并行评估：
+
+```bash
+conda run -n roboduet python -m benchmark.cli \
+  --dog_only \
+  --candidate_dir benchmark/candidates \
+  --headless \
+  --robot go2 \
+  --num_envs_per_policy 8 \
+  --num_eval_steps 100 \
+  --seed 1 \
+  --arm_intensity 1.0 \
+  --sim_device cuda:0
 ```
 
 旧入口 `python scripts/benchmark_policy.py ...` 仍然保留为兼容 wrapper。
@@ -167,7 +184,9 @@ HTML report 直接基于 `results.json` 渲染交互式 SVG charts，不再默�
 http://127.0.0.1:8765/
 ```
 
-历史 result 切换和多 result 对比已经整合到每个 report 的左侧 `Results` 导航栏中。默认只显示当前 result；勾选其它 result 后，Summary、Metadata、scenario detail table 和 SVG chart 会在原 Report 布局内切换为对比视图。多 result 模式下，Summary 和 scenario detail 会合并为按 metric 分组的宽表，每个 result 是 metric 下的 sub-column，并支持 sub-column 排序。
+历史 result 切换和多 result 对比已经整合到每个 report 的左侧 `Results` 导航栏中。Report 默认从 Home 页面开始，左侧 `Results` 保持 0 勾选状态；点击单个 result 会进入单 report，勾选多个 result 会在原 Report 布局内进入 compare 视图。`Select all` 会选择当前 report 中真实存在的 candidate，`Clear all` 会回到 Home 页面。
+
+多 result 模式下，Summary 和 scenario detail 会合并为按 metric 分组的宽表，每个 result 是 metric 下的 sub-column，并支持 sub-column 排序。表格行头和 metric 分组列头固定在左侧，横向滚动只移动 result metric 区域；metric chart 和 table 支持双向 hover/click 高亮，切换 chart metric 时会自动把对应 metric column 滚动到可见区域。
 
 也可以为整个结果目录批量生成 HTML：
 

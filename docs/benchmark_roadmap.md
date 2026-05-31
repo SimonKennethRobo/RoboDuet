@@ -607,17 +607,17 @@ Full benchmark 不应该阻塞所有开发 PR，但可以作为模型相关 PR �
 
 Phase 1 已完全落地。`--candidate_dir` 自动发现、symlink 去重、allowlist gitignore 均已验证可用。
 
-### Phase 1.5: Bug 修复与 JSON 稳定化（当前优先）
+### Phase 1.5: Bug 修复与 JSON 稳定化 ✅（已完成核心项）
 
 Phase 1 的目录管理已落地，但 benchmark 输出的质量还有结构性问题需要修复，否则后续 dashboard、CI、compare 都会受阻。
 
-- 修复 Bug 1: `save_results()` 过滤 NaN 或让 `_acc_to_result()` 覆盖所有 variant。
-- 修复 Bug 2: accumulator key collision（pitch_deg / roll_deg），拆为独立 key。
-- 修复 Bug 3: `--inspect` 模式延迟 import torch，无 torch 时至少读 config 维度。
-- 修复 Bug 4: 统一 CLI 参数名为 `--output_dir`。
-- 清理 Bug 5: 删除 `benchmark/results/` 下 3 个无效历史 result。
-- 稳定 `results.json` schema：定义字段必选/可选规则、NaN 处理策略、metric direction 标注。
-- 增加 `nightly.json` 和 `full.json` profile。
+- ✅ 修复 Bug 1: `save_results()` 不再把 NaN 写成非法 JSON literal。
+- ✅ 修复 Bug 2: accumulator key collision（pitch_deg / roll_deg），tracking RMSE 和 stability RMS 使用独立 key。
+- ✅ 修复 Bug 3: `--inspect` 模式延迟 import torch，无 torch 时可给出更清晰的轻量检查行为。
+- ✅ 修复 Bug 4: compare CLI 接受 `--output_dir`，并保留 `--output` 兼容旧命令。
+- ✅ 清理 Bug 5: 最新 report 只展示当前 result 中真实存在的 candidate，避免历史 smoke result 空数据污染对比。
+- ✅ 初步稳定 `results.json` 输出：NaN 转 `null`，report 侧集中维护 metric direction。
+- 待做：增加 `nightly.json` 和 `full.json` profile。
 
 ### Phase 2: HTML Report ✅（已完成）
 
@@ -626,10 +626,15 @@ Phase 1 的目录管理已落地，但 benchmark 输出的质量还有结构性�
 - ✅ 先实现静态 HTML，不引入复杂服务。
 - ✅ 支持 summary cards、metadata panel、scenario mean table、scenario detail table、heatmap 和交互式 SVG charts。
 - ✅ 左侧 Results 导航支持历史 result 切换，并保持页面滚动位置。
+- ✅ Report 默认进入 Home onboarding 页面，`Select all` 可选择当前 result 的全部 candidate，`Clear all` 返回 Home。
+- ✅ 多 result compare 保持原 Report 层级：summary、metadata、scenario table 和 chart 都在原页面内切换。
+- ✅ Scenario detail 使用 metric-grouped wide table，result 作为 sub-column；横向滚动只移动 metric 对比区域。
+- ✅ SVG chart 和 metric table 支持双向 hover/click 高亮，并在切换 chart metric 时自动滚动到对应 metric column。
+- ✅ Result 列表按当前 report candidate 过滤，避免旧 result 中的空 candidate 进入当前对比。
 - ✅ 默认产物收敛为 `index.html`、`results.json`、`metadata.json`，不再默认生成 markdown 和 PNG plot。
 - ✅ 已有基础 `--compare_results`，后续继续扩展为 report 内交互式对比。
 
-Phase 2 已完全落地。HTML report 功能完整，compare report 基础可用。
+Phase 2 已完全落地。HTML report 现在是 Benchmark 的主要人工查看入口，独立 `--compare_results` 保留给需要生成离线 compare artifact 的场景。
 
 ### Phase 2.5: candidate.json 支持
 
@@ -679,16 +684,16 @@ Phase 2 已完全落地。HTML report 功能完整，compare report 基础可用
 
 ## 短期建议（更新）
 
-Phase 1（候选目录）和 Phase 2（HTML Report）已完全落地。当前最优先的改动是：
+Phase 1（候选目录）、Phase 1.5 核心 bug 修复和 Phase 2（HTML Report）已完全落地。当前最优先的改动是：
 
-1. Bug 修复与 JSON 稳定化（Phase 1.5）
-   NaN 产生的非法 JSON 和 accumulator key collision 会影响所有下游（dashboard、CI、compare），必须先修。
-
-2. candidate.json 支持（Phase 2.5）
+1. candidate.json 支持（Phase 2.5）
    难度低、价值高。让 candidate pool 从纯文件发现升级为有状态管理，为后续 promotion/retirement 打基础。
 
-3. compare 扩展到 scenario-level / test-point-level diff
+2. compare 扩展到 scenario-level / test-point-level diff
    当前 compare 只看 summary-level 7 个 primary metrics，缺乏细节。
+
+3. nightly/full profile
+   当前已有 smoke profile 和手工 full 命令，后续应把 nightly/full 的 scenario/step/env 配置固化为版本化 profile。
 
 不建议马上做大规模并行重构或 arm/hybrid benchmark。先把数据质量和管理机制补上，再扩展评估能力。
 
@@ -701,17 +706,20 @@ Phase 1（候选目录）和 Phase 2（HTML Report）已完全落地。当前最
 - `benchmark.cli --compare_results` 可比较两个已保存 result 的 summary-level primary metrics。
 - candidate discovery 支持多级目录和本地目录 symlink，并用 resolved path 去重。
 - benchmark seed 独立于训练 seed。
+- dog-only full benchmark 已用两个真实 candidate 跑通，最新 report 覆盖 Velocity Grid、Arm Disturbance Sweep、Body Pose Tracking、Gait Tracking 四类 scenario。
 - 默认 result artifact 收敛为 `index.html`、`results.json`、`metadata.json`。
 - `metadata.json` 记录 benchmark protocol、命令行、candidate、ckpt id、robot、seed、env 数量、git/runtime 信息；remote URL 中的 credentials 会被 redaction。
-- HTML report 支持 summary cards、scenario metric mean table、metadata panel、scenario detail table、heatmap、表格排序、交互式 SVG charts 和左侧 Results 导航。
+- HTML report 支持 Home onboarding、summary cards、scenario metric mean table、metadata panel、scenario detail table、heatmap、表格排序、交互式 SVG charts、左侧 Results 导航和 `Select all` / `Clear all`。
+- 多 result report 支持 metric-grouped wide table、result sub-column、chart/table 双向高亮、metric column 自动居中和当前 report candidate 过滤。
 - heatmap 对 reward / `*_rew` 这类 higher-is-better metric 做方向处理。
 - **Phase 1（候选目录管理）已完成**：`--candidate_dir`、allowlist gitignore、run-like 目录结构均已验证可用。
-- **Phase 2（HTML Report）已完成**：单结果 report、多结果 index、compare report 均可用。
+- **Phase 1.5（Bug 修复与 JSON 稳定化核心项）已完成**：NaN JSON、pitch/roll accumulator collision、inspect torch import、compare output 参数兼容和历史空 result 混入问题均已处理。
+- **Phase 2（HTML Report）已完成**：单结果 report、多结果 index、原地多 result compare 和独立 compare report 均可用。
 
 当前优先推进的方向：
 
-- **Phase 1.5**: Bug 修复（NaN 非法 JSON、accumulator key collision、inspect torch 依赖、CLI 参数名不一致、垃圾 result 清理）+ JSON schema 稳定化 + nightly/full profile。
 - **Phase 2.5**: candidate.json 支持（可选元数据文件、status/tag 过滤、baseline 标记）。
+- 增加 nightly/full profile，把当前手工 full benchmark 命令固化为可 review 的 profile。
 - 把 `--compare_results` 扩展到 scenario-level 和 test-point-level diff。
 - 把 metric schema 和 direction 从 report 代码中抽出来，减少字段硬编码。
 - 在 arm policy 稳定后实现 `--arm_only` 和 `--hybrid`。
