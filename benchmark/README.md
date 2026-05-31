@@ -167,7 +167,7 @@ HTML report 直接基于 `results.json` 渲染交互式 SVG charts，不再默�
 http://127.0.0.1:8765/
 ```
 
-历史 result 切换已经整合到每个 report 的左侧 `Results` 导航栏中。
+历史 result 切换和多 result 对比已经整合到每个 report 的左侧 `Results` 导航栏中。默认只显示当前 result；勾选其它 result 后，Summary、Metadata、scenario detail table 和 SVG chart 会在原 Report 布局内切换为对比视图。多 result 模式下，Summary 和 scenario detail 会合并为按 metric 分组的宽表，每个 result 是 metric 下的 sub-column，并支持 sub-column 排序。
 
 也可以为整个结果目录批量生成 HTML：
 
@@ -182,12 +182,16 @@ HTML report 当前包含：
 - summary metric-mean table: 按 scenario 汇总主要 metric 均值，overall mean 放在 candidate card 中
 - metadata panel: seed、profile、candidate path、ckpt id、env count、git/runtime 信息等
 - left navigation: Report sections 和历史 result 切换入口，包含 Summary、Metadata、各 scenario 和 Results
-- scenario detail tables: 展示每个测试点的关键指标，并对主要列加 heatmap
+- scenario detail tables: 展示每个测试点的关键指标，并对主要列加 heatmap。新增稳定性 RMS（pitch_deg_rms、roll_deg_rms）和步态追踪 RMSE（gait_freq_rmse_hz、footswing_height_rmse_m、stance_width_rmse_m）
 - interactive metric charts: 每个 scenario 内直接切换 metric，并基于 `results.json` 渲染 SVG 图表；x 轴使用短语义标签，完整测试点 label 保留在 hover tooltip 和下方表格中
+
+JSON 结果中的未计算指标序列化为 `null`（不是 NaN），符合 RFC 8259 标准。
 
 ## Result Comparison
 
-可以直接比较两个已经落盘的 benchmark result，不需要重新加载 ckpt 或启动 IsaacGym：
+优先使用任意 result report 左侧 `Results` 导航栏中的多选 compare。它支持一次选择一个或多个 result，并直接在原 Report 布局内查看 summary、metadata、table 和 chart diff。
+
+如果需要生成独立的离线 compare artifact，也可以直接比较两个已经落盘的 benchmark result，不需要重新加载 ckpt 或启动 IsaacGym：
 
 ```bash
 python -m benchmark.cli --compare_results \

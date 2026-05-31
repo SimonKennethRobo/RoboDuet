@@ -311,16 +311,21 @@ def parse_args(argv: Optional[List[str]] = None):
     parser = argparse.ArgumentParser(description="Compare two saved benchmark result directories")
     parser.add_argument("--baseline", required=True, help="Baseline result directory or results.json")
     parser.add_argument("--target", required=True, help="Target result directory or results.json")
-    parser.add_argument("--output", default=None, help="Output HTML path")
+    parser.add_argument("--output_dir", default=None, help="Output directory for comparison report HTML")
     return parser.parse_args(argv)
 
 
 def main(argv: Optional[List[str]] = None):
     args = parse_args(argv)
+    output = None
+    if args.output_dir:
+        baseline_name = Path(args.baseline).name
+        target_name = Path(args.target).name
+        output = Path(args.output_dir) / f"compare_{baseline_name}_to_{target_name}.html"
     output = compare_results(
         Path(args.baseline),
         Path(args.target),
-        Path(args.output) if args.output else None,
+        output,
     )
     print(f"[Benchmark] Comparison report saved -> {output}")
 
