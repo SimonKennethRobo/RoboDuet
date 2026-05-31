@@ -463,10 +463,9 @@ def _side_nav(
     for index, entry in enumerate(comparison_entries):
         active = " active" if entry["active"] else ""
         title = ", ".join(entry["candidates"][:2]) or entry["name"]
-        checked = " checked" if entry["active"] else ""
         result_items.append(
             f'<div class="compare-result{active}">'
-            f'<input type="checkbox" class="compare-toggle" data-compare-index="{index}"{checked} '
+            f'<input type="checkbox" class="compare-toggle" data-compare-index="{index}" '
             f'aria-label="Compare {escape(entry["name"])}">'
             f'<a class="result-link{active}" href="{escape(entry["href"])}">'
             f'<span>{escape(entry["name"])}</span>'
@@ -474,7 +473,9 @@ def _side_nav(
             "</a></div>"
         )
     results_block = (
-        '<div class="nav-group nav-results"><h3>Results</h3>'
+        '<div class="nav-group nav-results"><div class="nav-title-row"><h3>Results</h3>'
+        '<div class="nav-actions"><button type="button" class="nav-action" id="select-all-results">Select all</button>'
+        '<button type="button" class="nav-action" id="clear-all-results">Clear all</button></div></div>'
         + "".join(result_items)
         + "</div>"
         if result_items
@@ -482,8 +483,8 @@ def _side_nav(
     )
     return (
         '<aside class="side-nav">'
-        '<div class="nav-group"><h3>Report</h3>'
-        f"{sections}"
+        '<div class="nav-group nav-report"><h3>Report</h3>'
+        f'<div id="report-nav-links">{sections}</div>'
         "</div>"
         f"{results_block}"
         "</aside>"
@@ -499,6 +500,28 @@ def _report_script(comparison_entries: List[dict]) -> str:
       const DETAIL_METRICS = __DETAIL_METRICS__;
       const SCENARIO_TITLES = __SCENARIO_TITLES__;
       const SCENARIO_ORDER = __SCENARIO_ORDER__;
+      const HOME_SCENARIO = "home_preview";
+      const HOME_METRICS = [
+        ["vx RMSE", "lin_vel_x_rmse"],
+        ["yaw RMSE", "ang_vel_yaw_rmse"],
+        ["lin reward", "tracking_lin_vel_reward"],
+      ];
+      const HOME_RESULTS = {
+        "demo A": {
+          [HOME_SCENARIO]: [
+            { label: "vx=0.5 yaw=0.0", lin_vel_x_rmse: 0.24, ang_vel_yaw_rmse: 0.18, tracking_lin_vel_reward: 0.86 },
+            { label: "vx=1.0 yaw=-0.5", lin_vel_x_rmse: 0.31, ang_vel_yaw_rmse: 0.36, tracking_lin_vel_reward: 0.74 },
+            { label: "vx=1.0 yaw=0.5", lin_vel_x_rmse: 0.29, ang_vel_yaw_rmse: 0.27, tracking_lin_vel_reward: 0.79 },
+          ],
+        },
+        "demo B": {
+          [HOME_SCENARIO]: [
+            { label: "vx=0.5 yaw=0.0", lin_vel_x_rmse: 0.19, ang_vel_yaw_rmse: 0.21, tracking_lin_vel_reward: 0.89 },
+            { label: "vx=1.0 yaw=-0.5", lin_vel_x_rmse: 0.27, ang_vel_yaw_rmse: 0.30, tracking_lin_vel_reward: 0.81 },
+            { label: "vx=1.0 yaw=0.5", lin_vel_x_rmse: 0.34, ang_vel_yaw_rmse: 0.25, tracking_lin_vel_reward: 0.76 },
+          ],
+        },
+      };
       const METADATA_FIELDS = [
         ["benchmark_mode", "benchmark_mode", null],
         ["benchmark_protocol", "benchmark_protocol", null],
@@ -707,15 +730,7 @@ def _report_script(comparison_entries: List[dict]) -> str:
         document.querySelectorAll(".compare-toggle").forEach((input) => {
           if (input.checked) selected.push(COMPARE_RESULTS[Number(input.dataset.compareIndex)]);
         });
-        if (selected.length) return selected.filter(Boolean);
-        const active = COMPARE_RESULTS.find((entry) => entry.active) || COMPARE_RESULTS[0];
-        if (active) {
-          document.querySelectorAll(".compare-toggle").forEach((input) => {
-            input.checked = Number(input.dataset.compareIndex) === COMPARE_RESULTS.indexOf(active);
-          });
-          return [active];
-        }
-        return [];
+        return selected.filter(Boolean);
       }
 
       function renderCards(results) {
@@ -774,8 +789,8 @@ def _report_script(comparison_entries: List[dict]) -> str:
             });
           });
           return {
-            stub: `<strong>${esc(SCENARIO_TITLES[scenario] || scenario)}</strong>`,
-            stubSort: SCENARIO_TITLES[scenario] || scenario,
+            stub: `<strong>${esc(scenario === HOME_SCENARIO ? "Mini Report" : SCENARIO_TITLES[scenario] || scenario)}</strong>`,
+            stubSort: scenario === HOME_SCENARIO ? "Mini Report" : SCENARIO_TITLES[scenario] || scenario,
             groups: groupsForRow,
           };
         });
@@ -927,6 +942,41 @@ def _report_script(comparison_entries: List[dict]) -> str:
           return `<section class="panel" id="detail-${esc(scenario)}"><h2>${esc(SCENARIO_TITLES[scenario] || scenario)}</h2>` +
             renderScenarioPlot(results, scenario, metricDefs) + tables + "</section>";
         }).join("");
+      }
+
+      function renderHome() {
+        const previewTable = renderScenarioCompare(HOME_RESULTS, HOME_SCENARIO, HOME_METRICS);
+        const previewPlot = renderScenarioPlot(HOME_RESULTS, HOME_SCENARIO, HOME_METRICS);
+        return `
+          <section class="cards home-cards" id="home-overview">
+            <div class="card home-card"><h3>1. Pick results</h3><p>Use the left Results panel to open one run, compare several runs, or select everything.</p><div class="home-arrow">Results -> report</div></div>
+            <div class="card home-card"><h3>2. Compare metrics</h3><p>Metric groups share test points, so each row compares the same condition across results.</p><div class="home-arrow">metric -> sub-columns</div></div>
+            <div class="card home-card"><h3>3. Link chart and table</h3><p>Hover the chart or table to highlight the same 1xN result group in both views.</p><div class="home-arrow">chart <-> table</div></div>
+          </section>
+          <section class="panel home-panel" id="home-pick">
+            <h2>Pick Results</h2>
+            <div class="home-steps">
+              <div><strong>Select all</strong><span>Compare every report currently available in this results folder.</span></div>
+              <div><strong>Clear all</strong><span>Return here without leaving the page.</span></div>
+              <div><strong>Checkboxes</strong><span>Build a focused comparison set manually.</span></div>
+              <div><strong>Result name</strong><span>Open one report in the same workspace.</span></div>
+            </div>
+          </section>
+          <section class="panel home-panel" id="home-summary">
+            <h2>Summary Preview</h2>
+            <p class="summary-note">This mini report uses example values only. It shows the same grouped layout used by real benchmark data.</p>
+            ${renderSummaryCompare(HOME_RESULTS, [HOME_SCENARIO])}
+          </section>
+          <section class="panel home-panel" id="home-chart">
+            <h2>Chart Interaction</h2>
+            <p class="summary-note">Hover or click a point. The vertical guide chooses a test point and highlights the matching result cells.</p>
+            ${previewPlot}
+          </section>
+          <section class="panel home-panel" id="home-table">
+            <h2>Metric Table</h2>
+            <p class="summary-note">Best and worst are computed inside each test-point metric group. The outline marks the 1xN comparison slice.</p>
+            ${previewTable}
+          </section>`;
       }
 
       function bindSortableTables() {
@@ -1222,37 +1272,77 @@ def _report_script(comparison_entries: List[dict]) -> str:
         });
       }
 
+      function navLink(label, href) {
+        return `<a href="${esc(href)}">${esc(label)}</a>`;
+      }
+
+      function renderReportNav(scenarios, hasMetadata, isHome) {
+        const container = document.getElementById("report-nav-links");
+        if (!container) return;
+        if (isHome) {
+          container.innerHTML = [
+            navLink("Overview", "#home-overview"),
+            navLink("Pick Results", "#home-pick"),
+            navLink("Summary Preview", "#home-summary"),
+            navLink("Chart Interaction", "#home-chart"),
+            navLink("Metric Table", "#home-table"),
+          ].join("");
+          return;
+        }
+        const links = [navLink("Summary", "#summary")];
+        if (hasMetadata) links.push(navLink("Metadata", "#metadata"));
+        scenarios.forEach((scenario) => {
+          if (DETAIL_METRICS[scenario]) links.push(navLink(SCENARIO_TITLES[scenario] || scenario, `#detail-${scenario}`));
+        });
+        container.innerHTML = links.join("");
+      }
+
+      function syncResultSelectionState() {
+        document.querySelectorAll(".compare-result").forEach((row) => {
+          const input = row.querySelector(".compare-toggle");
+          const active = Boolean(input && input.checked);
+          row.classList.toggle("active", active);
+          row.querySelector(".result-link")?.classList.toggle("active", active);
+        });
+      }
+
       function renderReport() {
         const selected = selectedResults();
         const results = flattenSelected(selected);
         const scenarios = scenarioNames(results);
-        document.querySelectorAll(".compare-result").forEach((row) => {
-          const input = row.querySelector(".compare-toggle");
-          row.classList.toggle("active", Boolean(input && input.checked));
-        });
+        const isHome = !Object.keys(results).length;
+        syncResultSelectionState();
         const main = document.getElementById("report-main");
-        if (!main || !Object.keys(results).length) return;
-        main.innerHTML =
-          `<section class="cards">${renderCards(results)}</section>` +
-          `<section class="panel" id="summary"><h2>Summary - Metric Mean</h2>${renderSummary(results, scenarios)}</section>` +
-          renderMetadata(selected) +
-          renderScenarioSections(results, scenarios);
+        if (!main) return;
+        renderReportNav(scenarios, selected.some((entry) => entry.metadata && Object.keys(entry.metadata).length), isHome);
+        clearLinkedHighlights(true);
+        if (isHome) {
+          main.innerHTML = renderHome();
+        } else {
+          main.innerHTML =
+            `<section class="cards">${renderCards(results)}</section>` +
+            `<section class="panel" id="summary"><h2>Summary - Metric Mean</h2>${renderSummary(results, scenarios)}</section>` +
+            renderMetadata(selected) +
+            renderScenarioSections(results, scenarios);
+        }
         bindSortableTables();
         bindMetricPlots();
         bindTableChartLinks();
       }
 
       function bindReportNavLinks() {
-        document.querySelectorAll(".side-nav .nav-group a[href^='#']:not(.result-link)").forEach((link) => {
-          link.addEventListener("click", (event) => {
-            const href = link.getAttribute("href");
-            if (!href || href === "#") return;
-            const target = document.querySelector(href);
-            if (!target) return;
-            event.preventDefault();
-            target.scrollIntoView({ behavior: "smooth", block: "start" });
-            history.pushState(null, "", href);
-          });
+        const nav = document.querySelector(".side-nav");
+        if (!nav) return;
+        nav.addEventListener("click", (event) => {
+          const link = event.target.closest(".nav-report a[href^='#']");
+          if (!link) return;
+          const href = link.getAttribute("href");
+          if (!href || href === "#") return;
+          const target = document.querySelector(href);
+          if (!target) return;
+          event.preventDefault();
+          target.scrollIntoView({ behavior: "smooth", block: "start" });
+          history.pushState(null, "", href);
         });
       }
 
@@ -1260,10 +1350,33 @@ def _report_script(comparison_entries: List[dict]) -> str:
         input.addEventListener("change", renderReport);
       });
 
+      const selectAllButton = document.getElementById("select-all-results");
+      if (selectAllButton) {
+        selectAllButton.addEventListener("click", () => {
+          document.querySelectorAll(".compare-toggle").forEach((input) => { input.checked = true; });
+          renderReport();
+          document.getElementById("report-main")?.scrollIntoView({ behavior: "smooth", block: "start" });
+        });
+      }
+
+      const clearAllButton = document.getElementById("clear-all-results");
+      if (clearAllButton) {
+        clearAllButton.addEventListener("click", () => {
+          document.querySelectorAll(".compare-toggle").forEach((input) => { input.checked = false; });
+          renderReport();
+          document.getElementById("home-overview")?.scrollIntoView({ behavior: "smooth", block: "start" });
+        });
+      }
+
       const scrollKey = "roboduet-benchmark-scroll-y";
       document.querySelectorAll(".result-link").forEach((link) => {
-        link.addEventListener("click", () => {
-          sessionStorage.setItem(scrollKey, String(window.scrollY));
+        link.addEventListener("click", (event) => {
+          event.preventDefault();
+          document.querySelectorAll(".compare-toggle").forEach((input) => { input.checked = false; });
+          const input = link.closest(".compare-result")?.querySelector(".compare-toggle");
+          if (input) input.checked = true;
+          renderReport();
+          document.getElementById("report-main")?.scrollIntoView({ behavior: "smooth", block: "start" });
         });
       });
       renderReport();
@@ -1375,6 +1488,39 @@ def _render_html(results: Dict[str, Dict[str, List[dict]]], source: Path, output
       text-transform: uppercase;
       letter-spacing: 0;
     }}
+    .nav-title-row {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 8px;
+    }}
+    .nav-title-row h3 {{
+      margin: 0;
+    }}
+    .nav-actions {{
+      display: flex;
+      gap: 4px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }}
+    .nav-action {{
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      background: #ffffff;
+      color: var(--header);
+      cursor: pointer;
+      font: inherit;
+      font-size: 11px;
+      font-weight: 700;
+      line-height: 1.2;
+      padding: 4px 6px;
+    }}
+    .nav-action:hover {{
+      background: var(--accent-soft);
+      border-color: #b7d7d1;
+      color: var(--accent);
+    }}
     .nav-group a {{
       display: block;
       border-radius: 6px;
@@ -1444,6 +1590,44 @@ def _render_html(results: Dict[str, Dict[str, List[dict]]], source: Path, output
     .stat label {{ display: block; color: var(--muted); }}
     .stat-empty {{ visibility: hidden; }}
     .panel {{ padding: 18px; margin-bottom: 18px; overflow: hidden; scroll-margin-top: 18px; }}
+    .home-card p {{
+      min-height: 42px;
+    }}
+    .home-arrow {{
+      display: inline-block;
+      border: 1px solid #b7d7d1;
+      border-radius: 6px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 800;
+      padding: 5px 7px;
+    }}
+    .home-panel h2 {{
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }}
+    .home-steps {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+      gap: 10px;
+    }}
+    .home-steps div {{
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--panel-2);
+      padding: 12px;
+    }}
+    .home-steps strong {{
+      display: block;
+      color: var(--header);
+      margin-bottom: 4px;
+    }}
+    .home-steps span {{
+      color: var(--muted);
+      font-size: 13px;
+    }}
     table {{ width: 100%; border-collapse: collapse; min-width: 780px; }}
     th, td {{ padding: 9px 10px; border-bottom: 1px solid var(--border); text-align: right; white-space: nowrap; }}
     th:first-child, td:first-child {{ text-align: left; }}
