@@ -416,6 +416,37 @@ def _comparison_result_payload(source: Path, output_path: Path, limit: int = 16)
     return payload
 
 
+def _comparison_series_payload(comparison_entries: List[dict]) -> List[dict]:
+    active_entries = [entry for entry in comparison_entries if entry["active"]]
+    visible_entries = active_entries or comparison_entries[:1]
+
+    candidates = []
+    for entry in visible_entries:
+        for candidate in entry["results"]:
+            candidates.append(candidate)
+    duplicate_candidates = {name for name in candidates if candidates.count(name) > 1}
+
+    payload = []
+    for entry in visible_entries:
+        for candidate, scenarios in entry["results"].items():
+            points = sum(len(rows) for rows in scenarios.values())
+            display_name = f'{entry["name"]} / {candidate}' if candidate in duplicate_candidates else candidate
+            payload.append(
+                {
+                    "name": display_name,
+                    "candidate": candidate,
+                    "report": entry["name"],
+                    "href": entry["href"],
+                    "active": False,
+                    "scenarios": entry["scenarios"],
+                    "points": points,
+                    "results": scenarios,
+                    "metadata": entry["metadata"],
+                }
+            )
+    return payload
+
+
 def _result_links(source: Path, output_path: Path, limit: int = 16) -> List[dict]:
     root = _find_results_root(source)
     if not root.is_dir():
@@ -450,7 +481,7 @@ def _side_nav(
     output_path: Path,
     scenarios: List[str],
     has_metadata: bool,
-    comparison_entries: List[dict],
+    comparison_series: List[dict],
 ) -> str:
     section_links = [("Summary", "#summary")]
     if has_metadata:
@@ -460,9 +491,9 @@ def _side_nav(
             section_links.append((SCENARIO_TITLES.get(scenario, scenario), f"#detail-{scenario}"))
     sections = "".join(f'<a href="{escape(href)}">{escape(label)}</a>' for label, href in section_links)
     result_items = []
-    for index, entry in enumerate(comparison_entries):
+    for index, entry in enumerate(comparison_series):
         active = " active" if entry["active"] else ""
-        title = ", ".join(entry["candidates"][:2]) or entry["name"]
+        title = entry["report"]
         result_items.append(
             f'<div class="compare-result{active}">'
             f'<input type="checkbox" class="compare-toggle" data-compare-index="{index}" '
@@ -491,7 +522,7 @@ def _side_nav(
     )
 
 
-def _report_script(comparison_entries: List[dict]) -> str:
+def _report_script(comparison_series: List[dict]) -> str:
     return (
         """<script>
     (() => {
@@ -676,7 +707,7 @@ def _report_script(comparison_entries: List[dict]) -> str:
         const secondHeader = "<tr>" + groups.map((group) => group.columns.map((column, columnIndex) => {
           const colorStyle = column.color ? ` style="background:${esc(column.color)}"` : "";
           const boundaryClass = `${columnIndex === 0 ? " metric-col-start" : ""}${columnIndex === group.columns.length - 1 ? " metric-col-end" : ""}`;
-          const header = `<th class="result-subhead${boundaryClass}" data-sortable="1" data-sort-column="${colIndex}"${colorStyle}>${esc(column.label)}</th>`;
+          const header = `<th class="result-subhead${boundaryClass}" data-sortable="1" data-sort-column="${colIndex}"${colorStyle}><span title="${esc(column.label)}">${esc(column.label)}</span></th>`;
           colIndex += 1;
           return header;
         }).join("")).join("") + "</tr>";
@@ -715,12 +746,8 @@ def _report_script(comparison_entries: List[dict]) -> str:
 
       function flattenSelected(selected) {
         const flattened = {};
-        selected.forEach((resultSet) => {
-          const candidateNames = Object.keys(resultSet.results || {});
-          candidateNames.forEach((candidate) => {
-            const seriesName = candidateNames.length === 1 ? resultSet.name : `${resultSet.name} / ${candidate}`;
-            flattened[seriesName] = resultSet.results[candidate] || {};
-          });
+        selected.forEach((series) => {
+          flattened[series.name] = series.results || {};
         });
         return flattened;
       }
@@ -1392,7 +1419,7 @@ def _report_script(comparison_entries: List[dict]) -> str:
       }
     })();
   </script>"""
-        .replace("__COMPARE_RESULTS__", _json_for_script(comparison_entries))
+        .replace("__COMPARE_RESULTS__", _json_for_script(comparison_series))
         .replace("__PRIMARY_METRICS__", _json_for_script(PRIMARY_METRICS))
         .replace("__DETAIL_METRICS__", _json_for_script(DETAIL_METRICS))
         .replace("__SCENARIO_TITLES__", _json_for_script(SCENARIO_TITLES))
@@ -1405,6 +1432,7 @@ def _render_html(results: Dict[str, Dict[str, List[dict]]], source: Path, output
     metadata = _load_metadata(source)
     generated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     comparison_entries = _comparison_result_payload(source, output_path)
+    comparison_series = _comparison_series_payload(comparison_entries)
 
     return f"""<!doctype html>
 <html lang="en">
@@ -1678,6 +1706,15 @@ def _render_html(results: Dict[str, Dict[str, List[dict]]], source: Path, output
       font-weight: 800;
       text-shadow: 0 1px 1px rgb(0 0 0 / 28%);
       box-shadow: inset 0 -2px 0 rgb(255 255 255 / 28%);
+      max-width: 132px;
+    }}
+    .compare-wide-table thead tr:nth-child(2) th.result-subhead span {{
+      display: block;
+      max-width: 120px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      margin: 0 auto;
     }}
     .compare-wide-table .sticky-col {{
       position: sticky;
@@ -1899,7 +1936,7 @@ def _render_html(results: Dict[str, Dict[str, List[dict]]], source: Path, output
     </div>
   </header>
   <div class="layout">
-    {_side_nav(source, output_path, scenarios, bool(metadata), comparison_entries)}
+    {_side_nav(source, output_path, scenarios, bool(metadata), comparison_series)}
     <main id="report-main">
       <section class="cards">{_candidate_cards(results)}</section>
       <section class="panel" id="summary"><h2>Summary - Metric Mean</h2>{_summary_table(results, scenarios)}</section>
@@ -1908,7 +1945,7 @@ def _render_html(results: Dict[str, Dict[str, List[dict]]], source: Path, output
     </main>
   </div>
   <footer>Heatmap colors are normalized within each candidate and scenario table; green indicates better relative values for highlighted metrics, red indicates worse relative values.</footer>
-  {_report_script(comparison_entries)}
+  {_report_script(comparison_series)}
 </body>
 </html>
 """
