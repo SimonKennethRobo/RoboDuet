@@ -132,13 +132,13 @@ benchmark/results/<timestamp>/
 - 结构化 `results.json`
 - 结构化 `metadata.json`，记录 benchmark protocol、命令行、candidate path、ckpt id、robot、seed、env count、git branch/commit/dirty 状态、Python/PyTorch/CUDA runtime 等运行上下文
 - 单文件 HTML report：`index.html`
-- `benchmark/results/index.html`，直接渲染最新 result，并在左侧 `Results` 导航中切换历史 result
+- `benchmark/results/index.html`，直接渲染最新 result；每个 report 左侧 `Results` 导航当前只展开本次 `results.json` 内真实存在的 candidate，用于同一次 benchmark run 内的原地对比
 
-当前默认不再生成 `report.md` 和 `plots/*.png`。HTML report 已经覆盖旧 markdown 信息，并额外提供 summary cards、metadata panel、scenario mean table、scenario detail tables、heatmap、表格排序和交互式 SVG charts。`results.json` 和 `metadata.json` 作为机器可读 artifact 保留，HTML report 作为主要人工查看入口。
+当前默认不再生成 `report.md` 和 `plots/*.png`。HTML report 已经覆盖旧 markdown 信息，并额外提供 summary cards、metadata panel、scenario mean table、scenario detail tables、heatmap、表格排序、交互式 SVG charts 和原地多 candidate 对比。`results.json` 和 `metadata.json` 作为机器可读 artifact 保留，HTML report 作为主要人工查看入口。
 
-当前 `benchmark.cli --compare_results` 已经可以比较两个已落盘 result 的 summary-level primary metrics，不需要重新加载 checkpoint 或启动 IsaacGym。后续更完整的跨 result dashboard 仍然值得继续做，例如 scenario-level / test-point-level diff、regression verdict 和 result annotation。
+当前每个 HTML report 已经支持浏览器内多 candidate 对比，不需要单独运行 compare 命令；Summary 和 scenario detail 在多选时使用 metric-grouped 宽表，candidate 作为 sub-column，支持 sub-column 排序。`benchmark.cli --compare_results` 仍保留为生成独立两两 compare artifact 的离线入口。后续仍值得继续做 regression verdict、result annotation 和更稳定的 schema/direction 配置。
 
-这些结果已经覆盖 dog-only benchmark 的日常使用。当前主要缺口是更深入的跨 result 交互式对比，例如两个不同 benchmark run 之间的 side-by-side scenario table、delta chart、test-point-level regression verdict 和 candidate promotion / retirement 记录。
+这些结果已经覆盖 dog-only benchmark 的日常使用。当前主要缺口是更深入的跨历史 result 交互式对比，例如单次只跑一个 candidate 后与历史 baseline/result 做 side-by-side scenario table、delta chart、test-point-level regression verdict 和 candidate promotion / retirement 记录。这类功能需要在 scenario、metric schema、metadata 和 policy layout 稳定后再做，避免把历史 smoke、partial 或不兼容 result 混进当前 report。
 
 ## 当前优点
 
@@ -212,7 +212,12 @@ scenario grid 和 metric selection 都写在 Python 文件里。这样导致：
 
 当前 HTML report 已经可以覆盖单次 result 的浏览和检查。单个 result 内可以查看 summary、metadata、scenario mean、scenario detail table 和交互式 SVG chart，并支持表格排序、heatmap、左侧 result 切换和滚动位置保持。
 
-目前已经有基础 `--compare_results`，可以比较两个历史 benchmark run 的 summary-level primary metrics。下一步更合适的是把 compare 能力扩展到 HTML dashboard 内：
+目前已经有两层 compare 能力：
+
+- HTML report 左侧 `Results` 导航：交互式多 candidate 对比，当前作用域是同一个 `results.json` 内的 candidates，支持 metadata diff、metric-grouped 宽表、sub-column 排序和 multi-series chart，并保留原 Report 层级。
+- `benchmark.cli --compare_results`：独立两两 compare artifact，适合 CI 或需要保存单独 HTML 文件的场景。
+
+CLI compare 示例：
 
 ```bash
 python -m benchmark.cli --compare_results \
@@ -220,8 +225,9 @@ python -m benchmark.cli --compare_results \
   --target benchmark/results/B
 ```
 
-compare report 应该提供：
+后续 compare/report 应该继续补强：
 
+- 跨历史 result directory 的兼容性分组，让“单次只跑一个 candidate”也能和稳定 baseline/history 做交互式对比。
 - 不同 result 的 metadata 对齐。
 - candidate / scenario / metric summary 对齐。
 - baseline vs candidate 的 delta table。
@@ -554,26 +560,94 @@ Smoke benchmark 可以作为近似 UT：
 
 Full benchmark 不应该阻塞所有开发 PR，但可以作为模型相关 PR 的必要检查。
 
+## 已发现的 Bug
+
+经过实际验证（`feat/benchmark-stabilization` 分支），以下 bug 已确认存在：
+
+### Bug 1: ScenarioResult NaN 默认值产生非法 JSON
+
+`ScenarioResult` dataclass 中所有 metric 字段默认为 `float("nan")`。`_acc_to_result()` 根据 `CommandLayout` 只赋值一个 variant（如 `pitch_rmse_deg`），另一个 variant（如 `pitch_deg_rms`）保留 NaN 默认值。`save_results()` 直接 `dataclasses.asdict()` + `json.dump()`，不做 NaN 过滤，输出包含 `NaN` literal — 这是非法 JSON（违反 RFC 8259），会导致标准 JSON parser 解析失败。
+
+当前每次 dog-only benchmark（`dog_num_commands >= 5`）的 `results.json` 都包含以下 NaN 字段：
+- `pitch_deg_rms`（当 `has_body_pitch=True` 时未赋值）
+- `roll_deg_rms`（当 `has_body_roll=True` 时未赋值）
+- `gait_freq_rmse_hz`（死字段，从未被任何代码赋值）
+
+修复方向：在 `save_results()` 中过滤 NaN 字段，或让 `_acc_to_result()` 对所有 variant 都赋值（stability RMS 和 tracking RMSE 同时计算），或移除死字段 `gait_freq_rmse_hz`。
+
+### Bug 2: Accumulator key collision（pitch_deg / roll_deg）
+
+`_eval_loop_parallel()` 中，`add_sq_err("pitch_deg", ...)` 和 `add_val("pitch_deg", ...)` 写同一个 `pitch_deg_sq` tensor。前者存 `(actual - cmd)^2`（tracking error），后者存 `actual^2`（stability RMS 的平方分量）。两者混入同一个 `_sq` tensor，使得 `acc.rmse("pitch_deg")` 既不是 tracking RMSE 也不是 stability RMS，而是两者的混合 — 数值错误但不产生 NaN。
+
+`roll_deg` 同样存在此 collision。
+
+修复方向：使用不同的 accumulator key，例如 `"pitch_deg_track"` 和 `"pitch_deg_raw"`。
+
+### Bug 3: `--inspect` 模式硬依赖 torch
+
+`benchmark/cli.py` 在 `--inspect` 时 import `benchmark.inspect`，后者 import torch。在没有 torch/CUDA 的环境（如 GitHub-hosted runner）中直接报错。`--inspect` 应能至少部分工作（读 config 维度），不应要求 GPU。
+
+### Bug 4: CLI `--output` vs `--output_dir` 参数名不一致
+
+`--compare_results` 模块的 CLI 用 `--output`，dog-policy CLI 用 `--output_dir`。用户从 dog 模式切换到 compare 模式时容易混淆。
+
+### Bug 5: 历史垃圾 result 未清理
+
+`benchmark/results/` 下有 3 个旧 result（`20260526_*`），全部是 1 env + 1 step 的无效测试数据，应删除或标记为 `archived`。
+
 ## 推荐路线图
 
-### Phase 1: 文档与候选目录
+### Phase 1: 文档与候选目录 ✅（已完成）
 
-- 新增 benchmark roadmap 文档。
-- 引入 `benchmark/candidates/` run-like candidate 目录。
-- 使用 `benchmark/candidates/.gitignore` allowlist 控制 Git 只 track 必要文件。
-- CLI 支持 `--candidate_dir benchmark/candidates`。
-- 保留当前 `--logdirs --ckptids --names` 作为低层接口。
-- Benchmark 模式通过 `--dog_only`、未来的 `--arm_only` / `--hybrid` 控制，而不是写死在 candidate 目录名里。
+- ✅ 新增 benchmark roadmap 文档。
+- ✅ 引入 `benchmark/candidates/` run-like candidate 目录。
+- ✅ 使用 `benchmark/candidates/.gitignore` allowlist 控制 Git 只 track 必要文件。
+- ✅ CLI 支持 `--candidate_dir benchmark/candidates`。
+- ✅ 保留当前 `--logdirs --ckptids --names` 作为低层接口。
+- ✅ Benchmark 模式通过 `--dog_only`、未来的 `--arm_only` / `--hybrid` 控制，而不是写死在 candidate 目录名里。
 
-### Phase 2: HTML Report
+Phase 1 已完全落地。`--candidate_dir` 自动发现、symlink 去重、allowlist gitignore 均已验证可用。
 
-- 基于现有 `results.json` 和 `metadata.json` 生成 `index.html`。
-- 自动更新 `benchmark/results/index.html`，并直接渲染最新 result 的完整 report。
-- 先实现静态 HTML，不引入复杂服务。
-- 支持 summary cards、metadata panel、scenario mean table、scenario detail table、heatmap 和交互式 SVG charts。
-- 左侧 Results 导航支持历史 result 切换，并保持页面滚动位置。
-- 默认产物收敛为 `index.html`、`results.json`、`metadata.json`，不再默认生成 markdown 和 PNG plot。
-- 已有基础 `--compare_results`，后续继续扩展为 report 内交互式对比。
+### Phase 1.5: Bug 修复与 JSON 稳定化 ✅（已完成核心项）
+
+Phase 1 的目录管理已落地，但 benchmark 输出的质量还有结构性问题需要修复，否则后续 dashboard、CI、compare 都会受阻。
+
+- ✅ 修复 Bug 1: `save_results()` 不再把 NaN 写成非法 JSON literal。
+- ✅ 修复 Bug 2: accumulator key collision（pitch_deg / roll_deg），tracking RMSE 和 stability RMS 使用独立 key。
+- ✅ 修复 Bug 3: `--inspect` 模式延迟 import torch，无 torch 时可给出更清晰的轻量检查行为。
+- ✅ 修复 Bug 4: compare CLI 接受 `--output_dir`，并保留 `--output` 兼容旧命令。
+- ✅ 清理 Bug 5: 最新 report 只展示当前 result 中真实存在的 candidate，避免历史 smoke result 空数据污染对比。
+- ✅ 初步稳定 `results.json` 输出：NaN 转 `null`，report 侧集中维护 metric direction。
+- 待做：增加 `nightly.json` 和 `full.json` profile。
+
+### Phase 2: HTML Report ✅（已完成）
+
+- ✅ 基于现有 `results.json` 和 `metadata.json` 生成 `index.html`。
+- ✅ 自动更新 `benchmark/results/index.html`，并直接渲染最新 result 的完整 report。
+- ✅ 先实现静态 HTML，不引入复杂服务。
+- ✅ 支持 summary cards、metadata panel、scenario mean table、scenario detail table、heatmap 和交互式 SVG charts。
+- ✅ 左侧 Results 导航支持历史 result 切换，并保持页面滚动位置。
+- ✅ Report 默认进入 Home onboarding 页面，`Select all` 可选择当前 result 的全部 candidate，`Clear all` 返回 Home。
+- ✅ 多 result compare 保持原 Report 层级：summary、metadata、scenario table 和 chart 都在原页面内切换。
+- ✅ Scenario detail 使用 metric-grouped wide table，result 作为 sub-column；横向滚动只移动 metric 对比区域。
+- ✅ SVG chart 和 metric table 支持双向 hover/click 高亮，并在切换 chart metric 时自动滚动到对应 metric column。
+- ✅ Result 列表按当前 report candidate 过滤，避免旧 result 中的空 candidate 进入当前对比。
+- ✅ 默认产物收敛为 `index.html`、`results.json`、`metadata.json`，不再默认生成 markdown 和 PNG plot。
+- ✅ 已有基础 `--compare_results`，后续继续扩展为 report 内交互式对比。
+
+Phase 2 已完全落地。HTML report 现在是 Benchmark 的主要人工查看入口，独立 `--compare_results` 保留给需要生成离线 compare artifact 的场景。
+
+### Phase 2.5: candidate.json 支持
+
+在 Phase 1 的目录结构基础上，引入可选 `candidate.json` 文件，为每个 candidate 记录元数据和状态。
+
+- 定义 `candidate.json` schema: `status` (active/baseline/archived/rejected)、`tags` (list)、`description`、`reason` (保留/淘汰原因)、`trained_on` (训练 commit/dataset)、`specialty` (擅长的 scenario)、`benchmark_mode` (dog_only/arm_only/hybrid)、`policy_pair` (dog/arm checkpoint 来源和组合关系)。
+- `discover_run_logdirs()` 读取 candidate.json（如存在），将 status/tag 信息传入 metadata。
+- `_apply_candidate_dir()` 支持 `--status active` 过滤，默认只跑 active candidate。
+- `--baseline` CLI 参数指定 baseline candidate name 或 path，在 metadata 中标记。
+- candidate.json 为可选文件：没有时 fallback 到当前行为（所有发现的 candidate 默认 active）。
+
+实现难度评估：低。candidate.json schema 简单，读取逻辑只需在 `candidates.py` 中加一个 `load_candidate_meta()` 函数，CLI 只需加一个 status 过滤参数。核心改动在 `candidates.py` 和 `dog_policy/cli.py`，不涉及 eval loop 或 HTML report。预估改动量 ~100 行。
 
 ### Phase 3: Benchmark 代码结构整理
 
@@ -609,38 +683,47 @@ Full benchmark 不应该阻塞所有开发 PR，但可以作为模型相关 PR �
 - 增加 arm trajectory tracking、end-effector pose error、task success、coordination stability 等 metric。
 - 明确 dog-only benchmark 与 arm-only/hybrid benchmark 的结果不可直接混合排名，只能在各自 profile 内比较。
 
-## 短期建议
+## 短期建议（更新）
 
-最值得优先做的三个改动：
+Phase 1（候选目录）、Phase 1.5 核心 bug 修复和 Phase 2（HTML Report）已完全落地。当前最优先的改动是：
 
-1. Candidate directory  
-   先解决“哪些 ckpt 应该参与 benchmark”这个管理问题，同时避免维护全局 manifest。
+1. candidate.json 支持（Phase 2.5）
+   难度低、价值高。让 candidate pool 从纯文件发现升级为有状态管理，为后续 promotion/retirement 打基础。
 
-2. HTML dashboard  
-   直接提升结果查看效率，让 benchmark 结果真正可用。
+2. compare 扩展到 scenario-level / test-point-level diff
+   当前 compare 只看 summary-level 7 个 primary metrics，缺乏细节。
 
-3. JSON schema 稳定化  
-   所有后续 dashboard、历史比较、CI regression 都依赖稳定结构化结果。
+3. historical result compare
+   当 scenario 和 metric schema 稳定后，支持单次只跑一个 candidate，并自动与历史 baseline/result 做兼容性检查、对齐和交互式对比。
 
-不建议马上做大规模并行重构。当前 shared-sim 多 policy 评估已经有价值，先把候选管理和可视化补上，会更快改善实际工作流。
+4. nightly/full profile
+   当前已有 smoke profile 和手工 full 命令，后续应把 nightly/full 的 scenario/step/env 配置固化为版本化 profile。
+
+不建议马上做大规模并行重构或 arm/hybrid benchmark。先把数据质量和管理机制补上，再扩展评估能力。
 
 ## 当前已完成的增量
 
-截至 `feat/benchmark-result-tracking`，以下能力已经落地：
+截至 `feat/benchmark-stabilization`，以下能力已经落地：
 
 - `benchmark.cli --dog_only` 作为 dog-only benchmark 主入口。
 - `benchmark.cli --inspect` 可轻量检查 dog/arm checkpoint shape 与配置是否自洽。
 - `benchmark.cli --compare_results` 可比较两个已保存 result 的 summary-level primary metrics。
 - candidate discovery 支持多级目录和本地目录 symlink，并用 resolved path 去重。
 - benchmark seed 独立于训练 seed。
+- dog-only full benchmark 已用两个真实 candidate 跑通，最新 report 覆盖 Velocity Grid、Arm Disturbance Sweep、Body Pose Tracking、Gait Tracking 四类 scenario。
 - 默认 result artifact 收敛为 `index.html`、`results.json`、`metadata.json`。
 - `metadata.json` 记录 benchmark protocol、命令行、candidate、ckpt id、robot、seed、env 数量、git/runtime 信息；remote URL 中的 credentials 会被 redaction。
-- HTML report 支持 summary cards、scenario metric mean table、metadata panel、scenario detail table、heatmap、表格排序、交互式 SVG charts 和左侧 Results 导航。
+- HTML report 支持 Home onboarding、summary cards、scenario metric mean table、metadata panel、scenario detail table、heatmap、表格排序、交互式 SVG charts、左侧 Results 导航和 `Select all` / `Clear all`。
+- 多 result report 支持 metric-grouped wide table、result sub-column、chart/table 双向高亮、metric column 自动居中和当前 report candidate 过滤。
 - heatmap 对 reward / `*_rew` 这类 higher-is-better metric 做方向处理。
+- **Phase 1（候选目录管理）已完成**：`--candidate_dir`、allowlist gitignore、run-like 目录结构均已验证可用。
+- **Phase 1.5（Bug 修复与 JSON 稳定化核心项）已完成**：NaN JSON、pitch/roll accumulator collision、inspect torch import、compare output 参数兼容和历史空 result 混入问题均已处理。
+- **Phase 2（HTML Report）已完成**：单结果 report、多结果 index、原地多 result compare 和独立 compare report 均可用。
 
-后续最值得继续推进的是：
+当前优先推进的方向：
 
-- 把 `--compare_results` 扩展到 scenario-level 和 test-point-level diff。
-- 在 report 中加入 result annotation，例如 baseline、candidate、promoted、deprecated。
+- **Phase 2.5**: candidate.json 支持（可选元数据文件、status/tag 过滤、baseline 标记）。
+- 增加 nightly/full profile，把当前手工 full benchmark 命令固化为可 review 的 profile。
+- 把 `--compare_results` 扩展到 scenario-level 和 test-point-level diff，并在 schema 稳定后支持跨历史 result 的交互式 compare。
 - 把 metric schema 和 direction 从 report 代码中抽出来，减少字段硬编码。
 - 在 arm policy 稳定后实现 `--arm_only` 和 `--hybrid`。

@@ -38,6 +38,8 @@ benchmark/candidates/
 
 其中 `--ckptids last` 对应 `checkpoints_dog/ac_weights_last_dog.pt`。
 
+注意：checkpoint 权重通常是本地 benchmark artifact，不建议在普通代码 PR 中随分支上传。需要长期共享的 candidate 可以保留 `parameters.pkl` / `params.txt` 等轻量元数据，真实 `ac_weights_*.pt` 由本机或服务器侧 artifact 目录提供。`benchmark/candidates/.gitignore` 默认忽略未 allowlist 的训练产物；如果临时复制新权重到 candidate 目录，本地 benchmark 会读取它，但发布 PR 前应确认是否真的需要提交该权重。
+
 ## Run Dog-Only Benchmark
 
 当前已实现的是 dog-only benchmark：
@@ -61,6 +63,21 @@ python -m benchmark.cli \
   --num_eval_steps 20 \
   --seed 7 \
   --skip_b
+```
+
+完整 dog-only 对比可以直接扫描 candidate pool，并把多个 policy 放进同一个 IsaacGym simulation 中并行评估：
+
+```bash
+conda run -n roboduet python -m benchmark.cli \
+  --dog_only \
+  --candidate_dir benchmark/candidates \
+  --headless \
+  --robot go2 \
+  --num_envs_per_policy 8 \
+  --num_eval_steps 100 \
+  --seed 1 \
+  --arm_intensity 1.0 \
+  --sim_device cuda:0
 ```
 
 旧入口 `python scripts/benchmark_policy.py ...` 仍然保留为兼容 wrapper。
@@ -167,7 +184,9 @@ HTML report 直接基于 `results.json` 渲染交互式 SVG charts，不再默�
 http://127.0.0.1:8765/
 ```
 
-历史 result 切换已经整合到每个 report 的左侧 `Results` 导航栏中。
+历史 result 切换和多 result 对比已经整合到每个 report 的左侧 `Results` 导航栏中。Report 默认从 Home 页面开始，左侧 `Results` 保持 0 勾选状态；点击单个 result 会进入单 report，勾选多个 result 会在原 Report 布局内进入 compare 视图。`Select all` 会选择当前 report 中真实存在的 candidate，`Clear all` 会回到 Home 页面。
+
+多 result 模式下，Summary 和 scenario detail 会合并为按 metric 分组的宽表，每个 result 是 metric 下的 sub-column，并支持 sub-column 排序。表格行头和 metric 分组列头固定在左侧，横向滚动只移动 result metric 区域；metric chart 和 table 支持双向 hover/click 高亮，切换 chart metric 时会自动把对应 metric column 滚动到可见区域。
 
 也可以为整个结果目录批量生成 HTML：
 
@@ -182,12 +201,16 @@ HTML report 当前包含：
 - summary metric-mean table: 按 scenario 汇总主要 metric 均值，overall mean 放在 candidate card 中
 - metadata panel: seed、profile、candidate path、ckpt id、env count、git/runtime 信息等
 - left navigation: Report sections 和历史 result 切换入口，包含 Summary、Metadata、各 scenario 和 Results
-- scenario detail tables: 展示每个测试点的关键指标，并对主要列加 heatmap
+- scenario detail tables: 展示每个测试点的关键指标，并对主要列加 heatmap。新增稳定性 RMS（pitch_deg_rms、roll_deg_rms）和步态追踪 RMSE（gait_freq_rmse_hz、footswing_height_rmse_m、stance_width_rmse_m）
 - interactive metric charts: 每个 scenario 内直接切换 metric，并基于 `results.json` 渲染 SVG 图表；x 轴使用短语义标签，完整测试点 label 保留在 hover tooltip 和下方表格中
+
+JSON 结果中的未计算指标序列化为 `null`（不是 NaN），符合 RFC 8259 标准。
 
 ## Result Comparison
 
-可以直接比较两个已经落盘的 benchmark result，不需要重新加载 ckpt 或启动 IsaacGym：
+优先使用任意 result report 左侧 `Results` 导航栏中的多选 compare。它支持一次选择一个或多个 result，并直接在原 Report 布局内查看 summary、metadata、table 和 chart diff。
+
+如果需要生成独立的离线 compare artifact，也可以直接比较两个已经落盘的 benchmark result，不需要重新加载 ckpt 或启动 IsaacGym：
 
 ```bash
 python -m benchmark.cli --compare_results \

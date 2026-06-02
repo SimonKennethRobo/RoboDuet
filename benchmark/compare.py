@@ -312,15 +312,26 @@ def parse_args(argv: Optional[List[str]] = None):
     parser.add_argument("--baseline", required=True, help="Baseline result directory or results.json")
     parser.add_argument("--target", required=True, help="Target result directory or results.json")
     parser.add_argument("--output", default=None, help="Output HTML path")
-    return parser.parse_args(argv)
+    parser.add_argument("--output_dir", default=None, help="Output directory for comparison report HTML")
+    args = parser.parse_args(argv)
+    if args.output and args.output_dir:
+        parser.error("--output and --output_dir cannot be used together")
+    return args
 
 
 def main(argv: Optional[List[str]] = None):
     args = parse_args(argv)
+    output = None
+    if args.output:
+        output = Path(args.output)
+    elif args.output_dir:
+        baseline_name = _result_file(Path(args.baseline)).parent.name
+        target_name = _result_file(Path(args.target)).parent.name
+        output = Path(args.output_dir) / f"compare_{baseline_name}_to_{target_name}.html"
     output = compare_results(
         Path(args.baseline),
         Path(args.target),
-        Path(args.output) if args.output else None,
+        output,
     )
     print(f"[Benchmark] Comparison report saved -> {output}")
 

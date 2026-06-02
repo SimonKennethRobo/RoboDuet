@@ -8,7 +8,12 @@ import pickle as pkl
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
-import torch
+_HAS_TORCH = False
+try:
+    import torch
+    _HAS_TORCH = True
+except ImportError:
+    torch = None
 
 from benchmark.candidates import discover_run_logdirs
 
@@ -44,6 +49,9 @@ def _shape(ckpt: Dict[str, Any], key: str) -> Optional[List[int]]:
 
 def _load_checkpoint(path: Path) -> Optional[Dict[str, Any]]:
     if not path.is_file():
+        return None
+    if not _HAS_TORCH:
+        print(f"[inspect] Skipping checkpoint {path}: torch not available")
         return None
     return torch.load(path, map_location="cpu")
 
