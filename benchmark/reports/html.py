@@ -6,6 +6,7 @@ import argparse
 import json
 import math
 import os
+from collections import Counter
 from datetime import datetime
 from html import escape
 from pathlib import Path
@@ -393,10 +394,6 @@ def _comparison_result_payload(source: Path, output_path: Path, limit: int = 16)
         entry = _read_index_entry(results_path, root)
         if entry is None:
             continue
-        try:
-            results = _load_results(results_path)
-        except (OSError, json.JSONDecodeError):
-            continue
         report_path = entry["report"] if entry["report"].exists() else results_path.with_name("index.html")
         active = results_path.resolve() == source.resolve()
         payload.append(
@@ -407,7 +404,7 @@ def _comparison_result_payload(source: Path, output_path: Path, limit: int = 16)
                 "candidates": entry["candidates"],
                 "scenarios": entry["scenarios"],
                 "points": entry["points"],
-                "results": results,
+                "results": entry["loaded_results"],
                 "metadata": _load_metadata(results_path),
             }
         )
@@ -424,7 +421,7 @@ def _comparison_series_payload(comparison_entries: List[dict]) -> List[dict]:
     for entry in visible_entries:
         for candidate in entry["results"]:
             candidates.append(candidate)
-    duplicate_candidates = {name for name in candidates if candidates.count(name) > 1}
+    duplicate_candidates = {name for name, count in Counter(candidates).items() if count > 1}
 
     payload = []
     for entry in visible_entries:
@@ -899,10 +896,10 @@ def _report_script(comparison_series: List[dict]) -> str:
           columns: names.map((name, index) => ({ label: name, result: name, color: resultColor(name, index) })),
         }));
         const rowMaps = Object.fromEntries(names.map((name) => [name, rowByLabel(results[name]?.[scenario] || [])]));
-        const labels = [];
+        const labels = new Set();
         names.forEach((name) => {
           Object.keys(rowMaps[name]).forEach((label) => {
-            if (!labels.includes(label)) labels.push(label);
+            labels.add(label);
           });
         });
         const heatMetrics = metricDefs.map(([, metric]) => metric).filter(metricHasHeatmap);
@@ -913,7 +910,7 @@ def _report_script(comparison_series: List[dict]) -> str:
             max: values.length ? Math.max(...values) : 0,
           }];
         }));
-        const rows = labels.map((label, pointIndex) => ({
+        const rows = Array.from(labels).map((label, pointIndex) => ({
           stub: esc(label),
           stubSort: label,
           attrs: {
@@ -1395,7 +1392,6 @@ def _report_script(comparison_series: List[dict]) -> str:
         });
       }
 
-      const scrollKey = "roboduet-benchmark-scroll-y";
       document.querySelectorAll(".result-link").forEach((link) => {
         link.addEventListener("click", (event) => {
           event.preventDefault();
@@ -1408,15 +1404,6 @@ def _report_script(comparison_series: List[dict]) -> str:
       });
       renderReport();
       bindReportNavLinks();
-      const savedScroll = sessionStorage.getItem(scrollKey);
-      if (savedScroll !== null) {
-        sessionStorage.removeItem(scrollKey);
-        const y = Number(savedScroll);
-        if (Number.isFinite(y)) {
-          requestAnimationFrame(() => window.scrollTo(0, y));
-          window.addEventListener("load", () => window.scrollTo(0, y), { once: true });
-        }
-      }
     })();
   </script>"""
         .replace("__COMPARE_RESULTS__", _json_for_script(comparison_series))
@@ -1978,6 +1965,7 @@ def _read_index_entry(results_path: Path, root: Path) -> Optional[dict]:
         "candidates": candidates,
         "scenarios": scenarios,
         "points": points,
+        "loaded_results": results,
     }
 
 
@@ -2046,12 +2034,12 @@ def _write_index_for_root(root: Path):
     for entry in entries:
         report_path = entry["report"]
         if not report_path.exists():
-            results = _load_results(entry["results"])
+            results = entry["loaded_results"]
             report_path.write_text(_render_html(results, entry["results"], report_path), encoding="utf-8")
     index_path = root / "index.html"
     if entries:
         latest_results = entries[0]["results"]
-        latest = _load_results(latest_results)
+        latest = entries[0]["loaded_results"]
         index_path.write_text(_render_html(latest, latest_results, index_path), encoding="utf-8")
         print(f"[Benchmark] Latest report index saved -> {index_path}")
     else:

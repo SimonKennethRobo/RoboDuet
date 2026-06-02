@@ -747,6 +747,8 @@ def _eval_loop_parallel(
 
         if layout.has_dynamic_gait:
             gait_costs = _gait_training_costs(env)
+            swing_height = _actual_swing_height(env)
+            stance_width = _actual_stance_width(env)
 
         # --- per-policy group accumulation ---
         for h, acc in zip(handles, accs):
@@ -781,11 +783,11 @@ def _eval_loop_parallel(
                 acc.add_sq_err("gait_freq", actual_freq, freq_cmd_g)
 
                 sw_cmd_g = cmd_g[:, 7]
-                sw_act_g = _actual_swing_height(env)[s:e]
+                sw_act_g = swing_height[s:e]
                 acc.add_sq_err("swing_h", sw_act_g, sw_cmd_g)
 
                 sw_width_cmd_g = cmd_g[:, 8]
-                sw_width_act_g = _actual_stance_width(env)[s:e]
+                sw_width_act_g = stance_width[s:e]
                 acc.add_sq_err("stance_w", sw_width_act_g, sw_width_cmd_g)
 
                 acc.add_val("gait_contact_force_cost", gait_costs["contact_force_cost"][s:e])
