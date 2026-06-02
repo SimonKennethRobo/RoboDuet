@@ -132,13 +132,13 @@ benchmark/results/<timestamp>/
 - 结构化 `results.json`
 - 结构化 `metadata.json`，记录 benchmark protocol、命令行、candidate path、ckpt id、robot、seed、env count、git branch/commit/dirty 状态、Python/PyTorch/CUDA runtime 等运行上下文
 - 单文件 HTML report：`index.html`
-- `benchmark/results/index.html`，直接渲染最新 result，并在左侧 `Results` 导航中切换或勾选历史 result 做原地对比
+- `benchmark/results/index.html`，直接渲染最新 result；每个 report 左侧 `Results` 导航当前只展开本次 `results.json` 内真实存在的 candidate，用于同一次 benchmark run 内的原地对比
 
-当前默认不再生成 `report.md` 和 `plots/*.png`。HTML report 已经覆盖旧 markdown 信息，并额外提供 summary cards、metadata panel、scenario mean table、scenario detail tables、heatmap、表格排序、交互式 SVG charts 和原地多 result 对比。`results.json` 和 `metadata.json` 作为机器可读 artifact 保留，HTML report 作为主要人工查看入口。
+当前默认不再生成 `report.md` 和 `plots/*.png`。HTML report 已经覆盖旧 markdown 信息，并额外提供 summary cards、metadata panel、scenario mean table、scenario detail tables、heatmap、表格排序、交互式 SVG charts 和原地多 candidate 对比。`results.json` 和 `metadata.json` 作为机器可读 artifact 保留，HTML report 作为主要人工查看入口。
 
-当前每个 HTML report 已经支持浏览器内多 result 对比，不需要单独运行 compare 命令；Summary 和 scenario detail 在多选时使用 metric-grouped 宽表，result 作为 sub-column，支持 sub-column 排序。`benchmark.cli --compare_results` 仍保留为生成独立两两 compare artifact 的离线入口。后续仍值得继续做 regression verdict、result annotation 和更稳定的 schema/direction 配置。
+当前每个 HTML report 已经支持浏览器内多 candidate 对比，不需要单独运行 compare 命令；Summary 和 scenario detail 在多选时使用 metric-grouped 宽表，candidate 作为 sub-column，支持 sub-column 排序。`benchmark.cli --compare_results` 仍保留为生成独立两两 compare artifact 的离线入口。后续仍值得继续做 regression verdict、result annotation 和更稳定的 schema/direction 配置。
 
-这些结果已经覆盖 dog-only benchmark 的日常使用。当前主要缺口是更深入的跨 result 交互式对比，例如两个不同 benchmark run 之间的 side-by-side scenario table、delta chart、test-point-level regression verdict 和 candidate promotion / retirement 记录。
+这些结果已经覆盖 dog-only benchmark 的日常使用。当前主要缺口是更深入的跨历史 result 交互式对比，例如单次只跑一个 candidate 后与历史 baseline/result 做 side-by-side scenario table、delta chart、test-point-level regression verdict 和 candidate promotion / retirement 记录。这类功能需要在 scenario、metric schema、metadata 和 policy layout 稳定后再做，避免把历史 smoke、partial 或不兼容 result 混进当前 report。
 
 ## 当前优点
 
@@ -214,7 +214,7 @@ scenario grid 和 metric selection 都写在 Python 文件里。这样导致：
 
 目前已经有两层 compare 能力：
 
-- HTML report 左侧 `Results` 导航：交互式多 result 对比，支持多选 result、metadata diff、metric-grouped 宽表、sub-column 排序和 multi-series chart，并保留原 Report 层级。
+- HTML report 左侧 `Results` 导航：交互式多 candidate 对比，当前作用域是同一个 `results.json` 内的 candidates，支持 metadata diff、metric-grouped 宽表、sub-column 排序和 multi-series chart，并保留原 Report 层级。
 - `benchmark.cli --compare_results`：独立两两 compare artifact，适合 CI 或需要保存单独 HTML 文件的场景。
 
 CLI compare 示例：
@@ -227,6 +227,7 @@ python -m benchmark.cli --compare_results \
 
 后续 compare/report 应该继续补强：
 
+- 跨历史 result directory 的兼容性分组，让“单次只跑一个 candidate”也能和稳定 baseline/history 做交互式对比。
 - 不同 result 的 metadata 对齐。
 - candidate / scenario / metric summary 对齐。
 - baseline vs candidate 的 delta table。
@@ -692,7 +693,10 @@ Phase 1（候选目录）、Phase 1.5 核心 bug 修复和 Phase 2（HTML Report
 2. compare 扩展到 scenario-level / test-point-level diff
    当前 compare 只看 summary-level 7 个 primary metrics，缺乏细节。
 
-3. nightly/full profile
+3. historical result compare
+   当 scenario 和 metric schema 稳定后，支持单次只跑一个 candidate，并自动与历史 baseline/result 做兼容性检查、对齐和交互式对比。
+
+4. nightly/full profile
    当前已有 smoke profile 和手工 full 命令，后续应把 nightly/full 的 scenario/step/env 配置固化为版本化 profile。
 
 不建议马上做大规模并行重构或 arm/hybrid benchmark。先把数据质量和管理机制补上，再扩展评估能力。
@@ -720,6 +724,6 @@ Phase 1（候选目录）、Phase 1.5 核心 bug 修复和 Phase 2（HTML Report
 
 - **Phase 2.5**: candidate.json 支持（可选元数据文件、status/tag 过滤、baseline 标记）。
 - 增加 nightly/full profile，把当前手工 full benchmark 命令固化为可 review 的 profile。
-- 把 `--compare_results` 扩展到 scenario-level 和 test-point-level diff。
+- 把 `--compare_results` 扩展到 scenario-level 和 test-point-level diff，并在 schema 稳定后支持跨历史 result 的交互式 compare。
 - 把 metric schema 和 direction 从 report 代码中抽出来，减少字段硬编码。
 - 在 arm policy 稳定后实现 `--arm_only` 和 `--hybrid`。
