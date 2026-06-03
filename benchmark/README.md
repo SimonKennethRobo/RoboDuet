@@ -10,17 +10,16 @@ Candidate 使用 run-like logdir 结构。目录名可以来自训练 run 名，
 
 ```text
 benchmark/candidates/
-  2026-05-25/
-    stage1_0525_110431/
-      parameters.pkl
-      params.txt
-      checkpoints_dog/
-        ac_weights_last_dog.pt
-      checkpoints_arm/
-        ac_weights_last_arm.pt
+  stage1_0525_110431/
+    parameters.pkl
+    params.txt
+    checkpoints_dog/
+      ac_weights_last_dog.pt
+    checkpoints_arm/
+      ac_weights_last_arm.pt
 ```
 
-加入 candidate 的推荐方式是把需要保留的 run-like 目录复制到 `benchmark/candidates/<date>/<run_name>`。该目录下有局部 `.gitignore`，默认忽略复制进来的无关训练产物，只 track benchmark 需要的最小文件集：
+加入 candidate 的推荐方式是把需要保留的 run-like 目录复制到 `benchmark/candidates/<run_name>`。该目录下有局部 `.gitignore`，默认忽略复制进来的无关训练产物，只 track benchmark 需要的最小文件集：
 
 - `parameters.pkl`
 - `params.txt`
@@ -28,7 +27,7 @@ benchmark/candidates/
 - `checkpoints_arm/ac_weights_*_arm.pt`
 - 可选 `README.md` / `candidate.json`
 
-长期保留 candidate 时推荐复制 run-like 目录，而不是只提交 symlink。`runs/` 已被仓库全局 ignore，symlink 不能可靠表达需要长期保留的 candidate 内容。不过本地 benchmark 扫描会 follow 目录 symlink，方便临时把 `benchmark/candidates/<date>/<run_name>` 指向本机已有 `runs/...` 做评估。
+长期保留 candidate 时推荐复制 run-like 目录，而不是只提交 symlink。`runs/` 已被仓库全局 ignore，symlink 不能可靠表达需要长期保留的 candidate 内容。不过本地 benchmark 扫描会 follow 目录 symlink，方便临时把 `benchmark/candidates/<run_name>` 指向本机已有 `runs/...` 做评估。
 
 当前启动前会检查每个 dog-only candidate 至少包含：
 

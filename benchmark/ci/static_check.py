@@ -249,8 +249,44 @@ def _validate_profile_counts(path: Path, profile: dict, expected_vel: int) -> No
         raise ValueError(f"{path}: gait sweeps have {gait_count} points, expected 18")
 
 
+def _validate_candidate_layout() -> None:
+    candidate_root = REPO_ROOT / "benchmark" / "candidates"
+    if not candidate_root.is_dir():
+        return
+
+    for path in sorted(candidate_root.iterdir()):
+        if path.name == ".gitignore" or not path.is_dir():
+            continue
+        if _is_date_like_dir(path.name):
+            raise ValueError(
+                f"{path}: repo benchmark candidates should use benchmark/candidates/<run_name>/, "
+                "not benchmark/candidates/<date>/<run_name>/"
+            )
+
+        required = [path / "parameters.pkl", path / "params.txt"]
+        missing = [str(item.relative_to(REPO_ROOT)) for item in required if not item.is_file()]
+        if missing:
+            raise ValueError(f"{path}: benchmark candidate is missing required files: {missing}")
+
+        dog_dir = path / "checkpoints_dog"
+        if dog_dir.is_dir() and not list(dog_dir.glob("ac_weights_*_dog.pt")):
+            raise ValueError(f"{dog_dir}: expected at least one ac_weights_*_dog.pt checkpoint")
+
+
+def _is_date_like_dir(name: str) -> bool:
+    parts = name.split("-")
+    return (
+        len(parts) == 3
+        and len(parts[0]) == 4
+        and len(parts[1]) == 2
+        and len(parts[2]) == 2
+        and all(part.isdigit() for part in parts)
+    )
+
+
 def main() -> None:
     _validate_profiles()
+    _validate_candidate_layout()
     with tempfile.TemporaryDirectory(prefix="roboduet-benchmark-ci-") as tmp:
         results_root = Path(tmp) / "results"
         baseline = _write_result(results_root, "baseline", scale=1.0)
