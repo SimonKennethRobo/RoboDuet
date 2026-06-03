@@ -768,14 +768,21 @@ def set_benchmark_seed(seed: int, device: str):
 
 
 def _profile_requires_full_gait_layout(args) -> bool:
-    if args.skip_d:
-        return False
-    gait_cfg = (args.scenario_config or {}).get("gait")
-    if not isinstance(gait_cfg, dict):
-        return False
-    fixed_gait = gait_cfg.get("fixed_gait")
-    has_gait_duration = isinstance(fixed_gait, dict) and "gait_duration" in fixed_gait
-    return "stance_length" in gait_cfg or has_gait_duration
+    scenario_config = args.scenario_config or {}
+    for scenario, skip_attr in SCENARIO_FLAGS.items():
+        if getattr(args, skip_attr):
+            continue
+        cfg = scenario_config.get(scenario, {})
+        if not isinstance(cfg, dict):
+            continue
+        if "stance_length" in cfg or "gait_duration" in cfg:
+            return True
+        fixed_gait = cfg.get("fixed_gait")
+        if isinstance(fixed_gait, dict) and (
+            "stance_length" in fixed_gait or "gait_duration" in fixed_gait
+        ):
+            return True
+    return False
 
 
 def _validate_layout_for_profile(args, layout: CommandLayout):

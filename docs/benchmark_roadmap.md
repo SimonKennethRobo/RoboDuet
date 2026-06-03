@@ -61,7 +61,7 @@ RoboDuet 的训练流程会分阶段：先训练 dog policy，再训练 arm poli
 当前 `benchmark/candidates/` 中的 candidate 采用和训练输出相同的 run-like logdir 结构：
 
 ```text
-benchmark/candidates/<date>/<run_name>/
+benchmark/candidates/<run_name>/
   parameters.pkl
   params.txt
   checkpoints_dog/ac_weights_*.pt
@@ -350,17 +350,16 @@ PolicyBundle:
 benchmark/
   candidates/
     .gitignore
-    2026-05-25/
-      stage1_0525_110431/
-        parameters.pkl
-        params.txt
-        checkpoints_dog/
-          ac_weights_last_dog.pt
-        checkpoints_arm/
-          ac_weights_last_arm.pt
+    stage1_0525_110431/
+      parameters.pkl
+      params.txt
+      checkpoints_dog/
+        ac_weights_last_dog.pt
+      checkpoints_arm/
+        ac_weights_last_arm.pt
 ```
 
-`benchmark/candidates/.gitignore` 应该使用 allowlist，默认忽略复制进来的训练产物，只保留 benchmark 需要的最小文件集。这样可以直接把 `runs/<date>/<run_name>` 复制进 `benchmark/candidates/`，但不会把 logs、wandb、视频、完整脚本快照等无关文件都提交进 Git。
+`benchmark/candidates/.gitignore` 应该使用 allowlist，默认忽略复制进来的训练产物，只保留 benchmark 需要的最小文件集。这样可以直接把 `runs/<date>/<run_name>` 复制到 `benchmark/candidates/<run_name>`，但不会把 logs、wandb、视频、完整脚本快照等无关文件都提交进 Git。
 
 Candidate 本身不需要声明为 `dog_only`、`arm_only` 或 `hybrid`。这些是“本次 benchmark 的模式”，应该通过 CLI 控制：
 

@@ -700,15 +700,7 @@ def _actual_swing_height(env: HistoryWrapper) -> torch.Tensor:
 
 def _actual_stance_width(env: HistoryWrapper) -> torch.Tensor:
     """Stance width from foot Y-spread in yaw-only body frame."""
-    b = env.env
-    foot_pos = b.foot_positions
-    base_pos = b.root_states[:, :3]
-    base_quat = b.base_quat
-    rel = foot_pos - base_pos.unsqueeze(1)
-    rel_body = torch.stack([
-        quat_apply_yaw(quat_conjugate(base_quat), rel[:, i, :])
-        for i in range(4)
-    ], dim=1)
+    rel_body = _feet_in_yaw_body_frame(env)
     y_max = rel_body[:, :, 1].max(dim=1).values
     y_min = rel_body[:, :, 1].min(dim=1).values
     return y_max - y_min
@@ -716,18 +708,23 @@ def _actual_stance_width(env: HistoryWrapper) -> torch.Tensor:
 
 def _actual_stance_length(env: HistoryWrapper) -> torch.Tensor:
     """Stance length from foot X-spread in yaw-only body frame."""
+    rel_body = _feet_in_yaw_body_frame(env)
+    x_max = rel_body[:, :, 0].max(dim=1).values
+    x_min = rel_body[:, :, 0].min(dim=1).values
+    return x_max - x_min
+
+
+def _feet_in_yaw_body_frame(env: HistoryWrapper) -> torch.Tensor:
+    """Foot positions relative to base in a yaw-only body frame."""
     b = env.env
     foot_pos = b.foot_positions
     base_pos = b.root_states[:, :3]
     base_quat = b.base_quat
     rel = foot_pos - base_pos.unsqueeze(1)
-    rel_body = torch.stack([
-        quat_apply_yaw(quat_conjugate(base_quat), rel[:, i, :])
-        for i in range(4)
-    ], dim=1)
-    x_max = rel_body[:, :, 0].max(dim=1).values
-    x_min = rel_body[:, :, 0].min(dim=1).values
-    return x_max - x_min
+    n_envs, n_feet, _ = rel.shape
+    rel_flat = rel.reshape(n_envs * n_feet, 3)
+    quat_flat = quat_conjugate(base_quat).repeat_interleave(n_feet, dim=0)
+    return quat_apply_yaw(quat_flat, rel_flat).reshape(n_envs, n_feet, 3)
 
 
 # ---------------------------------------------------------------------------
@@ -856,7 +853,7 @@ def _eval_loop_parallel(
             acc.add_val("max_torque", dog_t.abs().max(dim=1).values)
             acc.add_count("fell", (reset_b[s:e] & ~timeout[s:e]).float())
             if hasattr(base, "body_height_buf"):
-                height_terminal = base.body_height_buf[s:e]
+                height_terminal = reset_b[s:e] & base.body_height_buf[s:e]
             else:
                 terminal_h = float(getattr(base.cfg.rewards, "terminal_body_height", 0.17))
                 height_terminal = reset_b[s:e] & (h_g < terminal_h)
