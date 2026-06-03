@@ -121,6 +121,8 @@ def build_benchmark_metadata(
         "robot": args.robot,
         "sim_device": args.sim_device,
         "arm_intensity": args.arm_intensity,
+        "scenario_config": getattr(args, "scenario_config", {}),
+        "profile_description": getattr(args, "profile_data", {}).get("description") if hasattr(args, "profile_data") else None,
         "dog_num_commands": getattr(layout, "n_dims", "unknown"),
         "use_dynamic_gait": bool(getattr(layout, "has_dynamic_gait", False)),
         "scenario_d_enabled": bool(getattr(layout, "has_dynamic_gait", False)) and not args.skip_d,

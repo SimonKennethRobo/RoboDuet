@@ -74,22 +74,25 @@ benchmark/candidates/<date>/<run_name>/
 
 ## 当前 Scenario
 
-`benchmark/dog_policy/cli.py` 当前包含四类 scenario：
+`benchmark/dog_policy/cli.py` 当前包含四类 dog-policy scenario。profile 会把 scenario grid 放进配置，并让 report visual shape 对齐数据结构：
 
 | Scenario | 内容 | 主要关注点 |
 | --- | --- | --- |
-| A: Velocity Grid | 扫描 x velocity 和 yaw velocity command | 速度跟踪、yaw 跟踪、fall rate |
+| A: Velocity Grid | 扫描 vx/vy/yaw 3D grid；standard 27 点，full 125 点 | 速度跟踪、yaw 跟踪、height fall、torque |
 | B: Arm-Disturbance Sweep | 固定前进速度，扫描 arm disturbance intensity | 抗 arm 干扰能力、稳定性 |
-| C: Body-Pose Tracking | 扫描 body pitch、roll、height delta | 身体姿态跟踪和姿态稳定性 |
-| D: Gait-Parameter Tracking | 扫描 gait frequency、footswing height、stance width | 步态接触、摆腿高度、Raibert foot placement |
+| C: Body-Pose Tracking | 对 stand/forward/lateral/turn velocity group 扫描 body pitch、roll、height delta | 身体姿态跟踪、速度保持和姿态稳定性 |
+| D: Gait-Parameter Tracking | 扫描 gait frequency、stance width、stance length | 步态 command tracking 和训练对齐 gait costs |
 
-当前 scenario 是写死在 Python 代码中的，例如 velocity grid、arm intensity sweep、body pose sweep、gait sweep 都直接定义在 `benchmark/dog_policy/cli.py` 顶层常量里。
+`benchmark/profiles/dog_policy_standard.json` 和 `benchmark/profiles/dog_policy_full.json` 记录了 scenario grid、固定 gait/pose command、disturbance seed 和 protocol metadata。无 profile 默认参数和 `smoke.json` 仍保持兼容。
+
+包含 stance-length / gait-duration 的 profile gait scenario 要求 runtime `dog_num_commands >= 11`，因为会使用 `stance_length` index 9 和 `gait_duration` index 10；不满足时应 fail fast。
 
 ## 当前 Metric
 
 当前 policy benchmark 已经统计了较多 metric，包括：
 
 - velocity tracking:
+  - `lin_vel_xy_rmse`
   - `lin_vel_x_rmse`
   - `lin_vel_y_rmse`
   - `ang_vel_yaw_rmse`
@@ -97,6 +100,7 @@ benchmark/candidates/<date>/<run_name>/
   - `tracking_ang_vel_reward`
 - stability:
   - `fall_rate`
+  - `fall_rate_height`（height terminal event rate，分母为 env step 数）
   - `base_height_mean`
   - `base_height_std`
   - `roll_deg_rms`
@@ -108,6 +112,9 @@ benchmark/candidates/<date>/<run_name>/
   - `height_rmse_m`
   - `orientation_control_rmse`
 - gait:
+  - `gait_freq_rmse_hz`
+  - `stance_width_rmse_m`
+  - `stance_length_rmse_m`
   - `gait_contact_force_cost`
   - `gait_contact_vel_cost`
   - `foot_clearance_rmse_m`
@@ -134,11 +141,11 @@ benchmark/results/<timestamp>/
 - 单文件 HTML report：`index.html`
 - `benchmark/results/index.html`，直接渲染最新 result；每个 report 左侧 `Results` 导航当前只展开本次 `results.json` 内真实存在的 candidate，用于同一次 benchmark run 内的原地对比
 
-当前默认不再生成 `report.md` 和 `plots/*.png`。HTML report 已经覆盖旧 markdown 信息，并额外提供 summary cards、metadata panel、scenario mean table、scenario detail tables、heatmap、表格排序、交互式 SVG charts 和原地多 candidate 对比。`results.json` 和 `metadata.json` 作为机器可读 artifact 保留，HTML report 作为主要人工查看入口。
+当前默认不再生成 `report.md` 和 `plots/*.png`。HTML report 已经覆盖旧 markdown 信息，并额外提供 summary cards、metadata panel、scenario mean table、scenario detail tables、表格排序、交互式 SVG charts 和原地多 candidate 对比。Report 按 scenario 数据结构选择 visual：Velocity Grid 用 `yaw` facet heatmap（x=`vx`, y=`vy`），Body Pose Tracking 用 velocity-group pose summary heatmap 和 pitch/roll/height grouped sweeps，Gait Tracking 用 gait frequency/stance width/stance length grouped sweeps，并继续用宽 metric table 承载精确数值。`results.json` 和 `metadata.json` 作为机器可读 artifact 保留，HTML report 作为主要人工查看入口。
 
 当前每个 HTML report 已经支持浏览器内多 candidate 对比，不需要单独运行 compare 命令；Summary 和 scenario detail 在多选时使用 metric-grouped 宽表，candidate 作为 sub-column，支持 sub-column 排序。`benchmark.cli --compare_results` 仍保留为生成独立两两 compare artifact 的离线入口。后续仍值得继续做 regression verdict、result annotation 和更稳定的 schema/direction 配置。
 
-这些结果已经覆盖 dog-only benchmark 的日常使用。当前主要缺口是更深入的跨历史 result 交互式对比，例如单次只跑一个 candidate 后与历史 baseline/result 做 side-by-side scenario table、delta chart、test-point-level regression verdict 和 candidate promotion / retirement 记录。这类功能需要在 scenario、metric schema、metadata 和 policy layout 稳定后再做，避免把历史 smoke、partial 或不兼容 result 混进当前 report。
+这些结果已经覆盖 dog-only benchmark 的日常使用。当前主要缺口是更深入的跨历史 result 交互式对比、candidate promotion / retirement 记录，以及 arm-only/hybrid benchmark。跨历史 result 对比需要兼容性分组，避免把历史 smoke、partial 或不兼容 result 混进当前 report。
 
 ## 当前优点
 
@@ -568,12 +575,7 @@ Full benchmark 不应该阻塞所有开发 PR，但可以作为模型相关 PR �
 
 `ScenarioResult` dataclass 中所有 metric 字段默认为 `float("nan")`。`_acc_to_result()` 根据 `CommandLayout` 只赋值一个 variant（如 `pitch_rmse_deg`），另一个 variant（如 `pitch_deg_rms`）保留 NaN 默认值。`save_results()` 直接 `dataclasses.asdict()` + `json.dump()`，不做 NaN 过滤，输出包含 `NaN` literal — 这是非法 JSON（违反 RFC 8259），会导致标准 JSON parser 解析失败。
 
-当前每次 dog-only benchmark（`dog_num_commands >= 5`）的 `results.json` 都包含以下 NaN 字段：
-- `pitch_deg_rms`（当 `has_body_pitch=True` 时未赋值）
-- `roll_deg_rms`（当 `has_body_roll=True` 时未赋值）
-- `gait_freq_rmse_hz`（死字段，从未被任何代码赋值）
-
-修复方向：在 `save_results()` 中过滤 NaN 字段，或让 `_acc_to_result()` 对所有 variant 都赋值（stability RMS 和 tracking RMSE 同时计算），或移除死字段 `gait_freq_rmse_hz`。
+当前实现已将未计算指标序列化为 `null`，并为 stability RMS、tracking RMSE 和 `gait_freq_rmse_hz` 分别赋值，避免输出非法 JSON `NaN` literal。
 
 ### Bug 2: Accumulator key collision（pitch_deg / roll_deg）
 

@@ -24,8 +24,11 @@ SCENARIO_TITLES = {
 SCENARIO_ORDER = ["vel_grid", "arm_sweep", "body_pose", "gait"]
 
 PRIMARY_METRICS = [
+    ("lin_vel_xy_rmse", "xy RMSE", "lower"),
     ("lin_vel_x_rmse", "vx RMSE", "lower"),
+    ("lin_vel_y_rmse", "vy RMSE", "lower"),
     ("ang_vel_yaw_rmse", "yaw RMSE", "lower"),
+    ("fall_rate_height", "height fall rate", "lower"),
     ("fall_rate", "fall rate", "lower"),
     ("tracking_lin_vel_reward", "lin reward", "higher"),
     ("tracking_ang_vel_reward", "yaw reward", "higher"),
@@ -35,16 +38,22 @@ PRIMARY_METRICS = [
 
 DETAIL_METRICS = {
     "vel_grid": [
+        ("xy RMSE", "lin_vel_xy_rmse"),
         ("vx RMSE", "lin_vel_x_rmse"),
+        ("vy RMSE", "lin_vel_y_rmse"),
         ("yaw RMSE", "ang_vel_yaw_rmse"),
+        ("height fall", "fall_rate_height"),
         ("lin reward", "tracking_lin_vel_reward"),
         ("yaw reward", "tracking_ang_vel_reward"),
         ("base height", "base_height_mean"),
-        ("fall rate", "fall_rate"),
+        ("max torque", "max_torque_mean"),
     ],
     "arm_sweep": [
+        ("xy RMSE", "lin_vel_xy_rmse"),
         ("vx RMSE", "lin_vel_x_rmse"),
+        ("vy RMSE", "lin_vel_y_rmse"),
         ("yaw RMSE", "ang_vel_yaw_rmse"),
+        ("height fall", "fall_rate_height"),
         ("lin reward", "tracking_lin_vel_reward"),
         ("yaw reward", "tracking_ang_vel_reward"),
         ("base height", "base_height_mean"),
@@ -58,18 +67,24 @@ DETAIL_METRICS = {
         ("roll RMS deg", "roll_deg_rms"),
         ("orientation ctl", "orientation_control_rmse"),
         ("height RMSE m", "height_rmse_m"),
+        ("xy RMSE", "lin_vel_xy_rmse"),
+        ("vx RMSE", "lin_vel_x_rmse"),
+        ("vy RMSE", "lin_vel_y_rmse"),
         ("base height", "base_height_mean"),
+        ("height fall", "fall_rate_height"),
         ("fall rate", "fall_rate"),
     ],
     "gait": [
         ("freq RMSE Hz", "gait_freq_rmse_hz"),
         ("swing h RMSE m", "footswing_height_rmse_m"),
         ("stance w RMSE m", "stance_width_rmse_m"),
+        ("stance l RMSE m", "stance_length_rmse_m"),
         ("contact force", "gait_contact_force_cost"),
         ("contact vel", "gait_contact_vel_cost"),
         ("clearance m", "foot_clearance_rmse_m"),
         ("raibert m", "raibert_rmse_m"),
         ("max torque", "max_torque_mean"),
+        ("height fall", "fall_rate_height"),
         ("fall rate", "fall_rate"),
     ],
 }
@@ -222,6 +237,7 @@ def _scenario_plot_data(results: Dict[str, Dict[str, List[dict]]], scenario: str
                 "name": run_name,
                 "labels": [str(row.get("label", "-")) for row in rows],
                 "axis_labels": [_compact_axis_label(scenario, str(row.get("label", "-"))) for row in rows],
+                "rows": rows,
                 "values": {
                     metric: [row.get(metric) if _is_number(row.get(metric)) else None for row in rows]
                     for _, metric in metric_defs
@@ -308,7 +324,7 @@ def _candidate_cards(results: Dict[str, Dict[str, List[dict]]]) -> str:
             '<div class="card-stats">'
             f'<div class="stat"><span>{points}</span><label>points</label></div>'
             f'<div class="stat"><span>{_fmt(_metric_average(all_rows, "fall_rate"))}</span><label>fall rate mean</label></div>'
-            f'<div class="stat"><span>{_fmt(_metric_average(all_rows, "lin_vel_x_rmse"))}</span><label>vx RMSE mean</label></div>'
+            f'<div class="stat"><span>{_fmt(_metric_average(all_rows, "lin_vel_xy_rmse"))}</span><label>xy RMSE mean</label></div>'
             f'<div class="stat"><span>{_fmt(_metric_average(all_rows, "ang_vel_yaw_rmse"))}</span><label>yaw RMSE mean</label></div>'
             f'<div class="stat"><span>{_fmt(_metric_average(all_rows, "tracking_lin_vel_reward"))}</span><label>lin reward mean</label></div>'
             f'<div class="stat"><span>{_fmt(_metric_average(all_rows, "tracking_ang_vel_reward"))}</span><label>yaw reward mean</label></div>'
@@ -529,10 +545,15 @@ def _report_script(comparison_series: List[dict]) -> str:
       const SCENARIO_TITLES = __SCENARIO_TITLES__;
       const SCENARIO_ORDER = __SCENARIO_ORDER__;
       const HOME_SCENARIO = "home_preview";
+      const HOME_HEATMAP_SCENARIO = "home_heatmap_preview";
       const HOME_METRICS = [
         ["vx RMSE", "lin_vel_x_rmse"],
         ["yaw RMSE", "ang_vel_yaw_rmse"],
         ["lin reward", "tracking_lin_vel_reward"],
+      ];
+      const HOME_HEATMAP_METRICS = [
+        ["xy RMSE", "lin_vel_xy_rmse"],
+        ["height fall", "fall_rate_height"],
       ];
       const HOME_RESULTS = {
         "demo A": {
@@ -548,6 +569,56 @@ def _report_script(comparison_series: List[dict]) -> str:
             { label: "vx=1.0 yaw=-0.5", lin_vel_x_rmse: 0.27, ang_vel_yaw_rmse: 0.30, tracking_lin_vel_reward: 0.81 },
             { label: "vx=1.0 yaw=0.5", lin_vel_x_rmse: 0.34, ang_vel_yaw_rmse: 0.25, tracking_lin_vel_reward: 0.76 },
           ],
+        },
+      };
+      const HOME_HEATMAP_RESULTS = {
+        "demo A": {
+          [HOME_HEATMAP_SCENARIO]: [
+            { label: "vx=-1.0 vy=-1.0 yaw=0.0", cmd_x: -1, cmd_y: -1, cmd_yaw: 0, lin_vel_xy_rmse: 0.42, fall_rate_height: 0 },
+            { label: "vx=+0.0 vy=-1.0 yaw=0.0", cmd_x: 0, cmd_y: -1, cmd_yaw: 0, lin_vel_xy_rmse: 0.31, fall_rate_height: 0 },
+            { label: "vx=+1.0 vy=-1.0 yaw=0.0", cmd_x: 1, cmd_y: -1, cmd_yaw: 0, lin_vel_xy_rmse: 0.49, fall_rate_height: 0 },
+            { label: "vx=-1.0 vy=+0.0 yaw=0.0", cmd_x: -1, cmd_y: 0, cmd_yaw: 0, lin_vel_xy_rmse: 0.34, fall_rate_height: 0 },
+            { label: "vx=+0.0 vy=+0.0 yaw=0.0", cmd_x: 0, cmd_y: 0, cmd_yaw: 0, lin_vel_xy_rmse: 0.12, fall_rate_height: 0 },
+            { label: "vx=+1.0 vy=+0.0 yaw=0.0", cmd_x: 1, cmd_y: 0, cmd_yaw: 0, lin_vel_xy_rmse: 0.28, fall_rate_height: 0 },
+            { label: "vx=-1.0 vy=+1.0 yaw=0.0", cmd_x: -1, cmd_y: 1, cmd_yaw: 0, lin_vel_xy_rmse: 0.53, fall_rate_height: 0.02 },
+            { label: "vx=+0.0 vy=+1.0 yaw=0.0", cmd_x: 0, cmd_y: 1, cmd_yaw: 0, lin_vel_xy_rmse: 0.36, fall_rate_height: 0 },
+            { label: "vx=+1.0 vy=+1.0 yaw=0.0", cmd_x: 1, cmd_y: 1, cmd_yaw: 0, lin_vel_xy_rmse: 0.58, fall_rate_height: 0.03 },
+          ],
+        },
+        "demo B": {
+          [HOME_HEATMAP_SCENARIO]: [
+            { label: "vx=-1.0 vy=-1.0 yaw=0.0", cmd_x: -1, cmd_y: -1, cmd_yaw: 0, lin_vel_xy_rmse: 0.38, fall_rate_height: 0 },
+            { label: "vx=+0.0 vy=-1.0 yaw=0.0", cmd_x: 0, cmd_y: -1, cmd_yaw: 0, lin_vel_xy_rmse: 0.29, fall_rate_height: 0 },
+            { label: "vx=+1.0 vy=-1.0 yaw=0.0", cmd_x: 1, cmd_y: -1, cmd_yaw: 0, lin_vel_xy_rmse: 0.44, fall_rate_height: 0 },
+            { label: "vx=-1.0 vy=+0.0 yaw=0.0", cmd_x: -1, cmd_y: 0, cmd_yaw: 0, lin_vel_xy_rmse: 0.30, fall_rate_height: 0 },
+            { label: "vx=+0.0 vy=+0.0 yaw=0.0", cmd_x: 0, cmd_y: 0, cmd_yaw: 0, lin_vel_xy_rmse: 0.15, fall_rate_height: 0 },
+            { label: "vx=+1.0 vy=+0.0 yaw=0.0", cmd_x: 1, cmd_y: 0, cmd_yaw: 0, lin_vel_xy_rmse: 0.24, fall_rate_height: 0 },
+            { label: "vx=-1.0 vy=+1.0 yaw=0.0", cmd_x: -1, cmd_y: 1, cmd_yaw: 0, lin_vel_xy_rmse: 0.46, fall_rate_height: 0 },
+            { label: "vx=+0.0 vy=+1.0 yaw=0.0", cmd_x: 0, cmd_y: 1, cmd_yaw: 0, lin_vel_xy_rmse: 0.32, fall_rate_height: 0 },
+            { label: "vx=+1.0 vy=+1.0 yaw=0.0", cmd_x: 1, cmd_y: 1, cmd_yaw: 0, lin_vel_xy_rmse: 0.50, fall_rate_height: 0.01 },
+          ],
+        },
+      };
+      const SCENARIO_GUIDES = {
+        vel_grid: {
+          title: "这个场景测什么 / What this scenario measures",
+          body: "速度网格检查不同 vx/vy/yaw 命令下的跟踪误差和稳定性热区。Velocity grid shows tracking error and stability hot spots across commanded vx, vy, and yaw.",
+          read: "怎么看 / How to read: 先看 heatmap 中颜色更深的格子，再切换 metric 比较策略；height fall 为 0 表示本次 profile 没有触发高度终止。Start from darker heatmap cells, then switch metrics/policies; zero height fall means no height terminal event in this profile."
+        },
+        arm_sweep: {
+          title: "这个场景测什么 / What this scenario measures",
+          body: "手臂扰动扫描检查 arm intensity 增大时，狗策略的速度跟踪是否退化。Arm disturbance sweep checks whether locomotion tracking degrades as arm disturbance intensity increases.",
+          read: "怎么看 / How to read: 关注曲线是否随 intensity 上升而变差，以及 fall 诊断是否出现非零事件。Look for worse values as intensity rises and any non-zero fall diagnostics."
+        },
+        body_pose: {
+          title: "这个场景测什么 / What this scenario measures",
+          body: "身体姿态跟踪检查 pitch/roll/height 命令在不同运动组下是否可控。Body pose tracking checks pitch, roll, and height command tracking across movement groups.",
+          read: "怎么看 / How to read: 先看 summary heatmap 定位异常组，再用 velocity group selector 查看单组折线；越低的 RMSE 通常越好。Use the summary heatmap first, then inspect one velocity group at a time; lower RMSE is usually better."
+        },
+        gait: {
+          title: "这个场景测什么 / What this scenario measures",
+          body: "步态跟踪检查动态 gait command 对接触、摆腿、站距和 Raibert 足端指标的影响。Gait tracking shows how dynamic gait commands affect contact, clearance, stance, and Raibert metrics.",
+          read: "怎么看 / How to read: 三个子图分别看 gait frequency、stance width、stance length sweep；共享 legend 对应策略颜色。Read the three sweeps separately; the shared legend maps colors to policies."
         },
       };
       const METADATA_FIELDS = [
@@ -638,6 +709,15 @@ def _report_script(comparison_series: List[dict]) -> str:
         return metric.includes("reward") || metric.endsWith("_rew");
       }
 
+      function sortTooltipValues(values) {
+        return values
+          .map((item, index) => ({ ...item, index }))
+          .sort((a, b) => {
+            if (b.value !== a.value) return b.value - a.value;
+            return a.index - b.index;
+          });
+      }
+
       function metricHasHeatmap(metric) {
         return metric !== "base_height_mean";
       }
@@ -692,23 +772,83 @@ def _report_script(comparison_series: List[dict]) -> str:
         return `<td class="${klass}"${sortAttr}${attrsToString(attrs)}>${value}</td>`;
       }
 
+      function tableGroupLabel(row, scenario) {
+        if (scenario === "vel_grid" && isNumber(row.cmd_yaw)) return `yaw ${fmt(row.cmd_yaw, 1)}`;
+        if (scenario === "body_pose") return row.velocity_group ? String(row.velocity_group) : "body pose";
+        if (scenario === "gait") {
+          const labels = { gait_freq: "gait frequency", stance_width: "stance width", stance_length: "stance length" };
+          return labels[row.sweep_axis] || row.sweep_axis || "gait";
+        }
+        return "";
+      }
+
+      function groupSortKey(groupLabel, scenario) {
+        if (scenario === "vel_grid") {
+          const value = Number(String(groupLabel).replace("yaw", "").trim());
+          return Number.isFinite(value) ? value : 999;
+        }
+        if (scenario === "body_pose") {
+          const order = ["stand", "forward", "lateral", "turn"];
+          const index = order.indexOf(groupLabel);
+          return index >= 0 ? index : 999;
+        }
+        if (scenario === "gait") {
+          const order = ["gait frequency", "stance width", "stance length"];
+          const index = order.indexOf(groupLabel);
+          return index >= 0 ? index : 999;
+        }
+        return 0;
+      }
+
       function groupedTable(stubLabel, groups, rows, options = {}) {
+        const orderedRows = [...rows].sort((a, b) => {
+          const ag = a.groupLabel || "";
+          const bg = b.groupLabel || "";
+          if (ag !== bg) {
+            const cmp = groupSortKey(ag, options.scenario || "") - groupSortKey(bg, options.scenario || "");
+            if (cmp !== 0) return cmp;
+            return ag.localeCompare(bg);
+          }
+          return String(a.stubSort || a.stub).localeCompare(String(b.stubSort || b.stub));
+        });
+        const rowGroups = Array.from(new Set(orderedRows.map((row) => row.groupLabel).filter(Boolean)));
+        const collapsible = options.kind === "scenario" && rowGroups.length > 1 && rows.length > 20;
         const tableAttrs = attrsToString({
           "data-scenario": options.scenario || null,
           "data-compare-kind": options.kind || null,
+          "data-collapsible": collapsible ? "1" : null,
         });
-        const firstHeader = `<tr><th class="sticky-col" rowspan="2" data-sortable="1" data-sort-column="0">${esc(stubLabel)}</th>` +
+        const stubSortAttr = collapsible ? "" : ' data-sortable="1" data-sort-column="0"';
+        const firstHeader = `<tr><th class="sticky-col" rowspan="2"${stubSortAttr}>${esc(stubLabel)}</th>` +
           groups.map((group) => `<th class="metric-group metric-col-start metric-col-end" colspan="${group.columns.length}"><strong>${esc(group.label)}</strong></th>`).join("") +
           "</tr>";
         let colIndex = 1;
         const secondHeader = "<tr>" + groups.map((group) => group.columns.map((column, columnIndex) => {
           const colorStyle = column.color ? ` style="background:${esc(column.color)}"` : "";
           const boundaryClass = `${columnIndex === 0 ? " metric-col-start" : ""}${columnIndex === group.columns.length - 1 ? " metric-col-end" : ""}`;
-          const header = `<th class="result-subhead${boundaryClass}" data-sortable="1" data-sort-column="${colIndex}"${colorStyle}><span title="${esc(column.label)}">${esc(column.label)}</span></th>`;
+          const sortAttr = collapsible ? "" : ` data-sortable="1" data-sort-column="${colIndex}"`;
+          const header = `<th class="result-subhead${boundaryClass}"${sortAttr}${colorStyle}><span title="${esc(column.label)}">${esc(column.label)}</span></th>`;
           colIndex += 1;
           return header;
         }).join("")).join("") + "</tr>";
-        const body = rows.map((row) => {
+        const groupControls = !collapsible ? "" : `<div class="table-group-controls"><button type="button" data-table-action="expand">Expand all</button><button type="button" data-table-action="collapse">Collapse all</button></div>`;
+        const groupHeaders = new Set();
+        const totalColumns = 1 + groups.reduce((sum, group) => sum + group.columns.length, 0);
+        const body = orderedRows.map((row) => {
+          const groupLabel = row.groupLabel || "";
+          let prefix = "";
+          if (collapsible && groupLabel && !groupHeaders.has(groupLabel)) {
+            groupHeaders.add(groupLabel);
+            const open = groupHeaders.size === 1;
+            prefix = `<tr class="table-group-row" data-group="${esc(groupLabel)}"><td class="table-group-cell sticky-col">` +
+              `<button type="button" class="table-group-toggle" data-group="${esc(groupLabel)}" aria-expanded="${open ? "true" : "false"}">` +
+              `<span class="table-group-caret">${open ? "−" : "+"}</span>${esc(groupLabel)} <small>${orderedRows.filter((item) => item.groupLabel === groupLabel).length} points</small>` +
+              `</button></td><td class="table-group-fill" colspan="${totalColumns - 1}"></td></tr>`;
+          }
+          const hiddenClass = collapsible && groupHeaders.size > 1 ? " is-collapsed" : "";
+          const rowAttrs = attrsToString({
+            "data-table-group": collapsible && groupLabel ? groupLabel : null,
+          });
           const cells = [dataCell(row.stub, "sticky-col row-head", row.stubSort || row.stub, row.attrs || {})];
           row.groups.forEach((group) => {
             group.cells.forEach((cell, cellIndex) => {
@@ -716,9 +856,9 @@ def _report_script(comparison_series: List[dict]) -> str:
               cells.push(dataCell(cell.value, `${cell.klass || ""}${boundaryClass}`, cell.sortValue, cell.attrs || {}));
             });
           });
-          return `<tr>${cells.join("")}</tr>`;
+          return `${prefix}<tr class="metric-row${hiddenClass}"${rowAttrs}>${cells.join("")}</tr>`;
         }).join("");
-        return `<div class="compare-table-shell"><table class="sortable compare-wide-table"${tableAttrs}><thead>${firstHeader}${secondHeader}</thead><tbody>${body}</tbody></table></div>`;
+        return `${groupControls}<div class="compare-table-shell"><table class="${collapsible ? "" : "sortable "}compare-wide-table"${tableAttrs}><thead>${firstHeader}${secondHeader}</thead><tbody>${body}</tbody></table></div>`;
       }
 
       function runNames(results) {
@@ -766,7 +906,7 @@ def _report_script(comparison_series: List[dict]) -> str:
           const stats = [
             ["points", fmt(points, 0)],
             ["fall rate mean", fmt(metricAverage(allRows, "fall_rate"))],
-            ["vx RMSE mean", fmt(metricAverage(allRows, "lin_vel_x_rmse"))],
+            ["xy RMSE mean", fmt(metricAverage(allRows, "lin_vel_xy_rmse"))],
             ["yaw RMSE mean", fmt(metricAverage(allRows, "ang_vel_yaw_rmse"))],
             ["lin reward mean", fmt(metricAverage(allRows, "tracking_lin_vel_reward"))],
             ["yaw reward mean", fmt(metricAverage(allRows, "tracking_ang_vel_reward"))],
@@ -870,6 +1010,7 @@ def _report_script(comparison_series: List[dict]) -> str:
               color: resultColor(runName, index),
               labels: rows.map((row) => String(row.label ?? "-")),
               axis_labels: rows.map((row) => compactAxisLabel(scenario, String(row.label ?? "-"))),
+              rows: rows.map((row, pointIndex) => ({ ...row, __pointIndex: pointIndex })),
               values: Object.fromEntries(metricDefs.map(([, metric]) => [
                 metric,
                 rows.map((row) => isNumber(row[metric]) ? row[metric] : null),
@@ -884,8 +1025,39 @@ def _report_script(comparison_series: List[dict]) -> str:
           const active = index === 0 ? " active" : "";
           return `<button type="button" class="metric-tab${active}" data-metric="${esc(metric)}">${esc(label)}</button>`;
         }).join("");
-        const data = esc(JSON.stringify(scenarioPlotData(results, scenario, metricDefs)));
-        return `<div class="metric-plot" data-scenario="${esc(scenario)}" data-plot="${data}"><div class="metric-tabs">${buttons}</div><div class="metric-chart" aria-label="metric chart"></div></div>`;
+        const dataObject = scenarioPlotData(results, scenario, metricDefs);
+        const policyNames = dataObject.series.map((item) => item.name);
+        const policyOptions = policyNames.map((name) => `<option value="${esc(name)}">${esc(name)}</option>`).join("");
+        const multiPolicyClass = policyNames.length > 1 ? "" : " is-hidden";
+        const velocityGroups = Array.from(new Set(dataObject.series.flatMap((item) => item.rows.map((row) => row.velocity_group).filter(Boolean))));
+        const preferredGroup = velocityGroups.includes("forward") ? "forward" : velocityGroups[0];
+        const groupOptions = velocityGroups.map((name) => `<option value="${esc(name)}"${name === preferredGroup ? " selected" : ""}>${esc(name)}</option>`).join("");
+        const groupControl = scenario === "body_pose" && velocityGroups.length > 1
+          ? `<label class="plot-select velocity-group-wrap">velocity group <select class="velocity-group-select">${groupOptions}</select></label>`
+          : "";
+        const controls = `
+          <div class="plot-controls">
+            <div class="metric-tabs">${buttons}</div>
+            <div class="plot-control-row">
+              <div class="segmented value-mode" data-control="value-mode" aria-label="value mode">
+                <button type="button" class="active" data-value-mode="absolute">absolute</button>
+                <button type="button" data-value-mode="baseline-delta">baseline delta</button>
+              </div>
+              <div class="segmented policy-mode" data-control="policy-mode" aria-label="policy mode">
+                <button type="button" class="active" data-policy-mode="all">all</button>
+                <button type="button" data-policy-mode="single">single</button>
+              </div>
+              <label class="plot-select baseline-select-wrap${multiPolicyClass}">baseline
+                <select class="baseline-select">${policyOptions}</select>
+              </label>
+              <label class="plot-select single-policy-wrap is-hidden">policy
+                <select class="single-policy-select">${policyOptions}</select>
+              </label>
+              ${groupControl}
+            </div>
+          </div>`;
+        const data = esc(JSON.stringify(dataObject));
+        return `<div class="metric-plot" data-scenario="${esc(scenario)}" data-plot="${data}">${controls}<div class="metric-chart" aria-label="metric chart"></div></div>`;
       }
 
       function renderScenarioCompare(results, scenario, metricDefs) {
@@ -910,15 +1082,20 @@ def _report_script(comparison_series: List[dict]) -> str:
             max: values.length ? Math.max(...values) : 0,
           }];
         }));
-        const rows = Array.from(labels).map((label, pointIndex) => ({
-          stub: esc(label),
-          stubSort: label,
-          attrs: {
-            "data-scenario": scenario,
-            "data-point-index": pointIndex,
-            "data-point-label": label,
-          },
-          groups: metricDefs.map(([, metric]) => {
+        const rows = Array.from(labels).map((label, pointIndex) => {
+          const firstRow = names.map((name) => rowMaps[name][label]).find(Boolean) || {};
+          return {
+            stub: esc(label),
+            stubSort: label,
+            groupLabel: tableGroupLabel(firstRow, scenario),
+            attrs: {
+              "data-scenario": scenario,
+              "data-point-index": pointIndex,
+              "data-point-label": label,
+              "data-velocity-group": firstRow.velocity_group || null,
+              "data-sweep-axis": firstRow.sweep_axis || firstRow.pose_axis || null,
+            },
+            groups: metricDefs.map(([, metric]) => {
             const metricValues = names
               .map((name) => rowMaps[name][label]?.[metric])
               .filter(isNumber);
@@ -933,6 +1110,8 @@ def _report_script(comparison_series: List[dict]) -> str:
                   "data-point-index": pointIndex,
                   "data-point-label": label,
                   "data-result": name,
+                  "data-velocity-group": firstRow.velocity_group || null,
+                  "data-sweep-axis": firstRow.sweep_axis || firstRow.pose_axis || null,
                 };
                 if (heatMetrics.includes(metric)) {
                   const range = heatRanges[metric];
@@ -952,9 +1131,32 @@ def _report_script(comparison_series: List[dict]) -> str:
                 };
               }),
             };
-          }),
-        }));
+            }),
+          };
+        });
         return groupedTable("test point", groups, rows, { kind: "scenario", scenario });
+      }
+
+      function scenarioGuide(scenario) {
+        const guide = SCENARIO_GUIDES[scenario];
+        if (!guide) return "";
+        return `<div class="scenario-guide"><h3>${esc(guide.title)}</h3><p>${esc(guide.body)}</p><p>${esc(guide.read)}</p></div>`;
+      }
+
+      function fallDiagnostics(results, scenario) {
+        const names = runNames(results);
+        if (!names.length) return "";
+        const cards = names.map((name) => {
+          const rows = results[name]?.[scenario] || [];
+          const envSteps = rows.reduce((sum, row) => sum + (isNumber(row.n_env_steps) ? row.n_env_steps : 0), 0);
+          const falls = rows.reduce((sum, row) => sum + (isNumber(row.n_falls) ? row.n_falls : Math.round((row.fall_rate || 0) * (row.n_env_steps || 0))), 0);
+          const heightFalls = rows.reduce((sum, row) => sum + (isNumber(row.fall_rate_height) && isNumber(row.n_env_steps) ? Math.round(row.fall_rate_height * row.n_env_steps) : 0), 0);
+          const note = falls === 0 && heightFalls === 0
+            ? "本 profile 未触发 terminal fall；zero is not proof of no risk."
+            : "检测到非零 fall event；non-zero terminal event observed.";
+          return `<div class="fall-card"><strong>${esc(name)}</strong><span>fall ${falls} / ${envSteps || "-"} env-steps</span><span>height fall ${heightFalls} / ${envSteps || "-"} env-steps</span><small>${esc(note)}</small></div>`;
+        }).join("");
+        return `<div class="fall-diagnostics"><h3>Fall 诊断 / Fall diagnostics</h3><p>0 表示本次 profile 下没有触发 terminal event，不代表绝对无跌倒风险。Zero means no terminal event was observed in this profile, not guaranteed absence of risk.</p><div class="fall-cards">${cards}</div></div>`;
       }
 
       function renderScenarioSections(results, scenarios) {
@@ -964,13 +1166,15 @@ def _report_script(comparison_series: List[dict]) -> str:
           const tables = renderScenarioCompare(results, scenario, metricDefs);
           if (!tables) return "";
           return `<section class="panel" id="detail-${esc(scenario)}"><h2>${esc(SCENARIO_TITLES[scenario] || scenario)}</h2>` +
-            renderScenarioPlot(results, scenario, metricDefs) + tables + "</section>";
+            scenarioGuide(scenario) + fallDiagnostics(results, scenario) + renderScenarioPlot(results, scenario, metricDefs) + tables + "</section>";
         }).join("");
       }
 
       function renderHome() {
         const previewTable = renderScenarioCompare(HOME_RESULTS, HOME_SCENARIO, HOME_METRICS);
         const previewPlot = renderScenarioPlot(HOME_RESULTS, HOME_SCENARIO, HOME_METRICS);
+        const previewHeatmap = renderScenarioPlot(HOME_HEATMAP_RESULTS, HOME_HEATMAP_SCENARIO, HOME_HEATMAP_METRICS);
+        const previewHeatmapTable = renderScenarioCompare(HOME_HEATMAP_RESULTS, HOME_HEATMAP_SCENARIO, HOME_HEATMAP_METRICS);
         return `
           <section class="cards home-cards" id="home-overview">
             <div class="card home-card"><h3>1. Pick results</h3><p>Use the left Results panel to open one run, compare several runs, or select everything.</p><div class="home-arrow">Results -> report</div></div>
@@ -992,24 +1196,27 @@ def _report_script(comparison_series: List[dict]) -> str:
             ${renderSummaryCompare(HOME_RESULTS, [HOME_SCENARIO])}
           </section>
           <section class="panel home-panel" id="home-chart">
-            <h2>Chart Interaction</h2>
-            <p class="summary-note">Hover or click a point. The vertical guide chooses a test point and highlights the matching result cells.</p>
+            <h2>Chart + Table Interaction</h2>
+            <p class="summary-note">Hover or click a line-chart point. The chart and its metric table highlight the same test point.</p>
             ${previewPlot}
-          </section>
-          <section class="panel home-panel" id="home-table">
-            <h2>Metric Table</h2>
-            <p class="summary-note">Best and worst are computed inside each test-point metric group. The outline marks the 1xN comparison slice.</p>
             ${previewTable}
+          </section>
+          <section class="panel home-panel" id="home-heatmap">
+            <h2>Heatmap + Table MVP</h2>
+            <p class="summary-note">Velocity grid heatmaps show command-space hot spots. Hover or click a cell to highlight its own metric table.</p>
+            ${previewHeatmap}
+            ${previewHeatmapTable}
           </section>`;
       }
 
       function bindSortableTables() {
         document.querySelectorAll("table.sortable").forEach((tableElement) => {
+          if (tableElement.dataset.collapsible === "1") return;
           const headers = Array.from(tableElement.querySelectorAll("th[data-sortable='1']"));
           headers.forEach((header) => {
             header.addEventListener("click", () => {
               const tbody = tableElement.tBodies[0];
-              const rows = Array.from(tbody.rows);
+              const rows = Array.from(tbody.rows).filter((row) => !row.classList.contains("table-group-row"));
               const direction = header.dataset.direction === "asc" ? "desc" : "asc";
               headers.forEach((item) => delete item.dataset.direction);
               header.dataset.direction = direction;
@@ -1025,6 +1232,39 @@ def _report_script(comparison_series: List[dict]) -> str:
               });
               rows.forEach((row) => tbody.appendChild(row));
             });
+          });
+        });
+      }
+
+      function setTableGroup(shell, group, open) {
+        shell.querySelectorAll("tr[data-table-group]").forEach((row) => {
+          if (row.dataset.tableGroup !== group) return;
+          row.classList.toggle("is-collapsed", !open);
+        });
+        const button = Array.from(shell.querySelectorAll(".table-group-toggle")).find((item) => item.dataset.group === group);
+        if (button) {
+          button.setAttribute("aria-expanded", open ? "true" : "false");
+          const caret = button.querySelector(".table-group-caret");
+          if (caret) caret.textContent = open ? "−" : "+";
+        }
+      }
+
+      function bindCollapsibleTables() {
+        document.querySelectorAll(".compare-table-shell").forEach((shell) => {
+          shell.querySelectorAll(".table-group-toggle").forEach((button) => {
+            button.addEventListener("click", () => {
+              const group = button.dataset.group || "";
+              const open = button.getAttribute("aria-expanded") !== "true";
+              setTableGroup(shell, group, open);
+            });
+          });
+          const controls = shell.previousElementSibling;
+          if (!controls || !controls.classList.contains("table-group-controls")) return;
+          controls.querySelector("[data-table-action='expand']")?.addEventListener("click", () => {
+            shell.querySelectorAll(".table-group-toggle").forEach((button) => setTableGroup(shell, button.dataset.group || "", true));
+          });
+          controls.querySelector("[data-table-action='collapse']")?.addEventListener("click", () => {
+            shell.querySelectorAll(".table-group-toggle").forEach((button) => setTableGroup(shell, button.dataset.group || "", false));
           });
         });
       }
@@ -1066,8 +1306,26 @@ def _report_script(comparison_series: List[dict]) -> str:
         centerMetricGroup(cells.filter((cell) => cell.dataset.pointIndex === firstPoint));
       }
 
+      function centerLinkedMetricCells(scenario, metricKey, pointIndex) {
+        const selector = `[data-scenario="${cssEscape(scenario)}"][data-metric="${cssEscape(metricKey)}"][data-point-index="${pointIndex}"]`;
+        const cells = Array.from(document.querySelectorAll(selector));
+        centerMetricGroup(cells);
+        return cells.length > 0;
+      }
+
+      function ensurePointVisible(scenario, pointIndex) {
+        const selector = `[data-scenario="${cssEscape(scenario)}"][data-point-index="${pointIndex}"]`;
+        const target = document.querySelector(selector);
+        const row = target?.closest("tr[data-table-group]");
+        const group = row?.dataset.tableGroup;
+        const shell = row?.closest(".compare-table-shell");
+        if (!group || !shell) return;
+        setTableGroup(shell, group, true);
+      }
+
       function setLinkedHighlight(scenario, metricKey, pointIndex, pinned = false, options = {}) {
         pinnedInteraction = pinned ? { scenario, metricKey, pointIndex } : null;
+        ensurePointVisible(scenario, pointIndex);
         resetLinkedHighlights();
         const selector = `[data-scenario="${cssEscape(scenario)}"][data-metric="${cssEscape(metricKey)}"][data-point-index="${pointIndex}"]`;
         const cells = Array.from(document.querySelectorAll(selector));
@@ -1077,7 +1335,7 @@ def _report_script(comparison_series: List[dict]) -> str:
           if (cells.length === 1) cell.classList.add("linked-end");
           if (pinned) cell.classList.add("linked-pinned");
         });
-        if (options.center) centerMetricGroup(cells);
+        if (options.center) centerLinkedMetricCells(scenario, metricKey, pointIndex);
         document.querySelectorAll(`[data-scenario="${cssEscape(scenario)}"][data-point-index="${pointIndex}"]`).forEach((cell) => {
           if (cell.classList.contains("sticky-col")) cell.classList.add("row-linked");
         });
@@ -1086,6 +1344,466 @@ def _report_script(comparison_series: List[dict]) -> str:
       function clearChartHighlights(plot) {
         plot.querySelectorAll(".chart-crosshair, .chart-tooltip-group").forEach((item) => item.remove());
         plot.querySelectorAll(".chart-point.is-active").forEach((item) => item.classList.remove("is-active"));
+        plot.querySelectorAll(".heat-cell.is-active").forEach((item) => item.classList.remove("is-active"));
+        plot.querySelectorAll(".grouped-point.is-active, .pose-summary-cell.is-active").forEach((item) => item.classList.remove("is-active"));
+      }
+
+      function activePlotMetric(plot) {
+        return plot.querySelector(".metric-tab.active")?.dataset.metric || plot.querySelector(".metric-tab")?.dataset.metric || "";
+      }
+
+      function setActiveMetricTab(plot, metricKey) {
+        if (!plot || !metricKey) return false;
+        const button = plot.querySelector(`.metric-tab[data-metric="${cssEscape(metricKey)}"]`);
+        if (!button) return false;
+        if (button.classList.contains("active")) return true;
+        plot.querySelectorAll(".metric-tab").forEach((item) => item.classList.remove("active"));
+        button.classList.add("active");
+        renderMetricPlot(plot, metricKey);
+        return true;
+      }
+
+      function activatePlotMetricPoint(scenario, metricKey, pointIndex, pinned = false, options = {}) {
+        const plot = document.querySelector(`.metric-plot[data-scenario="${cssEscape(scenario)}"]`);
+        if (!plot) {
+          setLinkedHighlight(scenario, metricKey, pointIndex, pinned, options);
+          return false;
+        }
+        if (!setActiveMetricTab(plot, metricKey)) {
+          setLinkedHighlight(scenario, metricKey, pointIndex, pinned, options);
+          return false;
+        }
+        plot.activatePoint?.(pointIndex, pinned, options);
+        return true;
+      }
+
+      function plotControlState(plot, data) {
+        const series = data.series || [];
+        const firstName = series[0]?.name || "";
+        const valueMode = plot.querySelector("[data-value-mode].active")?.dataset.valueMode || "absolute";
+        const policyMode = plot.querySelector("[data-policy-mode].active")?.dataset.policyMode || "all";
+        const baselineSelect = plot.querySelector(".baseline-select");
+        const singleSelect = plot.querySelector(".single-policy-select");
+        const velocityGroupSelect = plot.querySelector(".velocity-group-select");
+        if (baselineSelect && !series.some((item) => item.name === baselineSelect.value)) baselineSelect.value = firstName;
+        if (singleSelect && !series.some((item) => item.name === singleSelect.value)) singleSelect.value = firstName;
+        return {
+          valueMode,
+          policyMode,
+          baselineName: baselineSelect?.value || firstName,
+          singleName: singleSelect?.value || firstName,
+          velocityGroup: velocityGroupSelect?.value || "",
+        };
+      }
+
+      function syncPlotControlVisibility(plot) {
+        const data = JSON.parse(plot.dataset.plot || "{}");
+        const state = plotControlState(plot, data);
+        const hasMultiple = (data.series || []).length > 1;
+        plot.querySelector(".baseline-select-wrap")?.classList.toggle("is-hidden", !hasMultiple);
+        plot.querySelector(".single-policy-wrap")?.classList.toggle("is-hidden", state.policyMode !== "single");
+      }
+
+      function selectedPlotSeries(plot, data, metricKey, options = {}) {
+        const rawSeries = data.series || [];
+        const state = plotControlState(plot, data);
+        const baseline = rawSeries.find((item) => item.name === state.baselineName) || rawSeries[0];
+        const visible = state.policyMode === "single"
+          ? rawSeries.filter((item) => item.name === state.singleName)
+          : rawSeries;
+        return visible.map((item) => {
+          const sourceIndex = Math.max(0, rawSeries.findIndex((candidate) => candidate.name === item.name));
+          let rows = (item.rows || []).map((row, index) => {
+            const current = row[metricKey];
+            const baseValue = baseline?.rows?.[index]?.[metricKey];
+            const value = state.valueMode === "baseline-delta"
+              ? (isNumber(current) && isNumber(baseValue) ? current - baseValue : null)
+              : (isNumber(current) ? current : null);
+            return { ...row, [metricKey]: value };
+          });
+          if (!options.ignoreVelocityGroup && (plot.dataset.scenario || "") === "body_pose" && state.velocityGroup) {
+            rows = rows.filter((row) => row.velocity_group === state.velocityGroup);
+          }
+          const values = rows.map((row) => row[metricKey]);
+          return {
+            ...item,
+            color: item.color || resultColor(item.name, sourceIndex),
+            rows,
+            values: { ...(item.values || {}), [metricKey]: values },
+          };
+        });
+      }
+
+      function renderVelocityHeatmap(plot, metricKey, metric) {
+        const data = JSON.parse(plot.dataset.plot || "{}");
+        const chart = plot.querySelector(".metric-chart");
+        const scenario = plot.dataset.scenario || "";
+        const series = selectedPlotSeries(plot, data, metricKey).map((item, i) => ({
+          name: item.name,
+          color: item.color || resultColor(item.name, i),
+          rows: item.rows || [],
+          labels: item.labels || [],
+        })).filter((item) => item.rows.length);
+        if (!series.length || !series.some((item) => item.rows.some((row) => isNumber(row.cmd_y)))) {
+          return false;
+        }
+        const isVelocityScenario = scenario === "vel_grid" || scenario === HOME_HEATMAP_SCENARIO;
+        const allValues = series.flatMap((item) => item.rows.map((row) => row[metricKey]).filter(isNumber));
+        if (!allValues.length) {
+          chart.innerHTML = "<p class='summary-note'>No numeric values for this metric.</p>";
+          return true;
+        }
+        const minV = Math.min(...allValues);
+        const maxV = Math.max(...allValues);
+        const vxVals = Array.from(new Set(series.flatMap((item) => item.rows.map((row) => row.cmd_x).filter(isNumber)))).sort((a, b) => a - b);
+        const vyVals = Array.from(new Set(series.flatMap((item) => item.rows.map((row) => row.cmd_y).filter(isNumber)))).sort((a, b) => b - a);
+        const yawVals = Array.from(new Set(series.flatMap((item) => item.rows.map((row) => row.cmd_yaw).filter(isNumber)))).sort((a, b) => a - b);
+        const lowerIsBetter = !metricPrefersHigher(metricKey);
+        const heat = (value) => {
+          if (!isNumber(value) || maxV <= minV) return "#f2f4f7";
+          let t = (value - minV) / (maxV - minV);
+          if (!lowerIsBetter) t = 1 - t;
+          const hue = 145 - Math.floor(145 * t);
+          return `hsl(${hue} 66% 88%)`;
+        };
+        const cellByYaw = (item, yaw) => {
+          const byKey = new Map();
+          item.rows.forEach((row, index) => {
+            if (Number(row.cmd_yaw) !== Number(yaw)) return;
+            byKey.set(`${row.cmd_x}|${row.cmd_y}`, { row, index: row.__pointIndex ?? index });
+          });
+          return byKey;
+        };
+        const blocks = series.map((item) => {
+          const facets = yawVals.map((yaw) => {
+            const map = cellByYaw(item, yaw);
+            const grid = vyVals.map((vy) => vxVals.map((vx) => {
+              const entry = map.get(`${vx}|${vy}`);
+              if (!entry) return `<div class="heat-cell heat-empty"></div>`;
+              const value = entry.row[metricKey];
+              const label = entry.row.label ?? `vx=${vx} vy=${vy} yaw=${yaw}`;
+              return `<button type="button" class="heat-cell" style="background:${heat(value)}" data-point-index="${entry.index}" data-result="${esc(item.name)}" title="${esc(item.name)} | ${esc(label)} | ${esc(metric.label)}: ${fmt(value)}">` +
+                `<span>${fmt(value, 3)}</span></button>`;
+            }).join("")).join("");
+            const xLabels = vxVals.map((vx) => `<span>${fmt(vx, 1)}</span>`).join("");
+            const yLabels = vyVals.map((vy) => `<span>${fmt(vy, 1)}</span>`).join("");
+            return `<div class="heat-facet"><h4>yaw ${fmt(yaw, 1)}</h4><div class="heat-body">` +
+              `<div class="heat-y">${yLabels}</div><div class="heat-grid" style="grid-template-columns: repeat(${vxVals.length}, minmax(54px, 1fr));">${grid}</div>` +
+              `<div class="heat-x" style="grid-template-columns: repeat(${vxVals.length}, minmax(54px, 1fr));">${xLabels}</div></div></div>`;
+          }).join("");
+          return `<div class="heat-policy"><h3>${esc(item.name)}</h3><div class="heat-facets">${facets}</div></div>`;
+        }).join("");
+        chart.innerHTML = `<div class="heatmap-chart"><div class="heat-axis-title">${isVelocityScenario ? "x = vx, y = vy, facets = yaw" : "heatmap"}</div>${blocks}</div>`;
+        const state = { pinnedIndex: null };
+        function activate(pointIndex, pinned = false, options = {}) {
+          clearChartHighlights(plot);
+          setLinkedHighlight(scenario, metric.key, pointIndex, pinned, options);
+          chart.querySelectorAll(`.heat-cell[data-point-index="${pointIndex}"]`).forEach((cell) => cell.classList.add("is-active"));
+        }
+        chart.querySelectorAll(".heat-cell[data-point-index]").forEach((cell) => {
+          const pointIndex = Number(cell.dataset.pointIndex);
+          cell.addEventListener("mouseenter", () => {
+            if (state.pinnedIndex !== null) return;
+            activate(pointIndex, false, { center: true });
+          });
+          cell.addEventListener("mouseleave", () => {
+            if (state.pinnedIndex !== null) return;
+            clearChartHighlights(plot);
+            clearLinkedHighlights();
+          });
+          cell.addEventListener("click", () => {
+            state.pinnedIndex = state.pinnedIndex === pointIndex ? null : pointIndex;
+            if (state.pinnedIndex === null) {
+              clearChartHighlights(plot);
+              clearLinkedHighlights(true);
+            } else {
+              activate(state.pinnedIndex, true, { center: true });
+            }
+          });
+        });
+        plot.activatePoint = (pointIndex, pinned = false, options = {}) => {
+          state.pinnedIndex = pinned ? pointIndex : null;
+          activate(pointIndex, pinned, options);
+        };
+        plot.currentPointIndex = () => state.pinnedIndex;
+        return true;
+      }
+
+      function rowAxisValue(row, axis) {
+        const keys = {
+          pitch: "cmd_pitch",
+          roll: "cmd_roll",
+          height: "cmd_height_delta",
+          gait_freq: "cmd_gait_freq",
+          stance_width: "cmd_stance_width",
+          stance_length: "cmd_stance_length",
+        };
+        const value = row[keys[axis]];
+        return isNumber(value) ? value : null;
+      }
+
+      function poseAxisMetric(axis) {
+        if (axis === "pitch") return "pitch_rmse_deg";
+        if (axis === "roll") return "roll_rmse_deg";
+        if (axis === "height") return "height_rmse_m";
+        return "orientation_control_rmse";
+      }
+
+      function groupRowsByAxis(series, scenario) {
+        const axes = scenario === "body_pose" ? ["pitch", "roll", "height"] : ["gait_freq", "stance_width", "stance_length"];
+        const presentAxes = axes.filter((axis) => series.some((item) => item.rows.some((row) => row.sweep_axis === axis || row.pose_axis === axis || rowAxisValue(row, axis) !== null)));
+        return presentAxes.length ? presentAxes : axes;
+      }
+
+      function renderGroupedLinePanel(scenario, metric, axis, series, title) {
+        const rowsBySeries = series.map((item) => ({
+          ...item,
+          points: item.rows
+            .map((row, index) => ({ row, index: row.__pointIndex ?? index, x: rowAxisValue(row, axis), y: row[metric.key] }))
+            .filter((point) => point.x !== null && isNumber(point.y) && (
+              rowAxisValue(point.row, axis) !== null &&
+              (scenario === "gait" ? (point.row.sweep_axis || axis) === axis : (point.row.pose_axis || point.row.sweep_axis || axis) === axis)
+            ))
+            .sort((a, b) => a.x - b.x),
+        })).filter((item) => item.points.length);
+        if (!rowsBySeries.length) return "";
+        const allY = rowsBySeries.flatMap((item) => item.points.map((point) => point.y));
+        const allX = rowsBySeries.flatMap((item) => item.points.map((point) => point.x));
+        let yMin = Math.min(...allY);
+        let yMax = Math.max(...allY);
+        let xMin = Math.min(...allX);
+        let xMax = Math.max(...allX);
+        if (yMin === yMax) { yMin -= 1; yMax += 1; }
+        if (xMin === xMax) { xMin -= 1; xMax += 1; }
+        const yPad = (yMax - yMin) * 0.08;
+        yMin -= yPad;
+        yMax += yPad;
+        const width = 620;
+        const height = 250;
+        const margin = { left: 54, right: 22, top: 18, bottom: 42 };
+        const innerW = width - margin.left - margin.right;
+        const innerH = height - margin.top - margin.bottom;
+        const x = (value) => margin.left + ((value - xMin) / (xMax - xMin)) * innerW;
+        const y = (value) => margin.top + (1 - (value - yMin) / (yMax - yMin)) * innerH;
+        const yTicks = [0, 0.25, 0.5, 0.75, 1].map((t) => yMin + t * (yMax - yMin));
+        const xTicks = Array.from(new Set(allX)).sort((a, b) => a - b);
+        const xStep = Math.max(1, Math.ceil(xTicks.length / 6));
+        const grid = yTicks.map((tick) => {
+          const yy = y(tick);
+          return `<line class="chart-grid" x1="${margin.left}" y1="${yy}" x2="${width - margin.right}" y2="${yy}"></line>` +
+            `<text class="chart-label" x="${margin.left - 8}" y="${yy + 4}" text-anchor="end">${fmt(tick)}</text>`;
+        }).join("");
+        const xLabels = xTicks.map((tick, i) => {
+          if (i % xStep !== 0 && i !== xTicks.length - 1) return "";
+          return `<text class="chart-label" x="${x(tick)}" y="${height - 14}" text-anchor="middle">${fmt(tick, 2)}</text>`;
+        }).join("");
+        const paths = rowsBySeries.map((item) => {
+          const coords = item.points.map((point) => `${x(point.x)},${y(point.y)}`).join(" ");
+          const circles = item.points.map((point) => (
+            `<circle class="grouped-point chart-point" data-point-index="${point.index}" data-result="${esc(item.name)}" data-label="${esc(point.row.label || axis)}" data-value="${esc(point.y)}" cx="${x(point.x)}" cy="${y(point.y)}" r="4" fill="${item.color}">` +
+            `<title>${esc(item.name)} | ${esc(point.row.label || axis)} | ${esc(metric.label)}: ${fmt(point.y)}</title></circle>`
+          )).join("");
+          return `<polyline class="chart-line" stroke="${item.color}" points="${coords}"></polyline>${circles}`;
+        }).join("");
+        return `<div class="grouped-panel" data-axis="${esc(axis)}"><h3>${esc(title)}</h3>` +
+          `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="${esc(title)} ${esc(metric.label)}" data-inner-top="${margin.top}" data-inner-bottom="${margin.top + innerH}">` +
+          grid +
+          `<line class="chart-axis" x1="${margin.left}" y1="${margin.top + innerH}" x2="${width - margin.right}" y2="${margin.top + innerH}"></line>` +
+          `<line class="chart-axis" x1="${margin.left}" y1="${margin.top}" x2="${margin.left}" y2="${margin.top + innerH}"></line>` +
+          paths + xLabels + `</svg></div>`;
+      }
+
+      function renderPoseSummaryHeatmap(scenario, metric, series) {
+        const groups = Array.from(new Set(series.flatMap((item) => item.rows.map((row) => row.velocity_group).filter(Boolean))));
+        const axes = ["pitch", "roll", "height"].filter((axis) => series.some((item) => item.rows.some((row) => row.pose_axis === axis || row.sweep_axis === axis)));
+        if (!groups.length || !axes.length) return "";
+        const cells = [];
+        groups.forEach((group) => {
+          axes.forEach((axis) => {
+            const axisMetric = poseAxisMetric(axis);
+            const values = series.flatMap((item) => item.rows
+              .filter((row) => row.velocity_group === group && (row.pose_axis === axis || row.sweep_axis === axis))
+              .map((row) => row[axisMetric])
+              .filter(isNumber));
+            if (values.length) cells.push({ group, axis, mean: values.reduce((s, v) => s + v, 0) / values.length, worst: Math.max(...values) });
+          });
+        });
+        if (!cells.length) return "";
+        const minV = Math.min(...cells.map((cell) => cell.mean));
+        const maxV = Math.max(...cells.map((cell) => cell.mean));
+        const heat = (value) => {
+          if (!isNumber(value) || maxV <= minV) return "#f2f4f7";
+          const t = (value - minV) / (maxV - minV);
+          const hue = 145 - Math.floor(145 * t);
+          return `hsl(${hue} 66% 88%)`;
+        };
+        const rows = groups.map((group) => `<div class="pose-summary-row"><strong>${esc(group)}</strong>` + axes.map((axis) => {
+          const cell = cells.find((item) => item.group === group && item.axis === axis);
+          if (!cell) return `<span class="pose-summary-cell pose-summary-empty">-</span>`;
+          return `<span class="pose-summary-cell" style="background:${heat(cell.mean)}" data-mean="${cell.mean}" data-worst="${cell.worst}" title="${esc(group)} | ${esc(axis)} mean ${fmt(cell.mean)} worst ${fmt(cell.worst)}">${fmt(cell.mean, 3)}</span>`;
+        }).join("") + "</div>").join("");
+        return `<div class="pose-summary"><div class="pose-summary-controls"><span>pose summary</span><button type="button" class="pose-agg-tab active" data-agg="mean">mean</button><button type="button" class="pose-agg-tab" data-agg="worst">worst</button></div><div class="pose-summary-head"><span></span>${axes.map((axis) => `<strong>${esc(axis)}</strong>`).join("")}</div>${rows}</div>`;
+      }
+
+      function renderSharedLegend(series) {
+        if (series.length <= 1) return "";
+        return `<div class="shared-legend">${series.map((item) => `<span><i style="background:${esc(item.color)}"></i>${esc(item.name)}</span>`).join("")}</div>`;
+      }
+
+      function renderGroupedScenarioPlot(plot, metricKey, metric) {
+        const scenario = plot.dataset.scenario || "";
+        if (scenario !== "body_pose" && scenario !== "gait") return false;
+        const data = JSON.parse(plot.dataset.plot || "{}");
+        const chart = plot.querySelector(".metric-chart");
+        const series = selectedPlotSeries(plot, data, metricKey).map((item, i) => ({
+          name: item.name,
+          color: item.color || resultColor(item.name, i),
+          rows: item.rows || [],
+        })).filter((item) => item.rows.length);
+        const summarySeries = selectedPlotSeries(plot, data, metricKey, { ignoreVelocityGroup: true }).map((item, i) => ({
+          name: item.name,
+          color: item.color || resultColor(item.name, i),
+          rows: item.rows || [],
+        })).filter((item) => item.rows.length);
+        if (!series.length) return false;
+        const hasStructuredShape = scenario === "body_pose"
+          ? series.some((item) => item.rows.some((row) => row.pose_axis || row.sweep_axis || row.velocity_group))
+          : series.some((item) => item.rows.some((row) => row.sweep_axis));
+        if (!hasStructuredShape) return false;
+        const axes = groupRowsByAxis(series, scenario);
+        const titles = {
+          pitch: "Pitch sweep",
+          roll: "Roll sweep",
+          height: "Height sweep",
+          gait_freq: "Gait frequency sweep",
+          stance_width: "Stance width sweep",
+          stance_length: "Stance length sweep",
+        };
+        const panels = axes.map((axis) => renderGroupedLinePanel(scenario, metric, axis, series, titles[axis] || axis)).filter(Boolean).join("");
+        if (!panels) return false;
+        const summary = scenario === "body_pose" ? renderPoseSummaryHeatmap(scenario, metric, summarySeries) : "";
+        chart.innerHTML = `<div class="grouped-chart">${summary}${renderSharedLegend(series)}<div class="grouped-panels">${panels}</div></div>`;
+        const state = { pinnedIndex: null };
+        chart.querySelectorAll(".pose-agg-tab").forEach((button) => {
+          button.addEventListener("click", () => {
+            const agg = button.dataset.agg || "mean";
+            chart.querySelectorAll(".pose-agg-tab").forEach((item) => item.classList.remove("active"));
+            button.classList.add("active");
+            const values = Array.from(chart.querySelectorAll(".pose-summary-cell[data-mean]"))
+              .map((cell) => Number(cell.dataset[agg]))
+              .filter(Number.isFinite);
+            const minV = values.length ? Math.min(...values) : 0;
+            const maxV = values.length ? Math.max(...values) : 0;
+            chart.querySelectorAll(".pose-summary-cell[data-mean]").forEach((cell) => {
+              const value = Number(cell.dataset[agg]);
+              cell.textContent = fmt(value, 3);
+              if (!Number.isFinite(value) || maxV <= minV) {
+                cell.style.background = "#f2f4f7";
+                return;
+              }
+              const t = (value - minV) / (maxV - minV);
+              const hue = 145 - Math.floor(145 * t);
+              cell.style.background = `hsl(${hue} 66% 88%)`;
+            });
+          });
+        });
+        function renderGroupedInteraction(pointIndex) {
+          chart.querySelectorAll(".grouped-panel svg").forEach((svg) => {
+            const points = Array.from(svg.querySelectorAll(`.grouped-point[data-point-index="${pointIndex}"]`));
+            if (!points.length) return;
+            const width = Number(svg.viewBox.baseVal.width || 620);
+            const height = Number(svg.viewBox.baseVal.height || 250);
+            const innerTop = Number(svg.dataset.innerTop || 18);
+            const innerBottom = Number(svg.dataset.innerBottom || 208);
+            const xx = Number(points[0].getAttribute("cx"));
+            const label = points[0].dataset.label || String(pointIndex);
+            const titleText = `${metric.label} | ${label}`;
+            const values = sortTooltipValues(points.map((point) => ({
+              name: point.dataset.result || "",
+              color: point.getAttribute("fill") || "#344054",
+              value: Number(point.dataset.value),
+            })).filter((item) => Number.isFinite(item.value)));
+            const tooltipW = Math.max(250, Math.min(380, 44 + titleText.length * 6.2));
+            const rowH = 17;
+            const tooltipH = 30 + values.length * rowH;
+            const tx = xx > width - 22 - tooltipW ? Math.max(58, xx - tooltipW - 14) : xx + 14;
+            const ty = Math.max(22, Math.min(height - tooltipH - 8, innerTop + 8));
+            const valueRows = values.map((item, i) => {
+              const yy = ty + 32 + i * rowH;
+              return `<circle cx="${tx + 12}" cy="${yy - 4}" r="4" fill="${item.color}"></circle>` +
+                `<text class="chart-tooltip-text" x="${tx + 22}" y="${yy}">${esc(item.name)}: ${fmt(item.value)}</text>`;
+            }).join("");
+            const tooltip = `<g class="chart-tooltip-group">` +
+              `<line class="chart-crosshair" x1="${xx}" y1="${innerTop}" x2="${xx}" y2="${innerBottom}"></line>` +
+              `<rect class="chart-tooltip" fill-opacity="0.82" x="${tx}" y="${ty}" width="${tooltipW}" height="${tooltipH}" rx="6"></rect>` +
+              `<text class="chart-tooltip-title" x="${tx + 10}" y="${ty + 18}">${esc(titleText)}</text>` +
+              valueRows +
+              `</g>`;
+            svg.insertAdjacentHTML("beforeend", tooltip);
+          });
+        }
+        function activate(pointIndex, pinned = false, options = {}) {
+          clearChartHighlights(plot);
+          setLinkedHighlight(scenario, metric.key, pointIndex, pinned, options);
+          chart.querySelectorAll(`.grouped-point[data-point-index="${pointIndex}"]`).forEach((point) => point.classList.add("is-active"));
+          renderGroupedInteraction(pointIndex);
+        }
+
+        function groupedEventToPointIndex(svg, event) {
+          const points = Array.from(svg.querySelectorAll(".grouped-point[data-point-index]"));
+          if (!points.length) return null;
+          const rect = svg.getBoundingClientRect();
+          const viewBox = svg.viewBox.baseVal;
+          const width = Number(viewBox.width || 620);
+          const height = Number(viewBox.height || 250);
+          const viewX = ((event.clientX - rect.left) / rect.width) * width;
+          const viewY = ((event.clientY - rect.top) / rect.height) * height;
+          let best = null;
+          points.forEach((point) => {
+            const cx = Number(point.getAttribute("cx"));
+            const cy = Number(point.getAttribute("cy"));
+            const pointIndex = Number(point.dataset.pointIndex);
+            if (!Number.isFinite(cx) || !Number.isFinite(cy) || !Number.isFinite(pointIndex)) return;
+            const dx = Math.abs(cx - viewX);
+            const dy = Math.abs(cy - viewY);
+            const distance = dx * dx + dy * dy * 0.18;
+            if (!best || distance < best.distance || (distance === best.distance && pointIndex < best.pointIndex)) {
+              best = { pointIndex, distance };
+            }
+          });
+          return best ? best.pointIndex : null;
+        }
+
+        chart.querySelectorAll(".grouped-panel svg").forEach((svg) => {
+          svg.addEventListener("mousemove", (event) => {
+            if (state.pinnedIndex !== null) return;
+            const pointIndex = groupedEventToPointIndex(svg, event);
+            if (pointIndex === null) return;
+            activate(pointIndex, false, { center: true });
+          });
+          svg.addEventListener("mouseleave", () => {
+            if (state.pinnedIndex !== null) return;
+            clearChartHighlights(plot);
+            clearLinkedHighlights();
+          });
+          svg.addEventListener("click", (event) => {
+            const pointIndex = groupedEventToPointIndex(svg, event);
+            if (pointIndex === null) return;
+            state.pinnedIndex = state.pinnedIndex === pointIndex ? null : pointIndex;
+            if (state.pinnedIndex === null) {
+              clearChartHighlights(plot);
+              clearLinkedHighlights(true);
+            } else {
+              activate(state.pinnedIndex, true, { center: true });
+            }
+          });
+        });
+        plot.activatePoint = (pointIndex, pinned = false, options = {}) => {
+          state.pinnedIndex = pinned ? pointIndex : null;
+          activate(pointIndex, pinned, options);
+        };
+        plot.currentPointIndex = () => state.pinnedIndex;
+        return true;
       }
 
       function renderMetricPlot(plot, metricKey) {
@@ -1093,14 +1811,16 @@ def _report_script(comparison_series: List[dict]) -> str:
         const metric = (data.metrics || []).find((item) => item.key === metricKey) || (data.metrics || [])[0];
         const chart = plot.querySelector(".metric-chart");
         if (!metric || !chart) return;
+        if (((plot.dataset.scenario || "") === "vel_grid" || (plot.dataset.scenario || "") === HOME_HEATMAP_SCENARIO) && renderVelocityHeatmap(plot, metricKey, metric)) return;
+        if (renderGroupedScenarioPlot(plot, metricKey, metric)) return;
 
-        const series = (data.series || []).map((item, i) => ({
+        const series = selectedPlotSeries(plot, data, metric.key).map((item, i) => ({
           name: item.name,
-          labels: item.labels || [],
-          axisLabels: item.axis_labels || item.labels || [],
-          values: (item.values && item.values[metric.key] ? item.values[metric.key] : []).map((value) =>
-            value === null ? NaN : Number(value)
-          ),
+          rows: item.rows || [],
+          labels: (item.rows || []).map((row) => String(row.label ?? "-")),
+          axisLabels: (item.rows || []).map((row) => compactAxisLabel(plot.dataset.scenario || "", String(row.label ?? "-"))),
+          pointIndices: (item.rows || []).map((row, index) => row.__pointIndex ?? index),
+          values: (item.rows || []).map((row) => row[metric.key] === null ? NaN : Number(row[metric.key])),
           color: item.color || resultColor(item.name, i),
         }));
         const allValues = series.flatMap((item) => finite(item.values));
@@ -1129,6 +1849,7 @@ def _report_script(comparison_series: List[dict]) -> str:
         const y = (value) => margin.top + (1 - (value - yMin) / (yMax - yMin)) * innerH;
         const labels = series[0]?.labels || [];
         const axisLabels = series[0]?.axisLabels || labels;
+        const pointIndices = series[0]?.pointIndices || [];
         const labelStep = Math.max(1, Math.ceil(maxPoints / 8));
         const ticks = [0, 0.25, 0.5, 0.75, 1].map((t) => yMin + t * (yMax - yMin));
 
@@ -1151,7 +1872,8 @@ def _report_script(comparison_series: List[dict]) -> str:
             .filter(Boolean);
           const circles = item.values.map((value, i) => {
             if (!Number.isFinite(value)) return "";
-            return `<circle class="chart-point" data-point-index="${i}" data-result="${esc(item.name)}" cx="${x(i)}" cy="${y(value)}" r="4" fill="${item.color}">` +
+            const pointIndex = item.pointIndices[i] ?? i;
+            return `<circle class="chart-point" data-point-index="${pointIndex}" data-result="${esc(item.name)}" cx="${x(i)}" cy="${y(value)}" r="4" fill="${item.color}">` +
               `<title>${esc(item.name)} | ${esc(labels[i] || i)} | ${esc(metric.label)}: ${fmt(value)}</title></circle>`;
           }).join("");
           return `<polyline class="chart-line" stroke="${item.color}" points="${points.join(" ")}"></polyline>${circles}`;
@@ -1176,20 +1898,27 @@ def _report_script(comparison_series: List[dict]) -> str:
         const scenario = plot.dataset.scenario || "";
         const state = { pinnedIndex: null };
 
+        function displayIndexForPoint(pointIndex) {
+          const index = pointIndices.indexOf(pointIndex);
+          return index >= 0 ? index : pointIndex;
+        }
+
         function renderInteraction(pointIndex, pinned = false, options = {}) {
-          if (!Number.isFinite(pointIndex) || pointIndex < 0 || pointIndex >= maxPoints) return;
+          if (!Number.isFinite(pointIndex)) return;
+          const displayIndex = displayIndexForPoint(pointIndex);
+          if (displayIndex < 0 || displayIndex >= maxPoints) return;
           clearChartHighlights(plot);
           setLinkedHighlight(scenario, metric.key, pointIndex, pinned, options);
-          const xx = x(pointIndex);
+          const xx = x(displayIndex);
           svg.querySelectorAll(`.chart-point[data-point-index="${pointIndex}"]`).forEach((point) => {
             point.classList.add("is-active");
           });
-          const values = series.map((item) => ({
+          const values = sortTooltipValues(series.map((item) => ({
             name: item.name,
             color: item.color,
-            value: item.values[pointIndex],
-          })).filter((item) => Number.isFinite(item.value));
-          const titleText = `${metric.label} | ${labels[pointIndex] || pointIndex}`;
+            value: item.values[item.pointIndices.indexOf(pointIndex)],
+          })).filter((item) => Number.isFinite(item.value)));
+          const titleText = `${metric.label} | ${labels[displayIndex] || pointIndex}`;
           const tooltipW = Math.max(260, Math.min(390, 36 + titleText.length * 6.4));
           const rowH = 17;
           const tooltipH = 30 + values.length * rowH;
@@ -1213,8 +1942,8 @@ def _report_script(comparison_series: List[dict]) -> str:
           const rect = svg.getBoundingClientRect();
           const viewX = ((event.clientX - rect.left) / rect.width) * width;
           const clamped = Math.max(margin.left, Math.min(width - margin.right, viewX));
-          if (maxPoints <= 1) return 0;
-          return Math.round(((clamped - margin.left) / innerW) * (maxPoints - 1));
+          const displayIndex = maxPoints <= 1 ? 0 : Math.round(((clamped - margin.left) / innerW) * (maxPoints - 1));
+          return pointIndices[displayIndex] ?? displayIndex;
         }
 
         svg.addEventListener("mousemove", (event) => {
@@ -1246,19 +1975,48 @@ def _report_script(comparison_series: List[dict]) -> str:
       function bindMetricPlots() {
         document.querySelectorAll(".metric-plot").forEach((plot) => {
           const firstButton = plot.querySelector(".metric-tab");
+          syncPlotControlVisibility(plot);
           if (firstButton) renderMetricPlot(plot, firstButton.dataset.metric);
           plot.querySelectorAll(".metric-tab").forEach((button) => {
             button.addEventListener("click", () => {
-              plot.querySelectorAll(".metric-tab").forEach((item) => item.classList.remove("active"));
-              button.classList.add("active");
               const pinnedIndex = typeof plot.currentPointIndex === "function" ? plot.currentPointIndex() : null;
               clearLinkedHighlights();
-              renderMetricPlot(plot, button.dataset.metric);
+              setActiveMetricTab(plot, button.dataset.metric);
               if (pinnedIndex !== null) {
                 plot.activatePoint?.(pinnedIndex, true, { center: true });
               } else {
                 centerMetricColumn(plot.dataset.scenario || "", button.dataset.metric);
               }
+            });
+          });
+          plot.querySelectorAll("[data-value-mode]").forEach((button) => {
+            button.addEventListener("click", () => {
+              plot.querySelectorAll("[data-value-mode]").forEach((item) => item.classList.remove("active"));
+              button.classList.add("active");
+              clearLinkedHighlights(true);
+              renderMetricPlot(plot, activePlotMetric(plot));
+            });
+          });
+          plot.querySelectorAll("[data-policy-mode]").forEach((button) => {
+            button.addEventListener("click", () => {
+              plot.querySelectorAll("[data-policy-mode]").forEach((item) => item.classList.remove("active"));
+              button.classList.add("active");
+              syncPlotControlVisibility(plot);
+              clearLinkedHighlights(true);
+              renderMetricPlot(plot, activePlotMetric(plot));
+            });
+          });
+          plot.querySelectorAll(".baseline-select, .single-policy-select").forEach((select) => {
+            select.addEventListener("change", () => {
+              syncPlotControlVisibility(plot);
+              clearLinkedHighlights(true);
+              renderMetricPlot(plot, activePlotMetric(plot));
+            });
+          });
+          plot.querySelectorAll(".velocity-group-select").forEach((select) => {
+            select.addEventListener("change", () => {
+              clearLinkedHighlights(true);
+              renderMetricPlot(plot, activePlotMetric(plot));
             });
           });
         });
@@ -1269,14 +2027,22 @@ def _report_script(comparison_series: List[dict]) -> str:
           const scenario = cell.dataset.scenario;
           const metric = cell.dataset.metric;
           const pointIndex = Number(cell.dataset.pointIndex);
-          cell.addEventListener("mouseenter", () => {
-            const plot = document.querySelector(`.metric-plot[data-scenario="${cssEscape(scenario)}"]`);
-            const activeMetric = plot?.querySelector(".metric-tab.active")?.dataset.metric;
-            if (!plot || activeMetric !== metric) {
-              setLinkedHighlight(scenario, metric, pointIndex);
-              return;
+          function preparePlot(plot) {
+            if (!plot || scenario !== "body_pose" || !cell.dataset.velocityGroup) return;
+            const select = plot.querySelector(".velocity-group-select");
+            if (select && select.value !== cell.dataset.velocityGroup) {
+              select.value = cell.dataset.velocityGroup;
+              renderMetricPlot(plot, activePlotMetric(plot));
             }
-            plot.activatePoint?.(pointIndex, false, { center: false });
+          }
+          function activateFromTable(pinned) {
+            const plot = document.querySelector(`.metric-plot[data-scenario="${cssEscape(scenario)}"]`);
+            preparePlot(plot);
+            activatePlotMetricPoint(scenario, metric, pointIndex, pinned, { center: true });
+          }
+          cell.addEventListener("mouseenter", () => {
+            if (pinnedInteraction) return;
+            activateFromTable(false);
           });
           cell.addEventListener("mouseleave", () => {
             const plot = document.querySelector(`.metric-plot[data-scenario="${cssEscape(scenario)}"]`);
@@ -1285,13 +2051,7 @@ def _report_script(comparison_series: List[dict]) -> str:
             clearLinkedHighlights(true);
           });
           cell.addEventListener("click", () => {
-            const plot = document.querySelector(`.metric-plot[data-scenario="${cssEscape(scenario)}"]`);
-            const activeMetric = plot?.querySelector(".metric-tab.active")?.dataset.metric;
-            if (!plot || activeMetric !== metric) {
-              setLinkedHighlight(scenario, metric, pointIndex, true);
-              return;
-            }
-            plot.activatePoint?.(pointIndex, true, { center: false });
+            activateFromTable(true);
           });
         });
       }
@@ -1308,8 +2068,8 @@ def _report_script(comparison_series: List[dict]) -> str:
             navLink("Overview", "#home-overview"),
             navLink("Pick Results", "#home-pick"),
             navLink("Summary Preview", "#home-summary"),
-            navLink("Chart Interaction", "#home-chart"),
-            navLink("Metric Table", "#home-table"),
+            navLink("Chart + Table", "#home-chart"),
+            navLink("Heatmap + Table", "#home-heatmap"),
           ].join("");
           return;
         }
@@ -1350,6 +2110,7 @@ def _report_script(comparison_series: List[dict]) -> str:
             renderScenarioSections(results, scenarios);
         }
         bindSortableTables();
+        bindCollapsibleTables();
         bindMetricPlots();
         bindTableChartLinks();
       }
@@ -1739,6 +2500,95 @@ def _render_html(results: Dict[str, Dict[str, List[dict]]], source: Path, output
     .metadata-panel td {{ text-align: left; white-space: normal; word-break: break-word; }}
     .metadata-panel td.metadata-diff {{ background: #fff7ed; }}
     .summary-note {{ color: var(--muted); margin: 0 0 12px; }}
+    .scenario-guide, .fall-diagnostics {{
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #ffffff;
+      padding: 12px 14px;
+      margin-bottom: 12px;
+    }}
+    .scenario-guide h3, .fall-diagnostics h3 {{
+      margin: 0 0 6px;
+      color: var(--header);
+    }}
+    .scenario-guide p, .fall-diagnostics p {{
+      margin: 5px 0;
+      color: var(--muted);
+    }}
+    .fall-cards {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+      gap: 8px;
+      margin-top: 10px;
+    }}
+    .fall-card {{
+      display: grid;
+      gap: 3px;
+      border: 1px solid #d9dee7;
+      border-radius: 7px;
+      background: var(--panel-2);
+      padding: 9px 10px;
+    }}
+    .fall-card strong {{ color: var(--header); }}
+    .fall-card span {{ color: var(--text); font-weight: 700; }}
+    .fall-card small {{ color: var(--muted); line-height: 1.35; }}
+    .table-group-controls {{
+      display: flex;
+      gap: 8px;
+      justify-content: flex-end;
+      margin: 4px 0 8px;
+    }}
+    .table-group-controls button, .table-group-toggle {{
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: #ffffff;
+      color: var(--header);
+      cursor: pointer;
+      font: inherit;
+      font-size: 12px;
+      font-weight: 750;
+      padding: 5px 8px;
+    }}
+    .table-group-controls button:hover, .table-group-toggle:hover {{
+      background: var(--accent-soft);
+      color: var(--accent);
+    }}
+    .table-group-row td {{
+      text-align: left;
+      background: #f8fafc;
+      border-bottom: 1px solid var(--border);
+    }}
+    .table-group-cell {{
+      position: sticky;
+      left: 0;
+      z-index: 5;
+      min-width: 170px;
+      max-width: 260px;
+      box-shadow: 2px 0 0 var(--border);
+    }}
+    .table-group-fill {{
+      min-width: 0;
+    }}
+    .table-group-toggle {{
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+    }}
+    .table-group-toggle small {{
+      color: var(--muted);
+      font-weight: 650;
+    }}
+    .table-group-caret {{
+      display: inline-grid;
+      place-items: center;
+      width: 17px;
+      height: 17px;
+      border-radius: 4px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-weight: 900;
+    }}
+    tr.metric-row.is-collapsed {{ display: none; }}
     td.best {{ background: var(--best); color: #047857; font-weight: 650; }}
     td.worst {{ background: var(--worst); color: #b42318; }}
     td.metric-cell span, td.cell-best span, td.cell-worst span {{
@@ -1842,6 +2692,60 @@ def _render_html(results: Dict[str, Dict[str, List[dict]]], source: Path, output
       gap: 8px;
       margin-bottom: 10px;
     }}
+    .plot-controls {{
+      display: grid;
+      gap: 8px;
+      margin-bottom: 10px;
+    }}
+    .plot-control-row {{
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px 12px;
+    }}
+    .segmented {{
+      display: inline-flex;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      overflow: hidden;
+      background: #ffffff;
+    }}
+    .segmented button {{
+      border: 0;
+      border-right: 1px solid var(--border);
+      background: transparent;
+      color: var(--text);
+      cursor: pointer;
+      font: inherit;
+      font-size: 12px;
+      font-weight: 750;
+      padding: 5px 8px;
+    }}
+    .segmented button:last-child {{ border-right: 0; }}
+    .segmented button:hover, .segmented button.active {{
+      background: var(--accent-soft);
+      color: var(--accent);
+    }}
+    .plot-select {{
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 750;
+    }}
+    .plot-select select {{
+      max-width: 220px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: #ffffff;
+      color: var(--text);
+      font: inherit;
+      font-size: 12px;
+      font-weight: 650;
+      padding: 5px 7px;
+    }}
+    .is-hidden {{ display: none !important; }}
     .metric-tab {{
       border: 1px solid var(--border);
       border-radius: 6px;
@@ -1885,6 +2789,210 @@ def _render_html(results: Dict[str, Dict[str, List[dict]]], source: Path, output
     .chart-tooltip-title {{ fill: var(--text); font-size: 12px; font-weight: 750; }}
     .chart-tooltip-text {{ fill: var(--text); font-size: 12px; font-weight: 650; }}
     .chart-tooltip-muted {{ fill: var(--muted); font-size: 11px; }}
+    .heatmap-chart {{
+      display: grid;
+      gap: 14px;
+      min-width: 720px;
+    }}
+    .heat-axis-title {{
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }}
+    .heat-policy {{
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #ffffff;
+      padding: 10px;
+    }}
+    .heat-policy h3 {{
+      margin: 0 0 8px;
+      color: var(--header);
+    }}
+    .heat-facets {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 12px;
+    }}
+    .heat-facet h4 {{
+      margin: 0 0 6px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+    }}
+    .heat-body {{
+      display: grid;
+      grid-template-columns: 36px minmax(0, 1fr);
+      grid-template-rows: auto 22px;
+      gap: 4px;
+      align-items: stretch;
+    }}
+    .heat-y {{
+      display: grid;
+      gap: 4px;
+      color: var(--muted);
+      font-size: 11px;
+      text-align: right;
+    }}
+    .heat-y span {{
+      min-height: 34px;
+      line-height: 34px;
+    }}
+    .heat-grid {{
+      display: grid;
+      gap: 4px;
+    }}
+    .heat-x {{
+      grid-column: 2;
+      display: grid;
+      gap: 4px;
+      color: var(--muted);
+      font-size: 11px;
+      text-align: center;
+    }}
+    .heat-cell {{
+      min-height: 34px;
+      border: 1px solid #ffffff;
+      border-radius: 5px;
+      color: #1f2933;
+      cursor: pointer;
+      font: inherit;
+      font-size: 11px;
+      font-weight: 800;
+      padding: 3px;
+      text-align: center;
+    }}
+    .heat-cell span {{
+      display: inline-block;
+      padding: 1px 3px;
+      border-radius: 4px;
+      background: rgb(255 255 255 / 52%);
+    }}
+    .heat-cell:hover, .heat-cell.is-active {{
+      outline: 2px solid var(--accent);
+      outline-offset: -2px;
+    }}
+    .heat-empty {{
+      background: repeating-linear-gradient(45deg, #f2f4f7, #f2f4f7 5px, #ffffff 5px, #ffffff 10px);
+      cursor: default;
+    }}
+    .grouped-chart {{
+      display: grid;
+      gap: 14px;
+      min-width: 720px;
+    }}
+    .shared-legend {{
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: center;
+      gap: 8px 14px;
+      color: var(--text);
+      font-size: 12px;
+      font-weight: 750;
+    }}
+    .shared-legend span {{
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      max-width: 260px;
+    }}
+    .shared-legend i {{
+      display: inline-block;
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      box-shadow: 0 0 0 1px #ffffff, 0 0 0 2px var(--border);
+    }}
+    .grouped-panels {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 12px;
+    }}
+    .grouped-panel {{
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #ffffff;
+      padding: 10px;
+    }}
+    .grouped-panel h3 {{
+      margin: 0 0 6px;
+      color: var(--header);
+      font-size: 13px;
+    }}
+    .grouped-panel svg {{
+      display: block;
+      width: 100%;
+      min-width: 300px;
+      height: auto;
+    }}
+    .pose-summary {{
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #ffffff;
+      padding: 10px;
+      overflow-x: auto;
+    }}
+    .pose-summary-controls {{
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 8px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+    }}
+    .pose-agg-tab {{
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      background: #ffffff;
+      color: var(--text);
+      cursor: pointer;
+      font: inherit;
+      font-size: 11px;
+      font-weight: 800;
+      padding: 3px 7px;
+    }}
+    .pose-agg-tab.active, .pose-agg-tab:hover {{
+      background: var(--accent-soft);
+      color: var(--accent);
+    }}
+    .pose-summary-head, .pose-summary-row {{
+      display: grid;
+      grid-template-columns: 110px repeat(3, minmax(72px, 1fr));
+      gap: 5px;
+      align-items: center;
+      min-width: 390px;
+    }}
+    .pose-summary-head {{
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+      margin-bottom: 5px;
+      text-align: center;
+    }}
+    .pose-summary-row {{
+      margin-top: 5px;
+    }}
+    .pose-summary-row strong {{
+      color: var(--header);
+      font-size: 12px;
+    }}
+    .pose-summary-cell {{
+      border: 1px solid #ffffff;
+      border-radius: 5px;
+      color: #1f2933;
+      display: block;
+      font-size: 11px;
+      font-weight: 800;
+      min-height: 28px;
+      line-height: 28px;
+      text-align: center;
+    }}
+    .pose-summary-empty {{
+      background: #f2f4f7;
+      color: var(--muted);
+    }}
     footer {{ color: var(--muted); padding: 0 32px 30px; max-width: 1520px; margin: 0 auto; }}
     @media (prefers-reduced-motion: reduce) {{
       html {{ scroll-behavior: auto; }}

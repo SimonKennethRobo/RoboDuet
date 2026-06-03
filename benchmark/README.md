@@ -71,12 +71,17 @@ python -m benchmark.cli \
 conda run -n roboduet python -m benchmark.cli \
   --dog_only \
   --candidate_dir benchmark/candidates \
-  --headless \
-  --robot go2 \
-  --num_envs_per_policy 8 \
-  --num_eval_steps 100 \
-  --seed 1 \
-  --arm_intensity 1.0 \
+  --profile benchmark/profiles/dog_policy_standard.json \
+  --sim_device cuda:0
+```
+
+更慢但更完整的 velocity grid 可以使用：
+
+```bash
+conda run -n roboduet python -m benchmark.cli \
+  --dog_only \
+  --candidate_dir benchmark/candidates \
+  --profile benchmark/profiles/dog_policy_full.json \
   --sim_device cuda:0
 ```
 
@@ -146,6 +151,24 @@ benchmark/profiles/smoke.json
 
 smoke profile 刻意保持较小规模，用来快速验证 candidate 加载、核心 scenario 和 metric 输出是否正常。完整 benchmark 后续应放到 nightly/full profile 中。
 
+Dog-policy profiles:
+
+```text
+benchmark/profiles/dog_policy_standard.json
+benchmark/profiles/dog_policy_full.json
+```
+
+profile 会把 `benchmark_protocol` 记录为 `dog_only`，并在 `metadata.json` 中保存 scenario grid 和固定 command。当前 scenario：
+
+- A Velocity Grid：standard 为 `vx/vy/yaw = [-1, 0, 1]` 的 27 点 grid；full 为 `[-1, -0.5, 0, 0.5, 1]` 的 125 点 grid。固定 gait 为 `freq=4.0, stance_width=0.30, stance_length=0.35, footswing_height=0.06, gait_duration=0.5`，pose 为 0。
+- B Arm Disturbance Sweep：固定 `vx=1.0, vy=0.0, yaw=0.0`，扫描 `arm_intensity = [0, 0.25, 0.5, 0.75, 1.0]`，并记录 disturbance seed metadata。
+- C Body Pose Tracking：对 `stand/forward/lateral/turn` 四个 velocity group 分别扫描 pitch、roll、height delta，standard 共 56 点。
+- D Gait Command Tracking：固定 `vx=0.5`，分别扫描 gait frequency、stance width、stance length，standard 共 18 点。
+
+新增和强化的主要字段包括 `lin_vel_xy_rmse`、`fall_rate_height`、`cmd_stance_length`、`cmd_gait_duration` 和 `stance_length_rmse_m`。legacy/no-profile 结果仍可被 HTML report 打开，缺失字段会显示为 `-`。
+
+包含 stance-length / gait-duration 的 profile gait scenario 要求 runtime `dog_num_commands >= 11`，因为会使用 `stance_length` index 9 和 `gait_duration` index 10。不满足时 benchmark 会 fail fast，而不是静默跳过 gait 子项。`fall_rate_height` 表示由 height terminal 条件触发的 event rate，分母与 `fall_rate` 一样是该测试点累计 env step 数。
+
 Profile 中的 `seed` 是 benchmark 评估 seed，只用于控制评估时的随机采样和环境 reset。它独立于训练 seed，不要求和 candidate checkpoint 的训练 seed 一致。
 
 默认输出目录是：
@@ -197,12 +220,12 @@ python -m benchmark.reports.html \
 
 HTML report 当前包含：
 
-- summary cards: points、fall rate、vx/yaw RMSE、lin/yaw reward、base height、max torque 的 overall mean
+- summary cards: points、fall rate、xy/yaw RMSE、lin/yaw reward、base height、max torque 的 overall mean
 - summary metric-mean table: 按 scenario 汇总主要 metric 均值，overall mean 放在 candidate card 中
 - metadata panel: seed、profile、candidate path、ckpt id、env count、git/runtime 信息等
 - left navigation: Report sections 和历史 result 切换入口，包含 Summary、Metadata、各 scenario 和 Results
-- scenario detail tables: 展示每个测试点的关键指标，并对主要列加 heatmap。新增稳定性 RMS（pitch_deg_rms、roll_deg_rms）和步态追踪 RMSE（gait_freq_rmse_hz、footswing_height_rmse_m、stance_width_rmse_m）
-- interactive metric charts: 每个 scenario 内直接切换 metric，并基于 `results.json` 渲染 SVG 图表；x 轴使用短语义标签，完整测试点 label 保留在 hover tooltip 和下方表格中
+- scenario detail tables: 展示每个测试点的关键指标，并对主要列加 heatmap。新增稳定性 RMS（pitch_deg_rms、roll_deg_rms）、速度 XY RMSE、height fall rate 和步态追踪 RMSE（gait_freq_rmse_hz、stance_width_rmse_m、stance_length_rmse_m）
+- interactive metric charts: 每个 scenario 内直接切换 metric，并基于 `results.json` 渲染 SVG 图表；structured Velocity Grid 使用 `yaw` facet heatmap（x=`vx`, y=`vy`），Body Pose Tracking 使用 velocity-group pose summary heatmap 和 pitch/roll/height grouped sweeps，Gait Tracking 使用 gait frequency/stance width/stance length grouped sweeps；完整测试点 label 保留在 hover tooltip 和下方表格中
 
 JSON 结果中的未计算指标序列化为 `null`（不是 NaN），符合 RFC 8259 标准。
 
