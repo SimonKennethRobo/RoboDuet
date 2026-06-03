@@ -27,22 +27,26 @@ SCENARIO_META = {
     "vel_grid": (
         "A - Velocity Grid",
         [
+            ("xy_rmse", "lin_vel_xy_rmse"),
             ("vx_rmse", "lin_vel_x_rmse"),
+            ("vy_rmse", "lin_vel_y_rmse"),
             ("yaw_rmse", "ang_vel_yaw_rmse"),
             ("lin_rew", "tracking_lin_vel_reward"),
             ("yaw_rew", "tracking_ang_vel_reward"),
             ("h_m", "base_height_mean"),
-            ("fall_pct", "fall_rate"),
+            ("fall_h_pct", "fall_rate_height"),
         ],
     ),
     "arm_sweep": (
         "B - Arm-Disturbance Sweep",
         [
+            ("xy_rmse", "lin_vel_xy_rmse"),
             ("vx_rmse", "lin_vel_x_rmse"),
+            ("vy_rmse", "lin_vel_y_rmse"),
             ("yaw_rmse", "ang_vel_yaw_rmse"),
             ("lin_rew", "tracking_lin_vel_reward"),
             ("yaw_rew", "tracking_ang_vel_reward"),
-            ("fall_pct", "fall_rate"),
+            ("fall_h_pct", "fall_rate_height"),
         ],
     ),
     "body_pose": (
@@ -52,7 +56,8 @@ SCENARIO_META = {
             ("roll_deg_rmse", "roll_rmse_deg"),
             ("orient_ctl", "orientation_control_rmse"),
             ("height_m_rmse", "height_rmse_m"),
-            ("fall_pct", "fall_rate"),
+            ("xy_rmse", "lin_vel_xy_rmse"),
+            ("fall_h_pct", "fall_rate_height"),
         ],
     ),
     "gait": (
@@ -60,9 +65,10 @@ SCENARIO_META = {
         [
             ("contact_f", "gait_contact_force_cost"),
             ("contact_v", "gait_contact_vel_cost"),
+            ("stance_l_m", "stance_length_rmse_m"),
             ("clearance_m", "foot_clearance_rmse_m"),
             ("raibert_m", "raibert_rmse_m"),
-            ("fall_pct", "fall_rate"),
+            ("fall_h_pct", "fall_rate_height"),
         ],
     ),
 }
@@ -78,6 +84,8 @@ class CommandLayout(NamedTuple):
     has_body_roll: bool
     has_body_height: bool
     has_dynamic_gait: bool
+    has_stance_length: bool
+    has_gait_duration: bool
     base_height_target: float
 
 
@@ -90,6 +98,8 @@ def detect_command_layout(cfg) -> CommandLayout:
         has_body_roll=n >= 5,
         has_body_height=n >= 6,
         has_dynamic_gait=n >= 9,
+        has_stance_length=n >= 10,
+        has_gait_duration=n >= 11,
         base_height_target=bh,
     )
 
@@ -232,11 +242,18 @@ class ScenarioResult:
     cmd_gait_freq: float = 0.0
     cmd_footswing_height: float = 0.0
     cmd_stance_width: float = 0.0
+    cmd_stance_length: float = 0.0
+    cmd_gait_duration: float = 0.0
     arm_intensity: float = 0.0
+    disturbance_seed: Optional[int] = None
+    velocity_group: Optional[str] = None
+    pose_axis: Optional[str] = None
+    sweep_axis: Optional[str] = None
     n_env_steps: int = 0
     n_falls: int = 0
     lin_vel_x_rmse: Optional[float] = None
     lin_vel_y_rmse: Optional[float] = None
+    lin_vel_xy_rmse: Optional[float] = None
     ang_vel_yaw_rmse: Optional[float] = None
     pitch_rmse_deg: Optional[float] = None
     roll_rmse_deg: Optional[float] = None
@@ -244,6 +261,7 @@ class ScenarioResult:
     gait_freq_rmse_hz: Optional[float] = None
     footswing_height_rmse_m: Optional[float] = None
     stance_width_rmse_m: Optional[float] = None
+    stance_length_rmse_m: Optional[float] = None
     tracking_lin_vel_reward: Optional[float] = None
     tracking_ang_vel_reward: Optional[float] = None
     orientation_control_rmse: Optional[float] = None
@@ -252,6 +270,7 @@ class ScenarioResult:
     foot_clearance_rmse_m: Optional[float] = None
     raibert_rmse_m: Optional[float] = None
     fall_rate: float = 0.0
+    fall_rate_height: float = 0.0
     base_height_mean: float = 0.0
     base_height_std: float = 0.0
     roll_deg_rms: Optional[float] = None
@@ -375,6 +394,10 @@ def _cfg_value(cfg_dict: dict, path: str):
     if value is not None:
         return value
     return _nested_get_attr(ROBODUET_DEFAULTS, path)
+
+
+def read_dog_num_commands(logdir: str) -> int:
+    return int(_cfg_value(_read_cfg_dict(logdir), "dog.dog_num_commands"))
 
 
 def validate_shared_env_compatibility(base_logdir: str, candidate_logdirs: List[str]):
@@ -529,6 +552,8 @@ def set_gait_cmd(
     gait_freq: Optional[float] = None,
     footswing_height: Optional[float] = None,
     stance_width: Optional[float] = None,
+    stance_length: Optional[float] = None,
+    gait_duration: Optional[float] = None,
 ):
     if gait_freq is not None:
         _set_cmd(env, 6, gait_freq)
@@ -536,6 +561,10 @@ def set_gait_cmd(
         _set_cmd(env, 7, footswing_height)
     if stance_width is not None:
         _set_cmd(env, 8, stance_width)
+    if stance_length is not None:
+        _set_cmd(env, 9, stance_length)
+    if gait_duration is not None:
+        _set_cmd(env, 10, gait_duration)
 
 
 # ---------------------------------------------------------------------------
@@ -650,10 +679,10 @@ def _gait_training_costs(env: HistoryWrapper) -> Dict[str, torch.Tensor]:
 
 
 def _contact_transition_mask(env: HistoryWrapper, prev_contact: torch.Tensor, env_slice: slice) -> torch.Tensor:
-    """Per-env count of contact-state transitions (any leg) this step."""
+    """Per-env count of leg contact-state transitions this step."""
     b = env.env
     curr = (b.contact_forces[env_slice, b.feet_indices, 2] > 1.0)
-    changed = (curr != prev_contact).any(dim=1)
+    changed = (curr != prev_contact).sum(dim=1)
     prev_contact[:] = curr
     return changed.float()
 
@@ -685,6 +714,22 @@ def _actual_stance_width(env: HistoryWrapper) -> torch.Tensor:
     return y_max - y_min
 
 
+def _actual_stance_length(env: HistoryWrapper) -> torch.Tensor:
+    """Stance length from foot X-spread in yaw-only body frame."""
+    b = env.env
+    foot_pos = b.foot_positions
+    base_pos = b.root_states[:, :3]
+    base_quat = b.base_quat
+    rel = foot_pos - base_pos.unsqueeze(1)
+    rel_body = torch.stack([
+        quat_apply_yaw(quat_conjugate(base_quat), rel[:, i, :])
+        for i in range(4)
+    ], dim=1)
+    x_max = rel_body[:, :, 0].max(dim=1).values
+    x_min = rel_body[:, :, 0].min(dim=1).values
+    return x_max - x_min
+
+
 # ---------------------------------------------------------------------------
 # Core parallel eval loop
 # ---------------------------------------------------------------------------
@@ -714,7 +759,8 @@ def _eval_loop_parallel(
     n_per = handles[0].n_envs
 
     accs = [Accumulator(n_per, device=gpu) for _ in handles]
-    prev_contact = torch.zeros(base.num_envs, 4, dtype=torch.bool, device=gpu)
+    prev_contact = (base.contact_forces[:, base.feet_indices, 2] > 1.0).clone()
+    contact_transition_counts = torch.zeros(base.num_envs, device=gpu)
     R2D = 180.0 / math.pi
 
     for _ in range(n_steps):
@@ -749,6 +795,7 @@ def _eval_loop_parallel(
             gait_costs = _gait_training_costs(env)
             swing_height = _actual_swing_height(env)
             stance_width = _actual_stance_width(env)
+            stance_length = _actual_stance_length(env)
 
         # --- per-policy group accumulation ---
         for h, acc in zip(handles, accs):
@@ -763,6 +810,7 @@ def _eval_loop_parallel(
             acc.add_sq_err("vy", vel_g[:, 1], cmd_g[:, 1])
             acc.add_sq_err("yaw", ang_g[:, 2], cmd_g[:, 2])
             lin_vel_err = torch.sum(torch.square(cmd_g[:, :2] - vel_g[:, :2]), dim=1)
+            acc.add_sq("lin_vel_xy", lin_vel_err)
             yaw_err = torch.square(cmd_g[:, 2] - ang_g[:, 2])
             acc.add_val("tracking_lin_vel_reward", torch.exp(-lin_vel_err / base.cfg.rewards.tracking_sigma))
             acc.add_val("tracking_ang_vel_reward", torch.exp(-yaw_err / base.cfg.rewards.tracking_sigma_yaw))
@@ -779,8 +827,7 @@ def _eval_loop_parallel(
                 freq_cmd_g = cmd_g[:, 6]
                 env_slice = slice(s, e)
                 transitions = _contact_transition_mask(env, prev_contact[env_slice], env_slice)
-                actual_freq = transitions / (2.0 * base.dt)
-                acc.add_sq_err("gait_freq", actual_freq, freq_cmd_g)
+                contact_transition_counts[s:e].add_(transitions)
 
                 sw_cmd_g = cmd_g[:, 7]
                 sw_act_g = swing_height[s:e]
@@ -789,6 +836,11 @@ def _eval_loop_parallel(
                 sw_width_cmd_g = cmd_g[:, 8]
                 sw_width_act_g = stance_width[s:e]
                 acc.add_sq_err("stance_w", sw_width_act_g, sw_width_cmd_g)
+
+                if layout.has_stance_length and cmd_g.shape[1] > 9:
+                    st_len_cmd_g = cmd_g[:, 9]
+                    st_len_act_g = stance_length[s:e]
+                    acc.add_sq_err("stance_l", st_len_act_g, st_len_cmd_g)
 
                 acc.add_val("gait_contact_force_cost", gait_costs["contact_force_cost"][s:e])
                 acc.add_val("gait_contact_vel_cost", gait_costs["contact_vel_cost"][s:e])
@@ -803,8 +855,22 @@ def _eval_loop_parallel(
             dog_t = torques[s:e, :12] if torques.shape[1] >= 12 else torques[s:e]
             acc.add_val("max_torque", dog_t.abs().max(dim=1).values)
             acc.add_count("fell", (reset_b[s:e] & ~timeout[s:e]).float())
+            if hasattr(base, "body_height_buf"):
+                height_terminal = base.body_height_buf[s:e]
+            else:
+                terminal_h = float(getattr(base.cfg.rewards, "terminal_body_height", 0.17))
+                height_terminal = reset_b[s:e] & (h_g < terminal_h)
+            acc.add_count("fell_height", (height_terminal & ~timeout[s:e]).float())
 
             acc.tick()
+
+    if layout.has_dynamic_gait:
+        elapsed = max(float(n_steps) * float(base.dt), 1e-6)
+        for h, acc in zip(handles, accs):
+            s, e = h.env_start, h.env_end
+            cmd_g = base.commands_dog[s:e]
+            actual_freq = contact_transition_counts[s:e] / (8.0 * elapsed)
+            acc.add_sq("gait_freq", torch.square(actual_freq - cmd_g[:, 6]) * acc.steps.clamp(min=1))
 
     return accs
 
@@ -831,8 +897,10 @@ def _acc_to_result(
         n_env_steps=total_steps,
         n_falls=acc.total_count("fell"),
         fall_rate=acc.total_count("fell") / max(1, total_steps),
+        fall_rate_height=acc.total_count("fell_height") / max(1, total_steps),
         lin_vel_x_rmse=acc.rmse("vx"),
         lin_vel_y_rmse=acc.rmse("vy"),
+        lin_vel_xy_rmse=acc.rmse("lin_vel_xy"),
         ang_vel_yaw_rmse=acc.rmse("yaw"),
         tracking_lin_vel_reward=acc.mean("tracking_lin_vel_reward"),
         tracking_ang_vel_reward=acc.mean("tracking_ang_vel_reward"),
@@ -855,6 +923,8 @@ def _acc_to_result(
         r.gait_freq_rmse_hz = acc.rmse("gait_freq")
         r.footswing_height_rmse_m = acc.rmse("swing_h")
         r.stance_width_rmse_m = acc.rmse("stance_w")
+        if layout.has_stance_length:
+            r.stance_length_rmse_m = acc.rmse("stance_l")
         r.gait_contact_force_cost = acc.mean("gait_contact_force_cost")
         r.gait_contact_vel_cost = acc.mean("gait_contact_vel_cost")
         r.foot_clearance_rmse_m = acc.rmse("foot_clearance")
@@ -870,7 +940,9 @@ def _acc_to_result(
 # ---------------------------------------------------------------------------
 
 
-def _fmt(v: float, fmt: str = ".4f") -> str:
+def _fmt(v: Optional[float], fmt: str = ".4f") -> str:
+    if v is None:
+        return "—"
     return "—" if math.isnan(v) else f"{v:{fmt}}"
 
 
@@ -887,9 +959,11 @@ def _format_metric_value(result: Optional[ScenarioResult], attr: str) -> str:
     if result is None:
         return "—"
     value = getattr(result, attr)
+    if value is None:
+        return "—"
     if math.isnan(value):
         return "—"
-    if attr == "fall_rate":
+    if attr in ("fall_rate", "fall_rate_height"):
         return f"{value * 100:.1f}%"
     return f"{value:.4f}"
 
@@ -924,7 +998,7 @@ def print_comparison_table(all_results: Dict[str, Dict[str, List[ScenarioResult]
                 for _, attr in cols:
                     if res is None:
                         row += f"  {'—':<{col_w}}"
-                    elif attr == "fall_rate":
+                    elif attr in ("fall_rate", "fall_rate_height"):
                         v = getattr(res, attr)
                         row += f"  {v * 100:>{col_w - 2}.1f}%  "
                     else:
