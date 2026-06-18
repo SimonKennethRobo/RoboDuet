@@ -4,13 +4,13 @@ This module is the source of truth for RoboDuet-specific defaults. The
 `legged_robot_config.py` module only provides the base Cfg schema.
 """
 
-import math
 from dataclasses import dataclass, field
+import math
 
 from params_proto import PrefixProto
 
 from go1_gym.envs.go1.go1_config import config_robot
-from go1_gym.envs.go1.wtw_config import config_wtw
+from go1_gym.envs.roboduet.wtw_config import config_wtw
 
 from .asset_config import config_asset
 from .legged_robot_config import LeggedRobotCfg
@@ -38,8 +38,8 @@ class HybridRewardScaleConfig:
     orientation_control: float = -10.0
     hip_action_l2: float = -0.05
     raibert_heuristic: float = -0.0
-    arm_dogcommand_smoothness_1: float = -0.1
-    arm_control_limits: float = -0.0001
+    arm_control_smoothness_1: float = -0.1
+    arm_control_limits: float = -5.0
     traj_track: float = 0.0
     trajectory_current_tracking: float = 0.0
     trajectory_completion_time: float = 0.0
@@ -73,12 +73,11 @@ class ArmCommandConfig:
 @dataclass(frozen=True)
 class ArmTrajectoryConfig:
     enabled: bool = False
-    # traj_type: list = field(default_factory=lambda: ["line", "s_curve", "point"])
-    traj_type: list = field(default_factory=lambda: ["point"])
+    traj_type: list = field(default_factory=lambda: ["line", "s_curve"])
     window_offsets: tuple = (0, 1, 2, 4, 8, 16, 32, 64)
     num_waypoints: int = 96
     start_radius: float = 0.0
-    length_range: tuple = (0.05, 1.0)
+    length_range: tuple = (0.10, 0.45)
     s_curve_amplitude_range: tuple = (0.02, 0.12)
     s_curve_frequency: float = 1.0
     circle_radius: float = 0.5
@@ -95,16 +94,7 @@ class ArmTrajectoryConfig:
     user_ang_vel_yaw: tuple = (-0.4, 0.4)
     pos_error_scale: float = 4.0
     rot_error_scale: float = 1.0
-    completion_time_sigma: float = 1
-    dog_command_smoothing_alpha: float = 0.2
-    dog_command_smoothness_weight_delta_vel: float = 1.0
-    dog_command_smoothness_weight_body_pose: float = 1.0
-    dog_command_smoothness_weight_gait: float = 2.0
-    stage2_base_unlock_curriculum: bool = True
-    stage2_base_unlock_success_threshold: float = 0.9
-    stage2_base_unlock_success_ema_alpha: float = 0.05
-    stage2_base_unlock_ramp_iterations: int = 1000
-    stage2_base_unlock_force_point_until_unlocked: bool = True
+    completion_time_sigma: float = 0.35
 
 
 @dataclass(frozen=True)
@@ -195,6 +185,11 @@ class ControlConfig:
 
 
 @dataclass(frozen=True)
+class TerrainConfig:
+    mesh_type: str = "plane"
+
+
+@dataclass(frozen=True)
 class ArmDomainRandConfig:
     """Per-stage arm domain randomization (applied every episode reset)."""
 
@@ -257,11 +252,11 @@ class HybridRewardScaleOverrideConfig:
     tracking_lin_vel_multiplier: float = 0.7
     tracking_ang_vel_multiplier: float = 0.5
     arm_energy: float = -0.00004
-    arm_dof_vel_multiplier: float = 0.01
-    arm_dof_acc_multiplier: float = 0.01
-    arm_action_rate_multiplier: float = 0.001
-    arm_action_smoothness_1_multiplier: float = 0.001
-    arm_action_smoothness_2_multiplier: float = 0.001
+    arm_dof_vel_multiplier: float = 10.0
+    arm_dof_acc_multiplier: float = 10.0
+    arm_action_rate_multiplier: float = 10.0
+    arm_action_smoothness_1_multiplier: float = 5.0
+    arm_action_smoothness_2_multiplier: float = 5.0
 
 
 @dataclass(frozen=True)
@@ -270,7 +265,7 @@ class Stage1ArmDisturbanceConfig:
     saturation_fraction: float = 0.8
     accel_resample_time_s: float = 0.01  # 100 Hz, larger than actual ctrl freq
     zero_accel_probability: float = 0.3
-    zero_vel_probability: float = 0.005
+    zero_vel_probability: float = 0.1
     max_accel: float = 10.0
     max_vel: float = 5.0
     max_offset: float = 999
@@ -280,7 +275,7 @@ class Stage1ArmDisturbanceConfig:
 @dataclass(frozen=True)
 class DynaGaitFeatureConfig:
     num_gait_dims: int = 5
-    plan_action_dims: int = 6
+    plan_action_dims: int = 7
     num_bins_gait_frequency: int = 11
     num_bins_footswing_height: int = 5
     num_bins_gait_duration: int = 3
@@ -338,7 +333,7 @@ class RoboDuetDefaults:
     env: EnvConfig = EnvConfig()
     commands: CommandConfig = CommandConfig()
     control: ControlConfig = ControlConfig()
-
+    terrain: TerrainConfig = TerrainConfig()
     domain_rand: DomainRandConfig = DomainRandConfig()
     rewards: RewardConfig = RewardConfig()
     reward_scales: BaseRewardScaleConfig = BaseRewardScaleConfig()
@@ -431,7 +426,7 @@ class RoboDuetCfg(LeggedRobotCfg):
             orientation_control = ROBODUET_DEFAULTS.hybrid.reward_scales.orientation_control
             hip_action_l2 = ROBODUET_DEFAULTS.hybrid.reward_scales.hip_action_l2
             raibert_heuristic = ROBODUET_DEFAULTS.hybrid.reward_scales.raibert_heuristic
-            arm_dogcommand_smoothness_1 = ROBODUET_DEFAULTS.hybrid.reward_scales.arm_dogcommand_smoothness_1
+            arm_control_smoothness_1 = ROBODUET_DEFAULTS.hybrid.reward_scales.arm_control_smoothness_1
             arm_control_limits = ROBODUET_DEFAULTS.hybrid.reward_scales.arm_control_limits
             traj_track = ROBODUET_DEFAULTS.hybrid.reward_scales.traj_track
             trajectory_current_tracking = ROBODUET_DEFAULTS.hybrid.reward_scales.trajectory_current_tracking
@@ -482,21 +477,6 @@ class RoboDuetCfg(LeggedRobotCfg):
             pos_error_scale = ROBODUET_DEFAULTS.arm.trajectory.pos_error_scale
             rot_error_scale = ROBODUET_DEFAULTS.arm.trajectory.rot_error_scale
             completion_time_sigma = ROBODUET_DEFAULTS.arm.trajectory.completion_time_sigma
-            dog_command_smoothing_alpha = ROBODUET_DEFAULTS.arm.trajectory.dog_command_smoothing_alpha
-            dog_command_smoothness_weight_delta_vel = (
-                ROBODUET_DEFAULTS.arm.trajectory.dog_command_smoothness_weight_delta_vel
-            )
-            dog_command_smoothness_weight_body_pose = (
-                ROBODUET_DEFAULTS.arm.trajectory.dog_command_smoothness_weight_body_pose
-            )
-            dog_command_smoothness_weight_gait = ROBODUET_DEFAULTS.arm.trajectory.dog_command_smoothness_weight_gait
-            stage2_base_unlock_curriculum = ROBODUET_DEFAULTS.arm.trajectory.stage2_base_unlock_curriculum
-            stage2_base_unlock_success_threshold = ROBODUET_DEFAULTS.arm.trajectory.stage2_base_unlock_success_threshold
-            stage2_base_unlock_success_ema_alpha = ROBODUET_DEFAULTS.arm.trajectory.stage2_base_unlock_success_ema_alpha
-            stage2_base_unlock_ramp_iterations = ROBODUET_DEFAULTS.arm.trajectory.stage2_base_unlock_ramp_iterations
-            stage2_base_unlock_force_point_until_unlocked = (
-                ROBODUET_DEFAULTS.arm.trajectory.stage2_base_unlock_force_point_until_unlocked
-            )
             curriculum_levels = ROBODUET_DEFAULTS.arm.trajectory.curriculum_levels
             curriculum_success_threshold = ROBODUET_DEFAULTS.arm.trajectory.curriculum_success_threshold
 
@@ -644,8 +624,9 @@ def materialize_base_cfg(cfg, defaults, options):
     cfg.normalization.Kd_factor_range = [0.2, 2.0]
     cfg.normalization.dof_damping_range = [0.0, 10.0]
 
-    cfg.terrain.teleport_robots = False
-    cfg.terrain.reset_curriculum = True
+    cfg.terrain.mesh_type = defaults.terrain.mesh_type
+    if cfg.terrain.mesh_type == "plane":
+        cfg.terrain.teleport_robots = False
 
     cfg.asset.render_sphere = defaults.asset.render_sphere
 
@@ -697,12 +678,12 @@ def env_obs_dim_parts(cfg):
     if cfg.arm.trajectory.enabled:
         parts.update(
             {
-                "arm_dof_vel": cfg.arm.num_actions_arm,
                 "base_height": 1,
+                "foot_contact_states": 4,
                 "ee_pose_body": 9,
                 "ee_twist_body": 6,
                 "trajectory_window": len(cfg.arm.trajectory.window_offsets) * 9,
-                "trajectory_progress_index": 1,
+                "trajectory_remaining_time": 1,
             }
         )
     return parts
@@ -712,31 +693,27 @@ def arm_obs_dim_parts(cfg):
     if cfg.arm.trajectory.enabled:
         parts = {
             "arm_dof_pos": cfg.arm.num_actions_arm,
-            "arm_dof_vel": cfg.arm.num_actions_arm,
-            "arm_actions": cfg.arm.num_actions_arm_cd,
+            "arm_actions": cfg.arm.num_actions_arm,
             "base_height": 1,
+            "foot_contact_states": 4,
             "base_ang_vel": 3,
             "dog_velocity_commands": 3,
-            "trajectory_completion_time_command": 1,
             "ee_pose_body": 9,
             "ee_twist_body": 6,
             "trajectory_window": len(cfg.arm.trajectory.window_offsets) * 9,
-            "trajectory_progress_index": 1,
+            "trajectory_remaining_time": 1,
         }
         if cfg.commands.use_dynamic_gait:
-            parts["dog_body_pose_commands"] = 3
             parts["dynamic_gait_commands"] = cfg.dog.dog_num_commands - 6
         return parts
 
     parts = {
         "arm_dof_pos": cfg.arm.num_actions_arm,
-        "arm_dof_vel": cfg.arm.num_actions_arm,
-        "arm_actions": cfg.arm.num_actions_arm_cd,
+        "arm_actions": cfg.arm.num_actions_arm,
         "arm_commands": cfg.arm.arm_num_commands,
         "base_roll_pitch": 2,
     }
     if cfg.commands.use_dynamic_gait:
-        parts["dog_body_pose_commands"] = 3
         parts["dynamic_gait_commands"] = cfg.dog.dog_num_commands - 6
     if cfg.env.observe_two_prev_actions:
         parts["two_prev_actions"] = cfg.env.num_actions
@@ -776,7 +753,7 @@ def dog_obs_dim_parts(cfg):
     return parts
 
 
-def privileged_obs_dim_parts(cfg, dof_dim, policy=None):
+def privileged_obs_dim_parts(cfg, dof_dim):
     parts = {}
     if cfg.env.priv_observe_friction:
         parts["friction"] = 1
@@ -814,18 +791,14 @@ def privileged_obs_dim_parts(cfg, dof_dim, policy=None):
         parts["high_freq_goal"] = 6
     if getattr(cfg.env, "priv_observe_arm_mount_tf", False):
         parts["arm_mount_tf"] = 6
-    if policy == "dog":
-        parts["arm_dof_pos"] = cfg.arm.num_actions_arm
-        parts["arm_dof_vel"] = cfg.arm.num_actions_arm
 
     return parts
 
 
 def configure_privileged_obs_dims(cfg):
-    dog_parts = privileged_obs_dim_parts(cfg, cfg.dog.num_actions_loco, policy="dog")
-    arm_parts = privileged_obs_dim_parts(cfg, ROBODUET_DEFAULTS.arm.num_actions_arm_cd, policy="arm")
+    dog_parts = privileged_obs_dim_parts(cfg, cfg.dog.num_actions_loco)
+    arm_parts = privileged_obs_dim_parts(cfg, ROBODUET_DEFAULTS.arm.num_actions_arm_cd)
     if cfg.arm.trajectory.enabled:
-        arm_parts["foot_contact_states"] = 4
         arm_parts["full_trajectory"] = cfg.arm.trajectory.num_waypoints * 9
 
     dog_dim = sum_dim_parts(dog_parts)
@@ -916,7 +889,7 @@ def validate_roboduet_cfg(cfg):
         raise ValueError("RoboDuet config has unset required fields: {}".format(", ".join(missing)))
 
 
-def configure_task_from_args(cfg, args, traj_track_reward_scale=5.0, debug=False):
+def configure_task_from_args(cfg, args, traj_track_reward_scale=5.0):
     defaults = ROBODUET_DEFAULTS
     options = RoboDuetRuntimeOptions.from_args(args)
 
@@ -943,6 +916,3 @@ def configure_task_from_args(cfg, args, traj_track_reward_scale=5.0, debug=False
     configure_privileged_obs_dims(cfg)
     configure_robot_asset(cfg, defaults, options.robot)
     validate_roboduet_cfg(cfg)
-
-    if debug:
-        cfg.domain_rand.randomize_mount_pos = False

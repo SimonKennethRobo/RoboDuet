@@ -1,0 +1,20 @@
+# Ignore copied run artifacts by default.
+*
+
+# Keep directory traversal and this allowlist.
+!*/
+!.gitignore
+
+# Keep minimal run metadata needed to rebuild benchmark env/config.
+!*/parameters.pkl
+!*/params.txt
+!*/README.md
+!*/candidate.json
+
+# Keep selected dog checkpoints.
+!*/checkpoints_dog/
+!*/checkpoints_dog/ac_weights_*_dog.pt
+
+# Keep selected arm checkpoints for future arm-only/hybrid benchmarks.
+!*/checkpoints_arm/
+!*/checkpoints_arm/ac_weights_*_arm.pt

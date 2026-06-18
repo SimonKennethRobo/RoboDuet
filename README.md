@@ -17,6 +17,14 @@ This repo is an official PyTorch implementation of our paper *`<b>`"RoboDuet: Le
 
 ## Installation
 
+For a new workstation or GPU node, the interactive setup helper can detect and install the common RoboDuet components:
+
+```bash
+bash scripts/setup/setup.sh --interactive
+```
+
+See [scripts/setup/README.md](scripts/setup/README.md) for non-interactive usage, IsaacGym archive options, and environment verification.
+
 ### Conda Environment
 
 ```bash

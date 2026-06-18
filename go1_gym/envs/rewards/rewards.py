@@ -29,7 +29,7 @@ class Rewards:
         plan_actions_raw = getattr(self.env, "plan_actions_raw", self.env.plan_actions)
         return torch.sum(torch.square((torch.abs(plan_actions_raw) - 1.0).clip(min=0.0)), dim=1)
 
-    def _reward_arm_control_smoothness_1(self):
+    def _reward_arm_dogcommand_smoothness_1(self):
         # Penalize changes in actions
         diff = torch.square(self.env.plan_actions - self.env.last_plan_actions)
         diff = diff * (self.env.last_plan_actions != 0)  # ignore first step
@@ -45,7 +45,7 @@ class Rewards:
             reward += self.env.cfg.arm.trajectory.dog_command_smoothness_weight_gait * torch.sum(diff[:, 6:], dim=1)
         return reward
 
-    def _reward_arm_control_smoothness_2(self):
+    def _reward_arm_dogcommand_smoothness_2(self):
         # Penalize changes in actions
         diff = torch.square(self.env.joint_pos_target[:, :self.env.num_actuated_dof] - 2 * self.env.last_joint_pos_target[:, :self.env.num_actuated_dof] + self.env.last_last_joint_pos_target[:, :self.env.num_actuated_dof])
         diff = diff * (self.env.last_actions[:, :self.env.num_dof] != 0)  # ignore first step
