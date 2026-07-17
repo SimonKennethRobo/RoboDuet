@@ -25,6 +25,95 @@ from go1_gym_learn.ppo_cse_automatic.ppo import PPO_Args
 os.environ["WANDB_SILENT"] = "true"
 
 
+_DOG_COMMAND_LIMIT_FIELDS = (
+    "limit_vel_x",
+    "limit_vel_y",
+    "limit_vel_yaw",
+    "limit_body_pitch",
+    "limit_body_roll",
+    "limit_body_height",
+    "limit_gait_frequency",
+    "limit_footswing_height",
+    "limit_stance_width",
+    "limit_stance_length",
+    "limit_gait_duration",
+)
+
+
+def _logdir_from_dog_ckpt_path(ckpt_path):
+    if ckpt_path is None:
+        return None
+    ckpt_path = osp.abspath(ckpt_path)
+    parent = osp.basename(osp.dirname(ckpt_path))
+    if parent == "checkpoints_dog":
+        return osp.dirname(osp.dirname(ckpt_path))
+    if osp.isdir(ckpt_path):
+        return ckpt_path
+    return osp.dirname(ckpt_path)
+
+
+def apply_dog_checkpoint_command_limits(cfg, ckpt_path):
+    logdir = _logdir_from_dog_ckpt_path(ckpt_path)
+    if logdir is None:
+        return
+    params_path = osp.join(logdir, "parameters.pkl")
+    if not osp.exists(params_path):
+        print(f"[warn] dog parameters.pkl not found at {params_path}; using current command limits.", flush=True)
+        return
+    with open(params_path, "rb") as f:
+        params = pickle.load(f)
+    dog_cfg = params.get("Cfg") if isinstance(params, dict) else None
+    dog_commands = getattr(dog_cfg, "commands", None)
+    if dog_commands is None:
+        print(f"[warn] dog parameters.pkl has no Cfg.commands; using current command limits.", flush=True)
+        return
+    copied = []
+    print(f"Loaded dog policy parameters from {params_path}", flush=True)
+    print("Dog command limits applied to stage2:", flush=True)
+    for name in _DOG_COMMAND_LIMIT_FIELDS:
+        if hasattr(dog_commands, name):
+            value = getattr(dog_commands, name)
+            value = list(value) if isinstance(value, tuple) else value
+            setattr(cfg.commands, name, value)
+            copied.append(name)
+            print(f"  {name}: {value}", flush=True)
+    if not copied:
+        print("  [warn] no dog command limit fields were found; using current command limits.", flush=True)
+
+
+def _serializable_config_value(value):
+    if isinstance(value, tuple):
+        return [_serializable_config_value(item) for item in value]
+    if isinstance(value, list):
+        return [_serializable_config_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _serializable_config_value(item) for key, item in value.items()}
+    return value
+
+
+def _public_config_dict(obj):
+    if isinstance(obj, dict):
+        items = obj.items()
+    else:
+        items = ((key, getattr(obj, key)) for key in dir(obj) if not key.startswith("_"))
+    result = {}
+    for key, value in items:
+        if callable(value):
+            continue
+        result[key] = _serializable_config_value(value)
+    return result
+
+
+def _cfg_snapshot_with_command_limits(cfg):
+    snapshot = dict(vars(cfg))
+    commands = _public_config_dict(getattr(cfg, "commands"))
+    for key in dir(cfg.commands):
+        if key.startswith("limit_"):
+            commands[key] = _serializable_config_value(getattr(cfg.commands, key))
+    snapshot["commands"] = commands
+    return snapshot
+
+
 def configure_train_stage(args):
     schedule = StageSchedule(
         args.train_stage,
@@ -66,10 +155,25 @@ def main(args):
     RunnerArgs.num_steps_per_env = args.num_steps_per_env
     PPO_Args.num_mini_batches = args.num_mini_batches
 
-    DogRunnerArgs.resume = args.resume
-    DogRunnerArgs.resume_path = "your_dog_ckpt_path"
-    ArmRunnerArgs.resume = args.resume
-    ArmRunnerArgs.resume_path = "your_arm_ckpt_path"
+    stage2_freeze_loco_policy = not args.stage2_unfreeze_loco_policy
+    DogRunnerArgs.ckpt_path = args.stage1_ckpt_path
+    if args.train_stage != "stage1" and DogRunnerArgs.ckpt_path is None and stage2_freeze_loco_policy:
+        if stage2_freeze_loco_policy:
+            print(
+                "[warn] --stage2_freeze_loco_policy requires --stage1_ckpt_path for stage2 training; "
+                "forcing --stage2_unfreeze_loco_policy.",
+                flush=True,
+            )
+        stage2_freeze_loco_policy = False
+    apply_dog_checkpoint_command_limits(Cfg, DogRunnerArgs.ckpt_path)
+    DogRunnerArgs.stage2_freeze_loco_policy = stage2_freeze_loco_policy
+    DogRunnerArgs.stage2_loco_learning_rate = args.stage2_loco_learning_rate
+    ArmRunnerArgs.ckpt_path = args.stage2_ckpt_path
+    print("-" * 20 + " Configured Train Stage " + "-" * 20)
+    print(f"DogRunnerArgs: {vars(DogRunnerArgs)}")
+    print("-" * 10)
+    print(f"ArmRunnerArgs: {vars(ArmRunnerArgs)}")
+    print("-" * 50)
 
     configure_train_stage(args)
 
@@ -147,7 +251,7 @@ def main(args):
         wandb.run.log_code(f"{args.log_dir}/scripts")
 
         temp_dict = {
-            "Cfg": vars(Cfg),
+            "Cfg": _cfg_snapshot_with_command_limits(Cfg),
             "RunnerArgs": vars(RunnerArgs),
             "ArmAC_Args": vars(ArmAC_Args),
             "DogAC_Args": vars(DogAC_Args),
@@ -197,7 +301,7 @@ if __name__ == "__main__":
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--offline", action="store_true")
     parser.add_argument("--no_wandb", action="store_true")
-    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--resume", action="store_true")  # for two_stage
     parser.add_argument("--tags", nargs="+", default=[])
     parser.add_argument("--notes", type=str, default=None)
     parser.add_argument("--seed", type=int, default=-1)
@@ -209,6 +313,12 @@ if __name__ == "__main__":
     parser.add_argument("--num_mini_batches", type=int, default=PPO_Args.num_mini_batches)
 
     parser.add_argument("--train_stage", type=str, default="two_stage", choices=["stage1", "stage2", "two_stage"])
+    stage2_loco_group = parser.add_mutually_exclusive_group()
+    stage2_loco_group.add_argument("--stage2_unfreeze_loco_policy", action="store_true", default=False)
+    parser.add_argument("--stage2_loco_learning_rate", type=float, default=None)
+    parser.add_argument("--stage1_ckpt_path", type=str, default=None)
+    parser.add_argument("--stage2_ckpt_path", type=str, default=None)
+
     parser.add_argument("--dyna_gait", action="store_true", default=False)
     parser.add_argument("--traj_track", action="store_true", default=False)
 

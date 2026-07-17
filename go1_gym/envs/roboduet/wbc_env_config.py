@@ -38,8 +38,8 @@ class HybridRewardScaleConfig:
     orientation_control: float = -10.0
     hip_action_l2: float = -0.05
     raibert_heuristic: float = -0.0
-    arm_control_smoothness_1: float = -0.1
-    arm_control_limits: float = -5.0
+    arm_dogcommand_smoothness_1: float = -0.1
+    arm_control_limits: float = -0.0001
     traj_track: float = 0.0
     trajectory_current_tracking: float = 0.0
     trajectory_completion_time: float = 0.0
@@ -73,11 +73,12 @@ class ArmCommandConfig:
 @dataclass(frozen=True)
 class ArmTrajectoryConfig:
     enabled: bool = False
-    traj_type: list = field(default_factory=lambda: ["line", "s_curve"])
+    # traj_type: list = field(default_factory=lambda: ["line", "s_curve", "point"])
+    traj_type: list = field(default_factory=lambda: ["point"])
     window_offsets: tuple = (0, 1, 2, 4, 8, 16, 32, 64)
     num_waypoints: int = 96
     start_radius: float = 0.0
-    length_range: tuple = (0.10, 0.45)
+    length_range: tuple = (0.05, 1.0)
     s_curve_amplitude_range: tuple = (0.02, 0.12)
     s_curve_frequency: float = 1.0
     circle_radius: float = 0.5
@@ -94,7 +95,16 @@ class ArmTrajectoryConfig:
     user_ang_vel_yaw: tuple = (-0.4, 0.4)
     pos_error_scale: float = 4.0
     rot_error_scale: float = 1.0
-    completion_time_sigma: float = 0.35
+    completion_time_sigma: float = 1
+    dog_command_smoothing_alpha: float = 0.2
+    dog_command_smoothness_weight_delta_vel: float = 1.0
+    dog_command_smoothness_weight_body_pose: float = 1.0
+    dog_command_smoothness_weight_gait: float = 2.0
+    stage2_base_unlock_curriculum: bool = True
+    stage2_base_unlock_success_threshold: float = 0.9
+    stage2_base_unlock_success_ema_alpha: float = 0.05
+    stage2_base_unlock_ramp_iterations: int = 1000
+    stage2_base_unlock_force_point_until_unlocked: bool = True
 
 
 @dataclass(frozen=True)
@@ -247,11 +257,11 @@ class HybridRewardScaleOverrideConfig:
     tracking_lin_vel_multiplier: float = 0.7
     tracking_ang_vel_multiplier: float = 0.5
     arm_energy: float = -0.00004
-    arm_dof_vel_multiplier: float = 10.0
-    arm_dof_acc_multiplier: float = 10.0
-    arm_action_rate_multiplier: float = 10.0
-    arm_action_smoothness_1_multiplier: float = 5.0
-    arm_action_smoothness_2_multiplier: float = 5.0
+    arm_dof_vel_multiplier: float = 0.01
+    arm_dof_acc_multiplier: float = 0.01
+    arm_action_rate_multiplier: float = 0.001
+    arm_action_smoothness_1_multiplier: float = 0.001
+    arm_action_smoothness_2_multiplier: float = 0.001
 
 
 @dataclass(frozen=True)
@@ -270,7 +280,7 @@ class Stage1ArmDisturbanceConfig:
 @dataclass(frozen=True)
 class DynaGaitFeatureConfig:
     num_gait_dims: int = 5
-    plan_action_dims: int = 7
+    plan_action_dims: int = 6
     num_bins_gait_frequency: int = 11
     num_bins_footswing_height: int = 5
     num_bins_gait_duration: int = 3
@@ -421,7 +431,7 @@ class RoboDuetCfg(LeggedRobotCfg):
             orientation_control = ROBODUET_DEFAULTS.hybrid.reward_scales.orientation_control
             hip_action_l2 = ROBODUET_DEFAULTS.hybrid.reward_scales.hip_action_l2
             raibert_heuristic = ROBODUET_DEFAULTS.hybrid.reward_scales.raibert_heuristic
-            arm_control_smoothness_1 = ROBODUET_DEFAULTS.hybrid.reward_scales.arm_control_smoothness_1
+            arm_dogcommand_smoothness_1 = ROBODUET_DEFAULTS.hybrid.reward_scales.arm_dogcommand_smoothness_1
             arm_control_limits = ROBODUET_DEFAULTS.hybrid.reward_scales.arm_control_limits
             traj_track = ROBODUET_DEFAULTS.hybrid.reward_scales.traj_track
             trajectory_current_tracking = ROBODUET_DEFAULTS.hybrid.reward_scales.trajectory_current_tracking
@@ -472,6 +482,21 @@ class RoboDuetCfg(LeggedRobotCfg):
             pos_error_scale = ROBODUET_DEFAULTS.arm.trajectory.pos_error_scale
             rot_error_scale = ROBODUET_DEFAULTS.arm.trajectory.rot_error_scale
             completion_time_sigma = ROBODUET_DEFAULTS.arm.trajectory.completion_time_sigma
+            dog_command_smoothing_alpha = ROBODUET_DEFAULTS.arm.trajectory.dog_command_smoothing_alpha
+            dog_command_smoothness_weight_delta_vel = (
+                ROBODUET_DEFAULTS.arm.trajectory.dog_command_smoothness_weight_delta_vel
+            )
+            dog_command_smoothness_weight_body_pose = (
+                ROBODUET_DEFAULTS.arm.trajectory.dog_command_smoothness_weight_body_pose
+            )
+            dog_command_smoothness_weight_gait = ROBODUET_DEFAULTS.arm.trajectory.dog_command_smoothness_weight_gait
+            stage2_base_unlock_curriculum = ROBODUET_DEFAULTS.arm.trajectory.stage2_base_unlock_curriculum
+            stage2_base_unlock_success_threshold = ROBODUET_DEFAULTS.arm.trajectory.stage2_base_unlock_success_threshold
+            stage2_base_unlock_success_ema_alpha = ROBODUET_DEFAULTS.arm.trajectory.stage2_base_unlock_success_ema_alpha
+            stage2_base_unlock_ramp_iterations = ROBODUET_DEFAULTS.arm.trajectory.stage2_base_unlock_ramp_iterations
+            stage2_base_unlock_force_point_until_unlocked = (
+                ROBODUET_DEFAULTS.arm.trajectory.stage2_base_unlock_force_point_until_unlocked
+            )
             curriculum_levels = ROBODUET_DEFAULTS.arm.trajectory.curriculum_levels
             curriculum_success_threshold = ROBODUET_DEFAULTS.arm.trajectory.curriculum_success_threshold
 
@@ -672,12 +697,12 @@ def env_obs_dim_parts(cfg):
     if cfg.arm.trajectory.enabled:
         parts.update(
             {
+                "arm_dof_vel": cfg.arm.num_actions_arm,
                 "base_height": 1,
-                "foot_contact_states": 4,
                 "ee_pose_body": 9,
                 "ee_twist_body": 6,
                 "trajectory_window": len(cfg.arm.trajectory.window_offsets) * 9,
-                "trajectory_remaining_time": 1,
+                "trajectory_progress_index": 1,
             }
         )
     return parts
@@ -687,27 +712,31 @@ def arm_obs_dim_parts(cfg):
     if cfg.arm.trajectory.enabled:
         parts = {
             "arm_dof_pos": cfg.arm.num_actions_arm,
-            "arm_actions": cfg.arm.num_actions_arm,
+            "arm_dof_vel": cfg.arm.num_actions_arm,
+            "arm_actions": cfg.arm.num_actions_arm_cd,
             "base_height": 1,
-            "foot_contact_states": 4,
             "base_ang_vel": 3,
             "dog_velocity_commands": 3,
+            "trajectory_completion_time_command": 1,
             "ee_pose_body": 9,
             "ee_twist_body": 6,
             "trajectory_window": len(cfg.arm.trajectory.window_offsets) * 9,
-            "trajectory_remaining_time": 1,
+            "trajectory_progress_index": 1,
         }
         if cfg.commands.use_dynamic_gait:
+            parts["dog_body_pose_commands"] = 3
             parts["dynamic_gait_commands"] = cfg.dog.dog_num_commands - 6
         return parts
 
     parts = {
         "arm_dof_pos": cfg.arm.num_actions_arm,
-        "arm_actions": cfg.arm.num_actions_arm,
+        "arm_dof_vel": cfg.arm.num_actions_arm,
+        "arm_actions": cfg.arm.num_actions_arm_cd,
         "arm_commands": cfg.arm.arm_num_commands,
         "base_roll_pitch": 2,
     }
     if cfg.commands.use_dynamic_gait:
+        parts["dog_body_pose_commands"] = 3
         parts["dynamic_gait_commands"] = cfg.dog.dog_num_commands - 6
     if cfg.env.observe_two_prev_actions:
         parts["two_prev_actions"] = cfg.env.num_actions
@@ -747,7 +776,7 @@ def dog_obs_dim_parts(cfg):
     return parts
 
 
-def privileged_obs_dim_parts(cfg, dof_dim):
+def privileged_obs_dim_parts(cfg, dof_dim, policy=None):
     parts = {}
     if cfg.env.priv_observe_friction:
         parts["friction"] = 1
@@ -785,14 +814,18 @@ def privileged_obs_dim_parts(cfg, dof_dim):
         parts["high_freq_goal"] = 6
     if getattr(cfg.env, "priv_observe_arm_mount_tf", False):
         parts["arm_mount_tf"] = 6
+    if policy == "dog":
+        parts["arm_dof_pos"] = cfg.arm.num_actions_arm
+        parts["arm_dof_vel"] = cfg.arm.num_actions_arm
 
     return parts
 
 
 def configure_privileged_obs_dims(cfg):
-    dog_parts = privileged_obs_dim_parts(cfg, cfg.dog.num_actions_loco)
-    arm_parts = privileged_obs_dim_parts(cfg, ROBODUET_DEFAULTS.arm.num_actions_arm_cd)
+    dog_parts = privileged_obs_dim_parts(cfg, cfg.dog.num_actions_loco, policy="dog")
+    arm_parts = privileged_obs_dim_parts(cfg, ROBODUET_DEFAULTS.arm.num_actions_arm_cd, policy="arm")
     if cfg.arm.trajectory.enabled:
+        arm_parts["foot_contact_states"] = 4
         arm_parts["full_trajectory"] = cfg.arm.trajectory.num_waypoints * 9
 
     dog_dim = sum_dim_parts(dog_parts)

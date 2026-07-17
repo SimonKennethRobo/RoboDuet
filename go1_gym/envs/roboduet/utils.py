@@ -1,6 +1,61 @@
 import torch
 
 
+DOG_PLAY_COMMAND_LIMIT_ATTRS = {
+    "x_vel": "limit_vel_x",
+    "y_vel": "limit_vel_y",
+    "yaw_vel": "limit_vel_yaw",
+    "body_pitch": "limit_body_pitch",
+    "body_roll": "limit_body_roll",
+    "body_height_delta": "limit_body_height",
+    "body_height": "limit_body_height",
+    "gait_freq": "limit_gait_frequency",
+    "gait_frequency": "limit_gait_frequency",
+    "footswing_height": "limit_footswing_height",
+    "stance_width": "limit_stance_width",
+    "stance_length": "limit_stance_length",
+    "gait_duration": "limit_gait_duration",
+}
+
+ARM_PLAY_COMMAND_LIMIT_ATTRS = {
+    "arm_x": "l",
+    "arm_z": "p",
+    "arm_y": "y",
+    "arm_roll": "roll_ee",
+    "arm_pitch": "pitch_ee",
+    "arm_yaw": "yaw_ee",
+}
+
+
+def as_limit_pair(value):
+    if value is None or isinstance(value, (str, bytes)):
+        return None
+    try:
+        if len(value) != 2:
+            return None
+        return (float(value[0]), float(value[1]))
+    except (TypeError, ValueError):
+        return None
+
+
+def get_play_command_limits(cfg):
+    limits = {"dog": {}, "arm": {}}
+    for command_key, attr_name in DOG_PLAY_COMMAND_LIMIT_ATTRS.items():
+        pair = as_limit_pair(getattr(cfg.commands, attr_name, None))
+        if pair is not None:
+            limits["dog"][command_key] = pair
+    for command_key, attr_name in ARM_PLAY_COMMAND_LIMIT_ATTRS.items():
+        pair = as_limit_pair(getattr(cfg.arm.commands, attr_name, None))
+        if pair is not None:
+            limits["arm"][command_key] = pair
+    return limits
+
+
+def get_play_command_limit(cfg, target, command_key, fallback):
+    pair = get_play_command_limits(cfg).get(target, {}).get(command_key)
+    return pair if pair is not None else fallback
+
+
 def apply_hybrid_reward_settings(cfg):
     for key, value in vars(cfg.hybrid.rewards).items():
         setattr(cfg.rewards, key, value)

@@ -279,7 +279,7 @@ class LeggedRobotCfg(PrefixProto, cli=False):
         lag_timesteps = 6
 
     class rewards(PrefixProto, cli=False):
-        only_positive_rewards = True  # if true negative total rewards are clipped at zero (avoids early termination problems)
+        only_positive_rewards = False  # if true negative total rewards are clipped at zero (avoids early termination problems)
         only_positive_rewards_ji22_style = False
         sigma_rew_neg = 5
         reward_container_name = "Rewards"

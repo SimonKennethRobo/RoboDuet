@@ -24,6 +24,35 @@ from .dog_ac import DogActorCritic
 from .ppo import PPO
 
 
+def _load_matching_state_dict(model, checkpoint_state, *, skip_prefixes=()):
+    model_state = model.state_dict()
+    loadable_state = {}
+    skipped = []
+    for key, value in checkpoint_state.items():
+        if key not in model_state:
+            skipped.append(key)
+            continue
+        if any(key.startswith(prefix) for prefix in skip_prefixes):
+            skipped.append(key)
+            continue
+        if model_state[key].shape != value.shape:
+            raise RuntimeError(
+                f"Checkpoint tensor {key} has shape {tuple(value.shape)}, "
+                f"but current model expects {tuple(model_state[key].shape)}."
+            )
+        loadable_state[key] = value
+
+    incompatible = model.load_state_dict(loadable_state, strict=False)
+    missing_required = [
+        key
+        for key in incompatible.missing_keys
+        if not any(key.startswith(prefix) for prefix in skip_prefixes)
+    ]
+    if missing_required:
+        raise RuntimeError(f"Checkpoint is missing required tensors: {missing_required}")
+    return skipped
+
+
 def class_to_dict(obj) -> dict:
     if not hasattr(obj, "__dict__"):
         return obj
@@ -60,13 +89,13 @@ class RunnerArgs(PrefixProto, cli=False):
 
 
 class ArmRunnerArgs(PrefixProto, cli=False):
-    resume_path = "your_arm_ckpt_path"
-    resume = False
+    ckpt_path = None
 
 
 class DogRunnerArgs(PrefixProto, cli=False):
-    resume_path = "your_dog_ckpt_path"
-    resume = False
+    ckpt_path = None
+    stage2_freeze_loco_policy = True
+    stage2_loco_learning_rate = None
 
 
 def custom_decay_reward_scale(iteration, initial_scale=1.5, final_scale=0.8, max_iterations=8000):
@@ -94,6 +123,8 @@ class Runner:
         self.log_dir = log_dir
         self.debug = debug
         self.num_steps_per_env = RunnerArgs.num_steps_per_env
+        self.stage2_loco_policy_frozen = False
+        self._stage2_loco_policy_mode_applied = False
 
         self.arm_model = ArmActorCritic(
             num_obs=self.env.cfg.arm.arm_num_observations,
@@ -112,15 +143,19 @@ class Runner:
             use_adaptation_module=self.env.cfg.dog.use_adaptation_module,
         ).to(self.device)
 
-        if DogRunnerArgs.resume:
-            # load pretrained weights from resume_path
-            weights = torch.load(DogRunnerArgs.resume_path)
-            self.dog_model.load_state_dict(state_dict=weights)
-            print("successfully loaded dog weights!!!")
+        if DogRunnerArgs.ckpt_path is not None:
+            weights = torch.load(DogRunnerArgs.ckpt_path, map_location=self.device)
+            if DogRunnerArgs.stage2_freeze_loco_policy:
+                skipped = _load_matching_state_dict(self.dog_model, weights, skip_prefixes=("critic_body.",))
+                print("successfully loaded dog weights without critic for frozen stage2 locomotion policy!!!")
+                if skipped:
+                    print(f"Skipped {len(skipped)} dog checkpoint tensors: {skipped}")
+            else:
+                self.dog_model.load_state_dict(state_dict=weights)
+                print("successfully loaded dog weights!!!")
 
-        if ArmRunnerArgs.resume:
-            # load pretrained weights from resume_path
-            weights = torch.load(ArmRunnerArgs.resume_path)
+        if ArmRunnerArgs.ckpt_path is not None:
+            weights = torch.load(ArmRunnerArgs.ckpt_path, map_location=self.device)
             self.arm_model.load_state_dict(state_dict=weights)
             print("successfully loaded arm weights!!!")
 
@@ -151,7 +186,38 @@ class Runner:
         self.current_learning_iteration = 0
         self.last_recording_it = 0
 
+        if global_switch.switch_open:
+            self._apply_stage2_loco_policy_settings()
+
         self.env.reset()
+
+    def _set_dog_policy_requires_grad(self, requires_grad):
+        for parameter in self.dog_model.parameters():
+            parameter.requires_grad_(requires_grad)
+
+    def _apply_stage2_loco_policy_settings(self):
+        if self._stage2_loco_policy_mode_applied:
+            return
+
+        if DogRunnerArgs.stage2_freeze_loco_policy:
+            self._set_dog_policy_requires_grad(False)
+            self.dog_model.eval()
+            self.stage2_loco_policy_frozen = True
+            self.env.env.disable_dog_policy_rewards = True
+            print("Stage2 locomotion policy is frozen; dog PPO updates and dog rewards are disabled.")
+        else:
+            self._set_dog_policy_requires_grad(True)
+            self.dog_model.train()
+            self.stage2_loco_policy_frozen = False
+            self.env.env.disable_dog_policy_rewards = False
+            if DogRunnerArgs.stage2_loco_learning_rate is not None:
+                self.alg_dog.set_learning_rate(float(DogRunnerArgs.stage2_loco_learning_rate))
+                print(f"Stage2 locomotion policy learning rate set to {self.alg_dog.learning_rate}.")
+
+        self._stage2_loco_policy_mode_applied = True
+
+    def _dog_policy_trainable_this_iteration(self):
+        return not (global_switch.switch_open and self.stage2_loco_policy_frozen)
 
     def _advance_stage_schedule(self, iteration):
         global_switch.count += 1
@@ -174,6 +240,7 @@ class Runner:
         )
         global_switch.open_switch()
         apply_hybrid_reward_settings(self.env.cfg)
+        self._apply_stage2_loco_policy_settings()
 
     def learn(
         self, num_learning_iterations, init_at_random_ep_len=False, eval_freq=100, eval_expert=False, width=80, pad=35
@@ -199,7 +266,10 @@ class Runner:
             obs_history_arm.to(self.device),
         )
         self.alg_arm.actor_critic.train()
-        self.alg_dog.actor_critic.train()
+        if self._dog_policy_trainable_this_iteration():
+            self.alg_dog.actor_critic.train()
+        else:
+            self.alg_dog.actor_critic.eval()
 
         rewbuffer = deque(maxlen=100)
         lenbuffer = deque(maxlen=100)
@@ -249,7 +319,10 @@ class Runner:
 
                     # add reward
                     actions_dog = self.alg_dog.act(
-                        dog_obs_dict["obs"], dog_obs_dict["privileged_obs"], dog_obs_dict["obs_history"]
+                        dog_obs_dict["obs"],
+                        dog_obs_dict["privileged_obs"],
+                        dog_obs_dict["obs_history"],
+                        deterministic=not self._dog_policy_trainable_this_iteration(),
                     )
 
                     if global_switch.switch_open and self.env.num_plan_actions > 0:
@@ -284,7 +357,7 @@ class Runner:
                         if "train/episode" in infos:
                             ep_infos.append(infos["train/episode"])
 
-                        cur_reward_sum += rewards_dog
+                        cur_reward_sum += rewards_dog + rewards_arm
                         cur_episode_length += 1
 
                         new_ids = (dones > 0).nonzero(as_tuple=False)
@@ -303,7 +376,11 @@ class Runner:
                 start = stop
                 if global_switch.switch_open:
                     self.alg_arm.compute_returns(obs_history_arm[:num_train_envs], privileged_obs_arm[:num_train_envs])
-                self.alg_dog.compute_returns(obs_history_dog[:num_train_envs], privileged_obs_dog[:num_train_envs])
+                dog_policy_trainable = self._dog_policy_trainable_this_iteration()
+                if dog_policy_trainable:
+                    self.alg_dog.compute_returns(obs_history_dog[:num_train_envs], privileged_obs_dog[:num_train_envs])
+                else:
+                    self.alg_dog.clear_storage()
 
             if global_switch.switch_open:
                 (
@@ -316,16 +393,26 @@ class Runner:
                     mean_decoder_test_loss,
                     mean_decoder_test_loss_student,
                 ) = self.alg_arm.update(un_adapt=not self.arm_model.use_adaptation_module)
-            (
-                mean_value_loss_dog,
-                mean_surrogate_loss_dog,
-                mean_adaptation_module_loss_dog,
-                mean_decoder_loss_dog,
-                mean_decoder_loss_student_dog,
-                mean_adaptation_module_test_loss_dog,
-                mean_decoder_test_loss_dog,
-                mean_decoder_test_loss_student_dog,
-            ) = self.alg_dog.update()
+            if dog_policy_trainable:
+                (
+                    mean_value_loss_dog,
+                    mean_surrogate_loss_dog,
+                    mean_adaptation_module_loss_dog,
+                    mean_decoder_loss_dog,
+                    mean_decoder_loss_student_dog,
+                    mean_adaptation_module_test_loss_dog,
+                    mean_decoder_test_loss_dog,
+                    mean_decoder_test_loss_student_dog,
+                ) = self.alg_dog.update()
+            else:
+                mean_value_loss_dog = 0.0
+                mean_surrogate_loss_dog = 0.0
+                mean_adaptation_module_loss_dog = 0.0
+                mean_decoder_loss_dog = 0.0
+                mean_decoder_loss_student_dog = 0.0
+                mean_adaptation_module_test_loss_dog = 0.0
+                mean_decoder_test_loss_dog = 0.0
+                mean_decoder_test_loss_student_dog = 0.0
             stop = time.time()
             learn_time = stop - start
 
@@ -363,6 +450,9 @@ class Runner:
                             wandb_dict["Curriculum/threshold_" + name] = mean
                         elif key == "command_curriculum_weight":
                             wandb_dict["Curriculum/command_bin_weight"] = mean
+                        elif key.startswith("stage2_base_unlock_"):
+                            name = key.replace("stage2_base_unlock_", "", 1)
+                            wandb_dict["Curriculum/stage2_base_unlock_" + name] = mean
                         elif key.startswith("global_switch_"):
                             name = key.replace("global_switch_", "", 1)
                             wandb_dict["Global_Switch/" + name] = mean

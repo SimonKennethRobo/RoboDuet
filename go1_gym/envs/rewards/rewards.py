@@ -26,19 +26,26 @@ class Rewards:
         return pitch_error + roll_error
 
     def _reward_arm_control_limits(self):
-        out_of_limits = -(self.env.plan_actions[:, 0] - self.env.cfg.commands.limit_body_pitch[0]).clip(max=0.)  # lower limit
-        out_of_limits += (self.env.plan_actions[:, 0] - self.env.cfg.commands.limit_body_pitch[1]).clip(min=0.)
-        out_of_limits += -(self.env.plan_actions[:, 1] - self.env.cfg.commands.limit_body_roll[0]).clip(max=0.)  # lower limit
-        out_of_limits += (self.env.plan_actions[:, 1] - self.env.cfg.commands.limit_body_roll[1]).clip(min=0.)
-        return out_of_limits
+        plan_actions_raw = getattr(self.env, "plan_actions_raw", self.env.plan_actions)
+        return torch.sum(torch.square((torch.abs(plan_actions_raw) - 1.0).clip(min=0.0)), dim=1)
 
-    def _reward_arm_control_smoothness_1(self):
+    def _reward_arm_dogcommand_smoothness_1(self):
         # Penalize changes in actions
         diff = torch.square(self.env.plan_actions - self.env.last_plan_actions)
         diff = diff * (self.env.last_plan_actions != 0)  # ignore first step
-        return torch.sum(diff, dim=1)
+        if not getattr(self.env.cfg.arm.trajectory, "enabled", False):
+            return torch.sum(diff, dim=1)
 
-    def _reward_arm_control_smoothness_2(self):
+        reward = self.env.cfg.arm.trajectory.dog_command_smoothness_weight_delta_vel * torch.sum(diff[:, :3], dim=1)
+        if diff.shape[1] > 3:
+            reward += self.env.cfg.arm.trajectory.dog_command_smoothness_weight_body_pose * torch.sum(
+                diff[:, 3 : min(6, diff.shape[1])], dim=1
+            )
+        if diff.shape[1] > 6:
+            reward += self.env.cfg.arm.trajectory.dog_command_smoothness_weight_gait * torch.sum(diff[:, 6:], dim=1)
+        return reward
+
+    def _reward_arm_dogcommand_smoothness_2(self):
         # Penalize changes in actions
         diff = torch.square(self.env.joint_pos_target[:, :self.env.num_actuated_dof] - 2 * self.env.last_joint_pos_target[:, :self.env.num_actuated_dof] + self.env.last_last_joint_pos_target[:, :self.env.num_actuated_dof])
         diff = diff * (self.env.last_actions[:, :self.env.num_dof] != 0)  # ignore first step
@@ -86,24 +93,10 @@ class Rewards:
         return torch.sum(diff, dim=1)
 
     def _reward_traj_track(self):
-        return torch.exp(-self.env.get_trajectory_error_sum())
+        return self.env.get_trajectory_tracking_reward()
 
     def _reward_trajectory_current_tracking(self):
-        env_ids = torch.arange(self.env.num_envs, device=self.env.device)
-        target = self.env._pose_world_to_body_9d(
-            self.env.traj_pos_world[env_ids, self.env.traj_progress_idx],
-            self.env.traj_quat_world[env_ids, self.env.traj_progress_idx],
-            env_ids,
-        )
-        ee_pose = self.env.get_ee_pose_body_9d()
-        pos_error = torch.sum(torch.square(ee_pose[:, :3] - target[:, :3]), dim=-1)
-        rot_error = torch.sum(torch.square(ee_pose[:, 3:] - target[:, 3:]), dim=-1)
-        return torch.exp(
-            -(
-                self.env.cfg.arm.trajectory.pos_error_scale * pos_error
-                + self.env.cfg.arm.trajectory.rot_error_scale * rot_error
-            )
-        )
+        return self.env.get_trajectory_current_tracking_reward()
 
     def _reward_trajectory_completion_time(self):
         low, high = self.env.cfg.arm.trajectory.completion_time_range
