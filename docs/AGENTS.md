@@ -293,6 +293,14 @@ Do not randomize arm link mass/COM during episode reset by calling `set_actor_ri
 
 Tradeoff: arm link mass/COM is per-env, not per-episode. This is intentional for reset stability.
 
+Arm mount translation/rotation randomization is also per-env. `_generate_arm_mount_asset_files()` creates
+URDF asset buckets before actor creation and edits the fixed mount joint's `xyz` and `rpy`. The ranges are
+controlled independently by `randomize_mount_position` / `mount_position_range` and
+`randomize_mount_rotation` / `mount_rpy_range`; RPY values are radians. Bucket 0 always keeps the nominal
+mount transform. `arm_mount_tfs` must contain the exact `[x, y, z, roll, pitch, yaw]` written to each env's
+URDF because it is exposed through privileged observations. Do not try to resample a fixed-joint mount TF
+during episode reset.
+
 ## Config Gotchas
 
 For play/eval, `scripts/load_policy.py` loads `parameters.pkl` and can overwrite source defaults. If config edits do not seem to work, print runtime `Cfg` after checkpoint loading.

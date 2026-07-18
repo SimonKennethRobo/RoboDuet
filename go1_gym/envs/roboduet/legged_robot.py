@@ -2066,8 +2066,8 @@ class LeggedRobot(BaseTask):
         )
 
     @staticmethod
-    def _format_xyz(xyz):
-        return " ".join(f"{float(v):.8g}" for v in xyz)
+    def _format_vector(values):
+        return " ".join(f"{float(value):.8g}" for value in values)
 
     @staticmethod
     def _write_xml_if_changed(tree, path):
@@ -2105,14 +2105,18 @@ class LeggedRobot(BaseTask):
                 raise ValueError(f"Invalid rpy on joint '{mount_joint_name}': {source_origin_local.get('rpy')}")
             return np.concatenate((xyz, rpy)).reshape(1, 6).astype(np.float32)
 
-        if arm_dr is None or not getattr(arm_dr, "randomize_mount_pos", False):
-            self.arm_mount_bucket_offsets = np.zeros((1, 3), dtype=np.float32)
+        randomize_position = arm_dr is not None and getattr(arm_dr, "randomize_mount_position", False)
+        randomize_rotation = arm_dr is not None and getattr(arm_dr, "randomize_mount_rotation", False)
+        if not randomize_position and not randomize_rotation:
+            self.arm_mount_bucket_position_offsets = np.zeros((1, 3), dtype=np.float32)
+            self.arm_mount_bucket_rpy_offsets = np.zeros((1, 3), dtype=np.float32)
             self.arm_mount_bucket_tfs = read_source_mount_tf()
             return [asset_file]
 
-        num_buckets = int(getattr(arm_dr, "mount_pos_buckets", 32))
+        num_buckets = int(getattr(arm_dr, "mount_tf_buckets", 32))
         if num_buckets <= 1 or not asset_file.lower().endswith(".urdf"):
-            self.arm_mount_bucket_offsets = np.zeros((1, 3), dtype=np.float32)
+            self.arm_mount_bucket_position_offsets = np.zeros((1, 3), dtype=np.float32)
+            self.arm_mount_bucket_rpy_offsets = np.zeros((1, 3), dtype=np.float32)
             self.arm_mount_bucket_tfs = read_source_mount_tf()
             return [asset_file]
 
@@ -2131,38 +2135,56 @@ class LeggedRobot(BaseTask):
         if base_rpy.shape != (3,):
             raise ValueError(f"Invalid rpy on joint '{mount_joint_name}': {source_origin.get('rpy')}")
 
-        ranges = np.asarray(arm_dr.mount_pos_range, dtype=np.float32)
-        if ranges.shape != (3, 2):
-            raise ValueError(f"mount_pos_range must have shape (3, 2), got {ranges.shape}")
+        rng = np.random.default_rng(int(getattr(arm_dr, "mount_tf_bucket_seed", 1234)))
+        position_offsets = np.zeros((num_buckets, 3), dtype=np.float32)
+        if randomize_position:
+            position_ranges = np.asarray(arm_dr.mount_position_range, dtype=np.float32)
+            if position_ranges.shape != (3, 2):
+                raise ValueError(
+                    f"mount_position_range must have shape (3, 2), got {position_ranges.shape}"
+                )
+            position_offsets = rng.uniform(
+                position_ranges[:, 0], position_ranges[:, 1], size=(num_buckets, 3)
+            ).astype(np.float32)
 
-        rng = np.random.default_rng(int(getattr(arm_dr, "mount_pos_bucket_seed", 1234)))
-        offsets = rng.uniform(ranges[:, 0], ranges[:, 1], size=(num_buckets, 3)).astype(np.float32)
-        offsets[0] = 0.0
+        rpy_offsets = np.zeros((num_buckets, 3), dtype=np.float32)
+        if randomize_rotation:
+            rpy_ranges = np.asarray(arm_dr.mount_rpy_range, dtype=np.float32)
+            if rpy_ranges.shape != (3, 2):
+                raise ValueError(f"mount_rpy_range must have shape (3, 2), got {rpy_ranges.shape}")
+            rpy_offsets = rng.uniform(rpy_ranges[:, 0], rpy_ranges[:, 1], size=(num_buckets, 3)).astype(
+                np.float32
+            )
+
+        # Always retain one nominal asset for a deterministic reference bucket.
+        position_offsets[0] = 0.0
+        rpy_offsets[0] = 0.0
+        bucket_xyz = base_xyz.reshape(1, 3) + position_offsets
+        # Mount errors are defined as component-wise offsets in the URDF RPY convention.
+        bucket_rpy = base_rpy.reshape(1, 3) + rpy_offsets
 
         stem, ext = os.path.splitext(asset_file)
         generated_files = []
         updated_files = 0
-        for bucket_id, offset in enumerate(offsets):
+        for bucket_id in range(num_buckets):
             tree = copy.deepcopy(source_tree)
             joint = tree.getroot().find(f"./joint[@name='{mount_joint_name}']")
             origin = joint.find("origin")
             if origin is None:
                 origin = ET.SubElement(joint, "origin")
-            origin.set("xyz", self._format_xyz(base_xyz + offset))
-            origin.set("rpy", source_origin.get("rpy", "0 0 0"))
+            origin.set("xyz", self._format_vector(bucket_xyz[bucket_id]))
+            origin.set("rpy", self._format_vector(bucket_rpy[bucket_id]))
 
             generated_file = f"{stem}_mount_bucket_{bucket_id:02d}{ext}"
             generated_path = os.path.join(asset_root, generated_file)
             updated_files += int(self._write_xml_if_changed(tree, generated_path))
             generated_files.append(generated_file)
 
-        self.arm_mount_bucket_offsets = offsets
-        self.arm_mount_bucket_tfs = np.concatenate(
-            (base_xyz.reshape(1, 3) + offsets, np.repeat(base_rpy.reshape(1, 3), num_buckets, axis=0)),
-            axis=1,
-        ).astype(np.float32)
+        self.arm_mount_bucket_position_offsets = position_offsets
+        self.arm_mount_bucket_rpy_offsets = rpy_offsets
+        self.arm_mount_bucket_tfs = np.concatenate((bucket_xyz, bucket_rpy), axis=1).astype(np.float32)
         print(
-            f"[RoboDuet] mount position URDF buckets ready: {len(generated_files)} ({updated_files} updated)",
+            f"[RoboDuet] mount TF URDF buckets ready: {len(generated_files)} ({updated_files} updated)",
             flush=True,
         )
         return generated_files

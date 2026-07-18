@@ -501,6 +501,7 @@ def build_roboduet_config(args=None, *, options=None, traj_track_reward_scale=5.
     validate_roboduet_cfg(cfg)
 
     if debug:
-        cfg.domain_rand.randomize_mount_pos = False
+        cfg.domain_rand.randomize_mount_position = False
+        cfg.domain_rand.randomize_mount_rotation = False
 
     return cfg
