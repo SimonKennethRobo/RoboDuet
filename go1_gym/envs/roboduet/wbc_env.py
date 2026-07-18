@@ -1324,6 +1324,52 @@ class WBCEnv(LeggedRobot):
         if self.cfg.env.arm_policy_enabled and self.cfg.wbc.trajectory.enabled:
             self.prev_ee_twist_body[:] = self.get_ee_twist_body()
 
+    def _arm_init_performance_metrics_hook(self):
+        for name in ("ee_position_sq_error", "ee_orientation_sq_error", "ee_tracking_samples"):
+            self.performance_metric_sums[name] = torch.zeros(
+                self.num_envs,
+                dtype=torch.float,
+                device=self.device,
+                requires_grad=False,
+            )
+
+    def _arm_update_performance_metrics_hook(self):
+        if not self.cfg.wbc.trajectory.enabled or not global_switch.switch_open:
+            return
+
+        env_ids = torch.arange(self.num_envs, device=self.device)
+        target_pos = self.traj_pos_world[env_ids, self.traj_progress_idx]
+        target_quat = self.traj_quat_world[env_ids, self.traj_progress_idx]
+        actual_pos = self.end_effector_state[:, :3]
+        actual_quat = self.end_effector_state[:, 3:7]
+        actual_quat = actual_quat / torch.clamp(torch.norm(actual_quat, dim=-1, keepdim=True), min=1e-6)
+        target_quat = target_quat / torch.clamp(torch.norm(target_quat, dim=-1, keepdim=True), min=1e-6)
+        quat_dot = torch.abs(torch.sum(actual_quat * target_quat, dim=-1))
+        orientation_error = 2.0 * torch.acos(torch.clamp(quat_dot, 0.0, 1.0))
+
+        sums = self.performance_metric_sums
+        sums["ee_position_sq_error"] += torch.sum(torch.square(actual_pos - target_pos), dim=-1)
+        sums["ee_orientation_sq_error"] += torch.square(orientation_error)
+        sums["ee_tracking_samples"] += 1.0
+
+    def _arm_log_performance_metrics_hook(self, train_env_ids, episode_steps):
+        samples = self.performance_metric_sums["ee_tracking_samples"][train_env_ids]
+        valid = samples > 0
+        if not torch.any(valid):
+            return
+
+        position_rmse = torch.sqrt(
+            self.performance_metric_sums["ee_position_sq_error"][train_env_ids]
+            / torch.clamp(samples, min=1.0)
+        )
+        orientation_rmse = torch.sqrt(
+            self.performance_metric_sums["ee_orientation_sq_error"][train_env_ids]
+            / torch.clamp(samples, min=1.0)
+        )
+        extras = self.extras["train/episode"]
+        extras["perf_ee_position_rmse_m"] = self._mean_valid_metric(position_rmse, valid)
+        extras["perf_ee_orientation_rmse_rad"] = self._mean_valid_metric(orientation_rmse, valid)
+
     def _arm_privileged_obs_hook(self, privileged_obs_buf):
         return self._get_physics_privileged_observations("dog")
 

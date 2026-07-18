@@ -66,6 +66,21 @@ def clip_observation(env, obs):
     return torch.clip(obs, -clip_obs, clip_obs)
 
 
+def aggregate_episode_value(ep_infos, key):
+    """Aggregate episode scalars, weighting physical metrics by completed episodes."""
+    infos = [info for info in ep_infos if key in info]
+    if not infos:
+        raise KeyError(key)
+    values = torch.stack([info[key] for info in infos])
+    if key.startswith("perf_") and key != "perf_episode_count":
+        weighted_infos = [info for info in infos if "perf_episode_count" in info]
+        if weighted_infos:
+            values = torch.stack([info[key] for info in weighted_infos])
+            weights = torch.stack([info["perf_episode_count"] for info in weighted_infos]).to(values)
+            return torch.sum(values * weights) / torch.clamp(torch.sum(weights), min=1.0)
+    return torch.mean(values)
+
+
 class StageSchedule:
     STAGE1 = "stage1"
     STAGE2 = "stage2"

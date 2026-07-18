@@ -396,6 +396,22 @@ only after the EMA remains above `reset_curriculum_tracking_threshold` for
 
 This means WBC training starts at 10% of the configured reset-randomization ranges and grows toward the full ranges after the success gate opens.
 
+## Performance Metrics
+
+`LeggedRobot._update_performance_metrics()` accumulates physical task metrics
+before reward computation. They do not call reward functions and are not
+affected by reward scales or reward shaping. At reset they are normalized per
+episode and logged under `Performance/*` by both dual-policy and unified
+runners. Reset batches are weighted by their number of completed episodes.
+
+Locomotion metrics include velocity-command MAE/RMSE, roll/pitch and body-rate
+RMS, height RMSE, contact-foot slip speed, mechanical locomotion power, early
+termination rate, and episode duration. Trajectory mode also logs current EE
+position RMSE in meters and quaternion geodesic orientation RMSE in radians.
+
+Metric names include their units, for example `Performance/vx_mae_mps`,
+`Performance/yaw_rate_rmse_rad_s`, and `Performance/base_height_rmse_m`.
+
 ## Trajectory Tracking Notes
 
 Trajectory type is configured in Python config, not argparse. Do not add a `--traj_type` CLI flag unless the user explicitly asks for CLI control.
