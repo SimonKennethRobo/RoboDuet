@@ -94,9 +94,9 @@ class LeggedRobotDefaults:
         pitch_init_range = 3.14
         reset_curriculum = False
         reset_curriculum_initial_fraction = 0.0
-        reset_curriculum_start_threshold = 0.5
-        reset_curriculum_reward_threshold = 0.5
-        reset_curriculum_success_ema_alpha = 0.05
+        reset_curriculum_tracking_threshold = 0.5
+        reset_curriculum_tracking_ema_alpha = 0.05
+        reset_curriculum_stability_iterations = 100
         reset_curriculum_growth_iterations = 5000
         x_init_offset = 0.
         y_init_offset = 0.

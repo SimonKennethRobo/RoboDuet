@@ -347,14 +347,14 @@ Reusable Rerun telemetry lives in `go1_gym/utils/viz.py`.
 
 ### Key parameters (`cfg.terrain`)
 
-| Parameter                              | Default                     | Meaning                                                                                             |
-| -------------------------------------- | --------------------------- | --------------------------------------------------------------------------------------------------- |
-| `reset_curriculum`                   | `False` (`True` in WBC) | Enable/disable the curriculum                                                                       |
-| `reset_curriculum_initial_fraction`  | `0.0`                     | Starting intensity as fraction of max range.`0.0` means fully flat reset until curriculum starts  |
-| `reset_curriculum_reward_threshold`  | `0.5`                     | Per-env success criterion: episode avg tracking reward must exceed `threshold × reward_scale`    |
-| `reset_curriculum_start_threshold`   | `0.5`                     | EMA of batch success must reach this before intensity begins growing                                |
-| `reset_curriculum_success_ema_alpha` | `0.05`                    | EMA smoothing factor for success rate                                                               |
-| `reset_curriculum_growth_iterations` | `5000`                    | Iterations (by `global_switch.count`) to linearly grow intensity from `initial_fraction` to 1.0 |
+| Parameter                                  | Default                 | Meaning                                                                                         |
+| ------------------------------------------ | ----------------------- | ----------------------------------------------------------------------------------------------- |
+| `reset_curriculum`                         | `False` (`True` in WBC) | Enable/disable the curriculum                                                                   |
+| `reset_curriculum_initial_fraction`        | `0.0`                   | Starting intensity as fraction of the maximum reset range                                       |
+| `reset_curriculum_tracking_threshold`      | `0.5`                   | Required EMA of the normalized joint linear/angular tracking score                              |
+| `reset_curriculum_tracking_ema_alpha`      | `0.05`                  | EMA smoothing factor, updated once per training iteration                                       |
+| `reset_curriculum_stability_iterations`    | `100`                   | Consecutive above-threshold iterations required before reset randomization starts growing        |
+| `reset_curriculum_growth_iterations`       | `5000`                  | Iterations used to linearly grow intensity from `initial_fraction` to `1.0`                     |
 
 ### Intensity formula
 
@@ -367,23 +367,30 @@ progress = min(1.0, elapsed / growth_iterations)
 intensity = initial_fraction + (1 - initial_fraction) * progress
 ```
 
-### Two-level threshold design
+### Tracking gate
 
-`reset_curriculum_reward_threshold` and `reset_curriculum_start_threshold` operate at different levels:
+For every completed episode, linear and angular tracking rewards are divided by
+their active reward scales and clipped to `[0, 1]`. The per-env score is:
 
-- `reward_threshold`: classifies a **single env's episode** as success or failure by comparing per-step avg tracking reward to `threshold × reward_scale`.
-- `start_threshold`: gates **curriculum activation** by comparing the long-running EMA of batch success rates to this value.
+```text
+tracking_score = min(normalized_linear_tracking, normalized_angular_tracking)
+```
 
-### Logged metrics (misleading names)
+Reset batches from the same `global_switch.count` are accumulated together. The
+EMA is updated once when the next training iteration begins, so episode length
+and reset frequency do not change the curriculum's time scale. The gate opens
+only after the EMA remains above `reset_curriculum_tracking_threshold` for
+`reset_curriculum_stability_iterations` consecutive iterations.
 
-- `reset_curriculum_lin_progress` = **instantaneous** batch success rate (combined lin+ang, not lin-only).
-- `reset_curriculum_ang_progress` = **EMA** of batch success rate (combined lin+ang, not ang-only).
+### Logged metrics
 
-Both are derived from the same joint `tracking_lin_vel & tracking_ang_vel` success, just at different timescales. The names do not mean lin and ang are tracked independently.
-
-### EMA update frequency coupling
-
-`_update_reset_curriculum` is called once per `_resample_commands` call (i.e., once per reset batch). EMA update frequency scales with termination rate, which depends on episode length. The growth timer (`global_switch.count`) is iteration-based. In runs with short episodes, the EMA warms up faster relative to the iteration clock, so the curriculum may activate earlier than intended.
+- `reset_curriculum_lin_tracking_score`
+- `reset_curriculum_ang_tracking_score`
+- `reset_curriculum_tracking_score`
+- `reset_curriculum_tracking_score_ema`
+- `reset_curriculum_stable_iterations`
+- `reset_curriculum_started`
+- `reset_curriculum_intensity`
 
 ### The RoboDuet profile sets `reset_curriculum = True` with `initial_fraction = 0.1`
 

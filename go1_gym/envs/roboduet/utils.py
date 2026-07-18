@@ -76,12 +76,14 @@ class StageSchedule:
         train_stage,
         num_learning_iterations,
         default_switch_iteration,
+        stage1_arm_ramp_iterations,
         debug=False,
         debug_switch_iteration=20,
     ):
         self.train_stage = train_stage
         self.num_learning_iterations = num_learning_iterations
         self.default_switch_iteration = default_switch_iteration
+        self.stage1_arm_ramp_iterations = max(1, int(stage1_arm_ramp_iterations))
         self.debug = debug
         self.debug_switch_iteration = debug_switch_iteration
 
@@ -89,18 +91,11 @@ class StageSchedule:
     def starts_in_stage2(self):
         return self.train_stage == self.STAGE2
 
-    def _stage1_learning_iterations(self):
-        if self.train_stage == self.STAGE1:
-            return self.num_learning_iterations
-        if self.train_stage == self.STAGE2:
-            return 1
-        return self.default_switch_iteration
-
     def configure(self, global_switch):
         global_switch.count = 0
         global_switch.stage1_count = 0
         global_switch.switch_flag = False
-        global_switch.stage1_arm_ramp_iterations = max(1, int(self._stage1_learning_iterations()))
+        global_switch.stage1_arm_ramp_iterations = self.stage1_arm_ramp_iterations
 
         if self.train_stage == self.STAGE1:
             global_switch.pretrained_to_wbc_start = self.num_learning_iterations + 1
@@ -119,7 +114,6 @@ class StageSchedule:
         if self.debug and global_switch.pretrained_to_wbc_start > 0:
             global_switch.pretrained_to_wbc_start = self.debug_switch_iteration
             global_switch.pretrained_to_wbc_end = global_switch.pretrained_to_wbc_start + 2
-            global_switch.stage1_arm_ramp_iterations = self.debug_switch_iteration
 
     def maybe_switch(self, iteration, global_switch, env, message):
         if global_switch.switch_open or iteration != global_switch.pretrained_to_wbc_start:

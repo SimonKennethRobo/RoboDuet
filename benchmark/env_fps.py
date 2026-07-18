@@ -83,10 +83,12 @@ def configure_cfg(args):
     cfg.asset.render_sphere = False
 
     train_stage = StageSchedule.STAGE2 if args.stage2 else StageSchedule.STAGE1
+    cfg.env.arm_policy_enabled = args.stage2
     schedule = StageSchedule(
         train_stage=train_stage,
         num_learning_iterations=args.steps + args.warmup_steps,
         default_switch_iteration=args.steps + args.warmup_steps + 1000,
+        stage1_arm_ramp_iterations=cfg.env.stage1_arm_ramp_iterations,
     )
     schedule.configure(global_switch)
     global_switch.init_sigmoid_lr()

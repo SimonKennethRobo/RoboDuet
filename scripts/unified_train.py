@@ -27,11 +27,12 @@ from go1_gym.utils import format_code, set_seed, global_switch
 from go1_gym.utils.wandb_config import build_wandb_config
 os.environ["WANDB_SILENT"] = "true"
 
-def configure_train_stage(args):
+def configure_train_stage(args, cfg):
     schedule = StageSchedule(
         args.train_stage,
         args.num_learning_iterations,
         default_switch_iteration=10000,
+        stage1_arm_ramp_iterations=cfg.env.stage1_arm_ramp_iterations,
         debug=args.debug,
     )
     schedule.configure(global_switch)
@@ -69,7 +70,7 @@ def train_go1(headless=True):
 
     cfg = build_roboduet_config(args, traj_track_reward_scale=1.0)
     Unified2AC_Args.num_actions_arm = cfg.arm.num_actions_arm_cd
-    configure_train_stage(args)
+    configure_train_stage(args, cfg)
     UnifiedRunnerArgs.num_steps_per_env = args.num_steps_per_env
     UnifiedPPO_Args.num_mini_batches = args.num_mini_batches
 

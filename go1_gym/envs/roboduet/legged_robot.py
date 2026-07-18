@@ -352,7 +352,8 @@ class LeggedRobot(BaseTask):
         env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
         self.reset_idx(env_ids)
 
-        self.compute_observations()
+        if getattr(self.cfg.env, "arm_policy_enabled", True):
+            self.compute_observations()
 
         self.last_last_actions[:] = self.last_actions[:]
         self.last_actions[:] = self.actions[:]
@@ -488,20 +489,28 @@ class LeggedRobot(BaseTask):
                     float(self.reset_curriculum_intensity),
                     device=self.device,
                 )
-                self.extras["train/episode"]["reset_curriculum_lin_progress"] = torch.tensor(
-                    float(self.reset_curriculum_lin_progress),
+                self.extras["train/episode"]["reset_curriculum_lin_tracking_score"] = torch.tensor(
+                    float(self.reset_curriculum_lin_tracking_score),
                     device=self.device,
                 )
-                self.extras["train/episode"]["reset_curriculum_ang_progress"] = torch.tensor(
-                    float(self.reset_curriculum_ang_progress),
+                self.extras["train/episode"]["reset_curriculum_ang_tracking_score"] = torch.tensor(
+                    float(self.reset_curriculum_ang_tracking_score),
+                    device=self.device,
+                )
+                self.extras["train/episode"]["reset_curriculum_tracking_score"] = torch.tensor(
+                    float(self.reset_curriculum_tracking_score),
+                    device=self.device,
+                )
+                self.extras["train/episode"]["reset_curriculum_tracking_score_ema"] = torch.tensor(
+                    float(self.reset_curriculum_tracking_score_ema),
+                    device=self.device,
+                )
+                self.extras["train/episode"]["reset_curriculum_stable_iterations"] = torch.tensor(
+                    float(self.reset_curriculum_stable_iterations),
                     device=self.device,
                 )
                 self.extras["train/episode"]["reset_curriculum_started"] = torch.tensor(
                     float(self.reset_curriculum_started),
-                    device=self.device,
-                )
-                self.extras["train/episode"]["reset_curriculum_success_ema"] = torch.tensor(
-                    float(self.reset_curriculum_success_ema),
                     device=self.device,
                 )
 
@@ -980,51 +989,22 @@ class LeggedRobot(BaseTask):
         self.reset_curriculum_started = False
         self.reset_curriculum_start_iteration = -1
         self.reset_curriculum_intensity = 1.0
-        self.reset_curriculum_lin_progress = 0.0
-        self.reset_curriculum_ang_progress = 0.0
-        self.reset_curriculum_success_ema = 0.0
+        self.reset_curriculum_lin_tracking_score = 0.0
+        self.reset_curriculum_ang_tracking_score = 0.0
+        self.reset_curriculum_tracking_score = 0.0
+        self.reset_curriculum_tracking_score_ema = 0.0
+        self.reset_curriculum_stable_iterations = 0
+        self._reset_curriculum_accum_iteration = -1
+        self._reset_curriculum_lin_score_sum = 0.0
+        self._reset_curriculum_ang_score_sum = 0.0
+        self._reset_curriculum_tracking_score_sum = 0.0
+        self._reset_curriculum_score_count = 0
         if self.reset_curriculum_enabled:
             self.reset_curriculum_intensity = float(
                 getattr(self.cfg.terrain, 'reset_curriculum_initial_fraction', 0.0)
             )
 
-    def _update_reset_curriculum(self, tracking_task_rewards=None, tracking_reward_scales=None):
-        if not getattr(self, 'reset_curriculum_enabled', False):
-            return
-
-        if tracking_task_rewards is None or tracking_reward_scales is None:
-            return
-
-        valid = []
-        reward_threshold = float(getattr(self.cfg.terrain, 'reset_curriculum_reward_threshold', 0.9))
-        for key in ("tracking_lin_vel", "tracking_ang_vel"):
-            reward = tracking_task_rewards.get(key)
-            reward_scale = float(tracking_reward_scales.get(key, 0.0))
-            if reward is None or reward_scale <= 0.0:
-                continue
-            valid.append(reward > (reward_threshold * reward_scale))
-
-        if len(valid) == 0:
-            return
-
-        success = valid[0]
-        for item in valid[1:]:
-            success = success & item
-        batch_success = float(success.float().mean().item())
-
-        alpha = float(getattr(self.cfg.terrain, 'reset_curriculum_success_ema_alpha', 0.05))
-        alpha = float(np.clip(alpha, 0.0, 1.0))
-        self.reset_curriculum_success_ema = (
-            (1.0 - alpha) * self.reset_curriculum_success_ema + alpha * batch_success
-        )
-        self.reset_curriculum_lin_progress = batch_success
-        self.reset_curriculum_ang_progress = self.reset_curriculum_success_ema
-
-        start_threshold = float(getattr(self.cfg.terrain, 'reset_curriculum_start_threshold', 0.9))
-        if not self.reset_curriculum_started and self.reset_curriculum_success_ema >= start_threshold:
-            self.reset_curriculum_started = True
-            self.reset_curriculum_start_iteration = int(getattr(global_switch, 'count', 0))
-
+    def _update_reset_curriculum_intensity(self, iteration):
         initial_fraction = float(getattr(self.cfg.terrain, 'reset_curriculum_initial_fraction', 0.0))
         initial_fraction = float(np.clip(initial_fraction, 0.0, 1.0))
         if not self.reset_curriculum_started:
@@ -1032,9 +1012,76 @@ class LeggedRobot(BaseTask):
             return
 
         growth_iterations = max(1, int(getattr(self.cfg.terrain, 'reset_curriculum_growth_iterations', 2000)))
-        elapsed = max(0, int(getattr(global_switch, 'count', 0)) - self.reset_curriculum_start_iteration)
+        elapsed = max(0, int(iteration) - self.reset_curriculum_start_iteration)
         progress = min(1.0, elapsed / growth_iterations)
         self.reset_curriculum_intensity = initial_fraction + (1.0 - initial_fraction) * progress
+
+    def _finalize_reset_curriculum_iteration(self, next_iteration):
+        if self._reset_curriculum_score_count == 0:
+            return
+
+        count = float(self._reset_curriculum_score_count)
+        self.reset_curriculum_lin_tracking_score = self._reset_curriculum_lin_score_sum / count
+        self.reset_curriculum_ang_tracking_score = self._reset_curriculum_ang_score_sum / count
+        self.reset_curriculum_tracking_score = self._reset_curriculum_tracking_score_sum / count
+
+        alpha = float(getattr(self.cfg.terrain, 'reset_curriculum_tracking_ema_alpha', 0.05))
+        alpha = float(np.clip(alpha, 0.0, 1.0))
+        self.reset_curriculum_tracking_score_ema = (
+            (1.0 - alpha) * self.reset_curriculum_tracking_score_ema
+            + alpha * self.reset_curriculum_tracking_score
+        )
+
+        threshold = float(getattr(self.cfg.terrain, 'reset_curriculum_tracking_threshold', 0.7))
+        if self.reset_curriculum_tracking_score_ema >= threshold:
+            self.reset_curriculum_stable_iterations += 1
+        else:
+            self.reset_curriculum_stable_iterations = 0
+
+        required_stability = max(
+            1,
+            int(getattr(self.cfg.terrain, 'reset_curriculum_stability_iterations', 1)),
+        )
+        if not self.reset_curriculum_started and self.reset_curriculum_stable_iterations >= required_stability:
+            self.reset_curriculum_started = True
+            self.reset_curriculum_start_iteration = int(next_iteration)
+
+    def _reset_reset_curriculum_accumulator(self, iteration):
+        self._reset_curriculum_accum_iteration = int(iteration)
+        self._reset_curriculum_lin_score_sum = 0.0
+        self._reset_curriculum_ang_score_sum = 0.0
+        self._reset_curriculum_tracking_score_sum = 0.0
+        self._reset_curriculum_score_count = 0
+
+    def _update_reset_curriculum(self, tracking_task_rewards=None, tracking_reward_scales=None):
+        if not getattr(self, 'reset_curriculum_enabled', False):
+            return
+
+        iteration = int(getattr(global_switch, 'count', 0))
+        if self._reset_curriculum_accum_iteration < 0:
+            self._reset_reset_curriculum_accumulator(iteration)
+        elif iteration != self._reset_curriculum_accum_iteration:
+            self._finalize_reset_curriculum_iteration(iteration)
+            self._reset_reset_curriculum_accumulator(iteration)
+
+        self._update_reset_curriculum_intensity(iteration)
+        if tracking_task_rewards is None or tracking_reward_scales is None:
+            return
+
+        lin_reward = tracking_task_rewards.get("tracking_lin_vel")
+        ang_reward = tracking_task_rewards.get("tracking_ang_vel")
+        lin_scale = float(tracking_reward_scales.get("tracking_lin_vel", 0.0))
+        ang_scale = float(tracking_reward_scales.get("tracking_ang_vel", 0.0))
+        if lin_reward is None or ang_reward is None or lin_scale <= 0.0 or ang_scale <= 0.0:
+            return
+
+        lin_score = torch.clamp(lin_reward / lin_scale, 0.0, 1.0)
+        ang_score = torch.clamp(ang_reward / ang_scale, 0.0, 1.0)
+        tracking_score = torch.minimum(lin_score, ang_score)
+        self._reset_curriculum_lin_score_sum += float(lin_score.sum().item())
+        self._reset_curriculum_ang_score_sum += float(ang_score.sum().item())
+        self._reset_curriculum_tracking_score_sum += float(tracking_score.sum().item())
+        self._reset_curriculum_score_count += int(tracking_score.numel())
 
     def _get_reset_curriculum_range(self, range_name):
         max_range = float(getattr(self.cfg.terrain, range_name))

@@ -90,11 +90,12 @@ def _cfg_snapshot_with_command_limits(cfg):
     return cfg_to_dict(cfg)
 
 
-def configure_train_stage(args):
+def configure_train_stage(args, cfg):
     schedule = StageSchedule(
         args.train_stage,
         args.num_learning_iterations,
         default_switch_iteration=2000 if args.resume else 8000,
+        stage1_arm_ramp_iterations=cfg.env.stage1_arm_ramp_iterations,
         debug=args.debug,
     )
     schedule.configure(global_switch)
@@ -125,6 +126,7 @@ def main(args):
     args.tags.append(f"seed{args.seed}")
 
     cfg = build_roboduet_config(args, traj_track_reward_scale=5.0, debug=args.debug)
+    cfg.env.arm_policy_enabled = args.train_stage != "stage1"
     cfg.env.record_video = args.video
     if not cfg.env.record_video:
         RunnerArgs.log_video = False
@@ -151,7 +153,7 @@ def main(args):
     print(f"ArmRunnerArgs: {vars(ArmRunnerArgs)}")
     print("-" * 50)
 
-    configure_train_stage(args)
+    configure_train_stage(args, cfg)
 
     global_switch.init_sigmoid_lr()
     # global_switch.init_linear_lr()

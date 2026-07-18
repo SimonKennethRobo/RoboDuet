@@ -1321,7 +1321,7 @@ class WBCEnv(LeggedRobot):
 
     def _arm_step_end_hook(self):
         self.last_plan_actions[:] = self.plan_actions[:]
-        if self.cfg.wbc.trajectory.enabled:
+        if self.cfg.env.arm_policy_enabled and self.cfg.wbc.trajectory.enabled:
             self.prev_ee_twist_body[:] = self.get_ee_twist_body()
 
     def _arm_privileged_obs_hook(self, privileged_obs_buf):

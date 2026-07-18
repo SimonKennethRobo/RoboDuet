@@ -87,7 +87,11 @@ ROBODUET_OVERRIDES = {
     "env.recording_overlay_text": True,
     "env.recording_overlay_trajectory": True,
     "env.debug_viz": False,
+    # Disabled only by the dual-policy runner for pure stage-1 training. Two-stage,
+    # stage-2, unified training and play keep the arm-policy path available.
+    "env.arm_policy_enabled": True,
     # Stage-1 arm disturbance curriculum.
+    "env.stage1_arm_ramp_iterations": 8000,
     "env.stage1_arm_fixed_fraction": 0.1,
     "env.stage1_arm_saturation_fraction": 0.8,
     "env.stage1_arm_accel_resample_time_s": 0.01,

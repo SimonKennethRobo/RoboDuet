@@ -217,9 +217,10 @@ class HistoryWrapper(gym.Wrapper):
         super().__init__(env)
         self.env: WBCEnv = env
         cfg: ConfigNode = self.env.cfg
+        self.arm_policy_enabled = bool(getattr(cfg.env, "arm_policy_enabled", True))
         self.obs_history_length = self.env.cfg.env.num_observation_history
 
-        self.num_obs_history = self.obs_history_length * self.num_obs
+        self.num_obs_history = self.obs_history_length * self.num_obs if self.arm_policy_enabled else 0
         self.obs_history = torch.zeros(
             self.env.num_envs, self.num_obs_history, dtype=torch.float, device=self.env.device, requires_grad=False
         )
@@ -234,7 +235,7 @@ class HistoryWrapper(gym.Wrapper):
 
         self.arm_obs_history = torch.zeros(
             self.env.num_envs,
-            cfg.arm.arm_num_obs_history,
+            cfg.arm.arm_num_obs_history if self.arm_policy_enabled else 0,
             dtype=torch.float,
             device=self.env.device,
             requires_grad=False,
@@ -259,6 +260,8 @@ class HistoryWrapper(gym.Wrapper):
         return rew_dog, rew_arm, done, info
 
     def get_observations(self):
+        if not self.arm_policy_enabled:
+            raise RuntimeError("Generic WBC observations are disabled during pure stage-1 training.")
         obs = self.env.get_observations()
         privileged_obs = self.env.get_privileged_observations()
         self.obs_history = torch.cat((self.obs_history[:, self.env.num_obs :], obs), dim=-1)
@@ -280,6 +283,8 @@ class HistoryWrapper(gym.Wrapper):
         return {"obs": obs, "privileged_obs": privileged_obs, "obs_history": self.dog_obs_history}
 
     def get_arm_observations_hand(self, pose_in_ee):
+        if not self.arm_policy_enabled:
+            raise RuntimeError("Arm observations are disabled during pure stage-1 training.")
         obs, privileged_obs = self.env.get_arm_observations()
         obs[:, 12:18] = pose_in_ee
         self.arm_obs_history = torch.cat(
@@ -288,6 +293,8 @@ class HistoryWrapper(gym.Wrapper):
         return {"obs": obs, "privileged_obs": privileged_obs, "obs_history": self.arm_obs_history}
 
     def get_arm_observations(self):
+        if not self.arm_policy_enabled:
+            raise RuntimeError("Arm observations are disabled during pure stage-1 training.")
         obs, privileged_obs = self.env.get_arm_observations()
         self.arm_obs_history = torch.cat(
             (self.arm_obs_history[:, self.env.cfg.arm.arm_num_observations :], obs), dim=-1
