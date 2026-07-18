@@ -56,14 +56,29 @@ def get_play_command_limit(cfg, target, command_key, fallback):
     return pair if pair is not None else fallback
 
 
-def apply_hybrid_reward_settings(cfg):
-    for key, value in vars(cfg.hybrid.rewards).items():
+def apply_wbc_reward_settings(cfg):
+    for key, value in vars(cfg.wbc.rewards).items():
         setattr(cfg.rewards, key, value)
 
 
 def clip_observation(env, obs):
     clip_obs = env.cfg.normalization.clip_observations
     return torch.clip(obs, -clip_obs, clip_obs)
+
+
+def aggregate_episode_value(ep_infos, key):
+    """Aggregate episode scalars, weighting physical metrics by completed episodes."""
+    infos = [info for info in ep_infos if key in info]
+    if not infos:
+        raise KeyError(key)
+    values = torch.stack([info[key] for info in infos])
+    if key.startswith("perf_") and key != "perf_episode_count":
+        weighted_infos = [info for info in infos if "perf_episode_count" in info]
+        if weighted_infos:
+            values = torch.stack([info[key] for info in weighted_infos])
+            weights = torch.stack([info["perf_episode_count"] for info in weighted_infos]).to(values)
+            return torch.sum(values * weights) / torch.clamp(torch.sum(weights), min=1.0)
+    return torch.mean(values)
 
 
 class StageSchedule:
@@ -76,12 +91,14 @@ class StageSchedule:
         train_stage,
         num_learning_iterations,
         default_switch_iteration,
+        stage1_arm_ramp_iterations,
         debug=False,
         debug_switch_iteration=20,
     ):
         self.train_stage = train_stage
         self.num_learning_iterations = num_learning_iterations
         self.default_switch_iteration = default_switch_iteration
+        self.stage1_arm_ramp_iterations = max(1, int(stage1_arm_ramp_iterations))
         self.debug = debug
         self.debug_switch_iteration = debug_switch_iteration
 
@@ -89,45 +106,37 @@ class StageSchedule:
     def starts_in_stage2(self):
         return self.train_stage == self.STAGE2
 
-    def _stage1_learning_iterations(self):
-        if self.train_stage == self.STAGE1:
-            return self.num_learning_iterations
-        if self.train_stage == self.STAGE2:
-            return 1
-        return self.default_switch_iteration
-
     def configure(self, global_switch):
         global_switch.count = 0
         global_switch.stage1_count = 0
         global_switch.switch_flag = False
-        global_switch.stage1_arm_ramp_iterations = max(1, int(self._stage1_learning_iterations()))
+        global_switch.stage1_arm_ramp_iterations = self.stage1_arm_ramp_iterations
 
         if self.train_stage == self.STAGE1:
-            global_switch.pretrained_to_hybrid_start = self.num_learning_iterations + 1
-            global_switch.pretrained_to_hybrid_end = global_switch.pretrained_to_hybrid_start + 1
+            global_switch.pretrained_to_wbc_start = self.num_learning_iterations + 1
+            global_switch.pretrained_to_wbc_end = global_switch.pretrained_to_wbc_start + 1
             return
 
         if self.train_stage == self.STAGE2:
-            global_switch.pretrained_to_hybrid_start = -1
-            global_switch.pretrained_to_hybrid_end = 0
-            global_switch.count = global_switch.pretrained_to_hybrid_end
+            global_switch.pretrained_to_wbc_start = -1
+            global_switch.pretrained_to_wbc_end = 0
+            global_switch.count = global_switch.pretrained_to_wbc_end
             global_switch.open_switch()
             return
 
-        global_switch.pretrained_to_hybrid_start = self.default_switch_iteration
-        global_switch.pretrained_to_hybrid_end = global_switch.pretrained_to_hybrid_start + 0
-        if self.debug and global_switch.pretrained_to_hybrid_start > 0:
-            global_switch.pretrained_to_hybrid_start = self.debug_switch_iteration
-            global_switch.pretrained_to_hybrid_end = global_switch.pretrained_to_hybrid_start + 2
-            global_switch.stage1_arm_ramp_iterations = self.debug_switch_iteration
+        global_switch.pretrained_to_wbc_start = self.default_switch_iteration
+        global_switch.pretrained_to_wbc_end = global_switch.pretrained_to_wbc_start + 0
+        if self.debug and global_switch.pretrained_to_wbc_start > 0:
+            global_switch.pretrained_to_wbc_start = self.debug_switch_iteration
+            global_switch.pretrained_to_wbc_end = global_switch.pretrained_to_wbc_start + 2
 
     def maybe_switch(self, iteration, global_switch, env, message):
-        if global_switch.switch_open or iteration != global_switch.pretrained_to_hybrid_start:
+        if global_switch.switch_open or iteration != global_switch.pretrained_to_wbc_start:
             return False
 
         print(message)
         global_switch.open_switch()
-        apply_hybrid_reward_settings(env.cfg)
+        apply_wbc_reward_settings(env.cfg)
         return True
 
 

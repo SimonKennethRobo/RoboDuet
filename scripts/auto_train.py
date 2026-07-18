@@ -10,10 +10,9 @@ from datetime import datetime
 
 import wandb
 from go1_gym import MINI_GYM_ROOT_DIR
-from go1_gym.envs.roboduet.utils import StageSchedule, apply_hybrid_reward_settings
+from go1_gym.envs.config import build_roboduet_config, cfg_to_dict
+from go1_gym.envs.roboduet.utils import StageSchedule, apply_wbc_reward_settings
 from go1_gym.envs.roboduet.wbc_env import WBCEnv
-from go1_gym.envs.roboduet.wbc_env_config import RoboDuetCfg as Cfg
-from go1_gym.envs.roboduet.wbc_env_config import configure_task_from_args
 from go1_gym.envs.roboduet.wbc_env_wrapper import HistoryWrapper
 from go1_gym.utils import format_code, global_switch, set_seed
 from go1_gym.utils.wandb_config import build_wandb_config
@@ -63,7 +62,10 @@ def apply_dog_checkpoint_command_limits(cfg, ckpt_path):
     with open(params_path, "rb") as f:
         params = pickle.load(f)
     dog_cfg = params.get("Cfg") if isinstance(params, dict) else None
-    dog_commands = getattr(dog_cfg, "commands", None)
+    if isinstance(dog_cfg, dict):
+        dog_commands = dog_cfg.get("commands")
+    else:
+        dog_commands = getattr(dog_cfg, "commands", None)
     if dog_commands is None:
         print(f"[warn] dog parameters.pkl has no Cfg.commands; using current command limits.", flush=True)
         return
@@ -71,8 +73,11 @@ def apply_dog_checkpoint_command_limits(cfg, ckpt_path):
     print(f"Loaded dog policy parameters from {params_path}", flush=True)
     print("Dog command limits applied to stage2:", flush=True)
     for name in _DOG_COMMAND_LIMIT_FIELDS:
-        if hasattr(dog_commands, name):
-            value = getattr(dog_commands, name)
+        if isinstance(dog_commands, dict):
+            value = dog_commands.get(name)
+        else:
+            value = getattr(dog_commands, name, None)
+        if value is not None:
             value = list(value) if isinstance(value, tuple) else value
             setattr(cfg.commands, name, value)
             copied.append(name)
@@ -81,44 +86,16 @@ def apply_dog_checkpoint_command_limits(cfg, ckpt_path):
         print("  [warn] no dog command limit fields were found; using current command limits.", flush=True)
 
 
-def _serializable_config_value(value):
-    if isinstance(value, tuple):
-        return [_serializable_config_value(item) for item in value]
-    if isinstance(value, list):
-        return [_serializable_config_value(item) for item in value]
-    if isinstance(value, dict):
-        return {key: _serializable_config_value(item) for key, item in value.items()}
-    return value
-
-
-def _public_config_dict(obj):
-    if isinstance(obj, dict):
-        items = obj.items()
-    else:
-        items = ((key, getattr(obj, key)) for key in dir(obj) if not key.startswith("_"))
-    result = {}
-    for key, value in items:
-        if callable(value):
-            continue
-        result[key] = _serializable_config_value(value)
-    return result
-
-
 def _cfg_snapshot_with_command_limits(cfg):
-    snapshot = dict(vars(cfg))
-    commands = _public_config_dict(getattr(cfg, "commands"))
-    for key in dir(cfg.commands):
-        if key.startswith("limit_"):
-            commands[key] = _serializable_config_value(getattr(cfg.commands, key))
-    snapshot["commands"] = commands
-    return snapshot
+    return cfg_to_dict(cfg)
 
 
-def configure_train_stage(args):
+def configure_train_stage(args, cfg):
     schedule = StageSchedule(
         args.train_stage,
         args.num_learning_iterations,
         default_switch_iteration=2000 if args.resume else 8000,
+        stage1_arm_ramp_iterations=cfg.env.stage1_arm_ramp_iterations,
         debug=args.debug,
     )
     schedule.configure(global_switch)
@@ -148,9 +125,10 @@ def main(args):
     args.seed = set_seed(args.seed)
     args.tags.append(f"seed{args.seed}")
 
-    configure_task_from_args(Cfg, args, traj_track_reward_scale=5.0, debug=args.debug)
-    Cfg.env.record_video = args.video
-    if not Cfg.env.record_video:
+    cfg = build_roboduet_config(args, traj_track_reward_scale=5.0, debug=args.debug)
+    cfg.env.arm_policy_enabled = args.train_stage != "stage1"
+    cfg.env.record_video = args.video
+    if not cfg.env.record_video:
         RunnerArgs.log_video = False
     RunnerArgs.num_steps_per_env = args.num_steps_per_env
     PPO_Args.num_mini_batches = args.num_mini_batches
@@ -165,7 +143,7 @@ def main(args):
                 flush=True,
             )
         stage2_freeze_loco_policy = False
-    apply_dog_checkpoint_command_limits(Cfg, DogRunnerArgs.ckpt_path)
+    apply_dog_checkpoint_command_limits(cfg, DogRunnerArgs.ckpt_path)
     DogRunnerArgs.stage2_freeze_loco_policy = stage2_freeze_loco_policy
     DogRunnerArgs.stage2_loco_learning_rate = args.stage2_loco_learning_rate
     ArmRunnerArgs.ckpt_path = args.stage2_ckpt_path
@@ -175,18 +153,18 @@ def main(args):
     print(f"ArmRunnerArgs: {vars(ArmRunnerArgs)}")
     print("-" * 50)
 
-    configure_train_stage(args)
+    configure_train_stage(args, cfg)
 
     global_switch.init_sigmoid_lr()
     # global_switch.init_linear_lr()
 
     if args.train_stage == "stage2":
-        apply_hybrid_reward_settings(Cfg)
+        apply_wbc_reward_settings(cfg)
 
     now = datetime.now()
     wandb_config = build_wandb_config(
         args=args,
-        Cfg=Cfg,
+        Cfg=cfg,
         RunnerArgs=RunnerArgs,
         ArmRunnerArgs=ArmRunnerArgs,
         DogRunnerArgs=DogRunnerArgs,
@@ -194,8 +172,8 @@ def main(args):
         DogAC_Args=DogAC_Args,
         PPO_Args=PPO_Args,
         GlobalSwitch={
-            "pretrained_to_hybrid_start": global_switch.pretrained_to_hybrid_start,
-            "pretrained_to_hybrid_end": global_switch.pretrained_to_hybrid_end,
+            "pretrained_to_wbc_start": global_switch.pretrained_to_wbc_start,
+            "pretrained_to_wbc_end": global_switch.pretrained_to_wbc_end,
             "stage1_arm_ramp_iterations": getattr(global_switch, "stage1_arm_ramp_iterations", None),
         },
     )
@@ -239,8 +217,12 @@ def main(args):
             for filename in files:
                 if filename.endswith(".py"):
                     shutil.copyfile(osp.join(root, filename), osp.join(target_root, filename))
-        shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/go1/go1_config.py", f"{args.log_dir}/scripts/go1_config.py")
-        shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/go1/wtw_config.py", f"{args.log_dir}/scripts/wtw_config.py")
+        shutil.copytree(
+            f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/config",
+            f"{args.log_dir}/scripts/config",
+            dirs_exist_ok=True,
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+        )
         shutil.copyfile(
             f"{MINI_GYM_ROOT_DIR}/go1_gym_learn/ppo_cse_automatic/arm_ac.py", f"{args.log_dir}/scripts/arm_ac.py"
         )
@@ -251,7 +233,7 @@ def main(args):
         wandb.run.log_code(f"{args.log_dir}/scripts")
 
         temp_dict = {
-            "Cfg": _cfg_snapshot_with_command_limits(Cfg),
+            "Cfg": _cfg_snapshot_with_command_limits(cfg),
             "RunnerArgs": vars(RunnerArgs),
             "ArmAC_Args": vars(ArmAC_Args),
             "DogAC_Args": vars(DogAC_Args),
@@ -268,8 +250,8 @@ def main(args):
 
         wandb.log(
             {
-                "Global_Switch/start": global_switch.pretrained_to_hybrid_start,
-                "Global_Switch/end": global_switch.pretrained_to_hybrid_end,
+                "Global_Switch/start": global_switch.pretrained_to_wbc_start,
+                "Global_Switch/end": global_switch.pretrained_to_wbc_end,
             },
             step=0,
         )
@@ -277,7 +259,7 @@ def main(args):
     env = WBCEnv(
         sim_device=args.sim_device,
         headless=args.headless,
-        cfg=Cfg,
+        cfg=cfg,
         graphics_device_id=args.graphics_device_id,
     )
     env = HistoryWrapper(env)

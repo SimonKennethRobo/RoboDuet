@@ -750,7 +750,7 @@ def parse_args(argv: Optional[List[str]] = None):
     p.add_argument("--skip_b", action="store_true")
     p.add_argument("--skip_c", action="store_true")
     p.add_argument("--skip_d", action="store_true")
-    p.add_argument("--stage2", action="store_true", help="[Reserved] Stage-2 hybrid evaluation (not yet implemented)")
+    p.add_argument("--stage2", action="store_true", help="[Reserved] Stage-2 WBC evaluation (not yet implemented)")
     args = p.parse_args(argv)
     args.scenario_config = {}
     args.profile_data = {}

@@ -3,8 +3,7 @@
 
 The default path benchmarks the current stage-2 task shape with trajectory
 tracking and dynamic gait enabled. Each env count is executed in a fresh child
-process so global Cfg mutations and GPU allocations do not leak into the next
-measurement.
+process so GPU allocations do not leak into the next measurement.
 """
 
 import argparse
@@ -20,8 +19,11 @@ import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+BENCHMARK_DIR = Path(__file__).resolve().parent
+# Direct execution adds ``benchmark/`` to sys.path, where ``inspect.py`` can
+# shadow Python's standard-library ``inspect`` during the IsaacGym import.
+sys.path = [entry for entry in sys.path if Path(entry or os.getcwd()).resolve() != BENCHMARK_DIR]
+sys.path.insert(0, str(REPO_ROOT))
 
 
 DEFAULT_ENV_NUMS = [512, 1024, 2048, 4096, 8192, 10240, 20480, 40960, 51200, 102400, 204800]
@@ -30,9 +32,8 @@ np = None
 torch = None
 HistoryWrapper = None
 WBCEnv = None
-Cfg = None
 StageSchedule = None
-configure_task_from_args = None
+build_roboduet_config = None
 global_switch = None
 
 
@@ -41,9 +42,8 @@ def load_isaac_modules():
     global torch
     global HistoryWrapper
     global WBCEnv
-    global Cfg
     global StageSchedule
-    global configure_task_from_args
+    global build_roboduet_config
     global global_switch
 
     if torch is not None:
@@ -58,40 +58,41 @@ def load_isaac_modules():
     from go1_gym.envs.roboduet.wbc_env_wrapper import HistoryWrapper as _HistoryWrapper
     from go1_gym.envs.roboduet import WBCEnv as _WBCEnv
     from go1_gym.envs.roboduet.utils import StageSchedule as _StageSchedule
-    from go1_gym.envs.roboduet.wbc_env_config import RoboDuetCfg as _Cfg
-    from go1_gym.envs.roboduet.wbc_env_config import configure_task_from_args as _configure_task_from_args
+    from go1_gym.envs.config import build_roboduet_config as _build_roboduet_config
     from go1_gym.utils import global_switch as _global_switch
 
     np = _np
     torch = _torch
     HistoryWrapper = _HistoryWrapper
     WBCEnv = _WBCEnv
-    Cfg = _Cfg
     StageSchedule = _StageSchedule
-    configure_task_from_args = _configure_task_from_args
+    build_roboduet_config = _build_roboduet_config
     global_switch = _global_switch
 
 
 def configure_cfg(args):
     """Mirror the task-relevant auto_train.py config without wandb/runner setup."""
 
-    configure_task_from_args(Cfg, args, traj_track_reward_scale=5.0)
+    cfg = build_roboduet_config(args, traj_track_reward_scale=5.0)
 
     if not args.randomize_materials:
-        Cfg.domain_rand.randomize_friction = False
-        Cfg.domain_rand.randomize_restitution = False
+        cfg.domain_rand.randomize_friction = False
+        cfg.domain_rand.randomize_restitution = False
 
-    Cfg.env.record_video = False
-    Cfg.asset.render_sphere = False
+    cfg.env.record_video = False
+    cfg.asset.render_sphere = False
 
     train_stage = StageSchedule.STAGE2 if args.stage2 else StageSchedule.STAGE1
+    cfg.env.arm_policy_enabled = args.stage2
     schedule = StageSchedule(
         train_stage=train_stage,
         num_learning_iterations=args.steps + args.warmup_steps,
         default_switch_iteration=args.steps + args.warmup_steps + 1000,
+        stage1_arm_ramp_iterations=cfg.env.stage1_arm_ramp_iterations,
     )
     schedule.configure(global_switch)
     global_switch.init_sigmoid_lr()
+    return cfg
 
 
 def synchronize(device):
@@ -374,19 +375,19 @@ def run_single(args):
             except Exception:
                 pass
 
-    configure_cfg(args)
+    cfg = configure_cfg(args)
 
     env = WBCEnv(
         sim_device=args.sim_device,
         headless=True,
         num_envs=args.num_envs,
-        cfg=Cfg,
+        cfg=cfg,
         graphics_device_id=args.graphics_device_id,
     )
     env = HistoryWrapper(env)
 
     if args.stage2:
-        global_switch.count = global_switch.pretrained_to_hybrid_end
+        global_switch.count = global_switch.pretrained_to_wbc_end
         global_switch.open_switch()
 
     env.reset()

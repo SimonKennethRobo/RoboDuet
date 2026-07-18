@@ -15,7 +15,7 @@ from params_proto import PrefixProto
 
 import wandb
 from go1_gym import MINI_GYM_ROOT_DIR
-from go1_gym.envs.roboduet.utils import apply_hybrid_reward_settings
+from go1_gym.envs.roboduet.utils import aggregate_episode_value, apply_wbc_reward_settings
 from go1_gym.envs.roboduet.wbc_env_wrapper import HistoryWrapper
 from go1_gym.utils import global_switch
 
@@ -125,15 +125,19 @@ class Runner:
         self.num_steps_per_env = RunnerArgs.num_steps_per_env
         self.stage2_loco_policy_frozen = False
         self._stage2_loco_policy_mode_applied = False
+        self.arm_policy_enabled = self.env.arm_policy_enabled
 
-        self.arm_model = ArmActorCritic(
-            num_obs=self.env.cfg.arm.arm_num_observations,
-            num_privileged_obs=self.env.cfg.arm.arm_num_privileged_obs,
-            num_obs_history=self.env.cfg.arm.arm_num_obs_history,
-            num_actions=self.env.cfg.arm.num_actions_arm_cd,
-            use_adaptation_module=self.env.cfg.arm.use_adaptation_module,
-            device=self.device,
-        ).to(self.device)
+        self.arm_model = None
+        self.alg_arm = None
+        if self.arm_policy_enabled:
+            self.arm_model = ArmActorCritic(
+                num_obs=self.env.cfg.arm.arm_num_observations,
+                num_privileged_obs=self.env.cfg.arm.arm_num_privileged_obs,
+                num_obs_history=self.env.cfg.arm.arm_num_obs_history,
+                num_actions=self.env.cfg.arm.num_actions_arm_cd,
+                use_adaptation_module=self.env.cfg.arm.use_adaptation_module,
+                device=self.device,
+            ).to(self.device)
 
         self.dog_model = DogActorCritic(
             num_obs=self.env.cfg.dog.dog_num_observations,
@@ -155,20 +159,23 @@ class Runner:
                 print("successfully loaded dog weights!!!")
 
         if ArmRunnerArgs.ckpt_path is not None:
+            if not self.arm_policy_enabled:
+                raise ValueError("An arm checkpoint cannot be loaded when the arm policy is disabled for pure stage-1.")
             weights = torch.load(ArmRunnerArgs.ckpt_path, map_location=self.device)
             self.arm_model.load_state_dict(state_dict=weights)
             print("successfully loaded arm weights!!!")
 
-        self.alg_arm = PPO(self.arm_model, device=self.device)
-        self.alg_arm.init_storage(
-            self.env.num_train_envs,
-            self.num_steps_per_env,
-            [self.env.cfg.arm.arm_num_observations],
-            [self.env.cfg.arm.arm_num_privileged_obs],
-            [self.env.cfg.arm.arm_num_obs_history],
-            [self.env.cfg.arm.num_actions_arm_cd],
-            [self.env.cfg.arm.num_actions_arm_cd],
-        )
+        if self.arm_policy_enabled:
+            self.alg_arm = PPO(self.arm_model, device=self.device)
+            self.alg_arm.init_storage(
+                self.env.num_train_envs,
+                self.num_steps_per_env,
+                [self.env.cfg.arm.arm_num_observations],
+                [self.env.cfg.arm.arm_num_privileged_obs],
+                [self.env.cfg.arm.arm_num_obs_history],
+                [self.env.cfg.arm.num_actions_arm_cd],
+                [self.env.cfg.arm.num_actions_arm_cd],
+            )
 
         self.alg_dog = PPO(self.dog_model, device=self.device)
         self.alg_dog.init_storage(
@@ -224,8 +231,10 @@ class Runner:
         if not global_switch.switch_open:
             global_switch.stage1_count += 1
 
-        if iteration != global_switch.pretrained_to_hybrid_start or global_switch.switch_open:
+        if iteration != global_switch.pretrained_to_wbc_start or global_switch.switch_open:
             return
+        if not self.arm_policy_enabled:
+            raise RuntimeError("Stage schedule attempted to enable WBC without an initialized arm policy.")
 
         blue_bold_text = "\033[1;34m"  # bold blue
         reset_color = "\033[0m"  # reset
@@ -233,13 +242,13 @@ class Runner:
             blue_bold_text
             + "=" * 160
             + "\n"
-            + "Multi-agents Policy Output: Pretrained model training finished, start to train hybrid model."
+            + "Multi-agents Policy Output: Pretrained model training finished, start to train WBC model."
             + "\n"
             + "=" * 160
             + reset_color
         )
         global_switch.open_switch()
-        apply_hybrid_reward_settings(self.env.cfg)
+        apply_wbc_reward_settings(self.env.cfg)
         self._apply_stage2_loco_policy_settings()
 
     def learn(
@@ -254,18 +263,15 @@ class Runner:
         # split train and test envs
         num_train_envs = self.env.num_train_envs
 
-        obs_dict_arm = self.env.get_arm_observations()
-        obs_arm, privileged_obs_arm, obs_history_arm = (
-            obs_dict_arm["obs"],
-            obs_dict_arm["privileged_obs"],
-            obs_dict_arm["obs_history"],
-        )
-        obs_arm, privileged_obs_arm, obs_history_arm = (
-            obs_arm.to(self.device),
-            privileged_obs_arm.to(self.device),
-            obs_history_arm.to(self.device),
-        )
-        self.alg_arm.actor_critic.train()
+        obs_arm = privileged_obs_arm = obs_history_arm = None
+        if self.arm_policy_enabled:
+            obs_dict_arm = self.env.get_arm_observations()
+            obs_arm, privileged_obs_arm, obs_history_arm = (
+                obs_dict_arm["obs"].to(self.device),
+                obs_dict_arm["privileged_obs"].to(self.device),
+                obs_dict_arm["obs_history"].to(self.device),
+            )
+            self.alg_arm.actor_critic.train()
         if self._dog_policy_trainable_this_iteration():
             self.alg_dog.actor_critic.train()
         else:
@@ -434,11 +440,11 @@ class Runner:
                 iteration_time = learn_time + collection_time
                 fps = self.num_steps_per_env * self.env.num_envs / iteration_time
 
-                for key in ep_infos[0].keys():
-                    mean = []
-                    for ep_info in ep_infos:
-                        mean.append(ep_info[key])
-                    mean = torch.mean(torch.stack(mean))
+                episode_keys = dict.fromkeys(key for ep_info in ep_infos for key in ep_info)
+                for key in episode_keys:
+                    if key == "perf_episode_count":
+                        continue
+                    mean = aggregate_episode_value(ep_infos, key)
 
                     ep_string += f"""{f"Mean episode {key}:":>{pad}} {mean:.4f}\n"""
 
@@ -453,24 +459,36 @@ class Runner:
                         elif key.startswith("stage2_base_unlock_"):
                             name = key.replace("stage2_base_unlock_", "", 1)
                             wandb_dict["Curriculum/stage2_base_unlock_" + name] = mean
+                        elif key.startswith("reset_curriculum_"):
+                            name = key.replace("reset_curriculum_", "", 1)
+                            wandb_dict["Curriculum/reset_" + name] = mean
+                        elif key.startswith("perf_"):
+                            name = key.replace("perf_", "", 1)
+                            wandb_dict["Performance/" + name] = mean
                         elif key.startswith("global_switch_"):
                             name = key.replace("global_switch_", "", 1)
                             wandb_dict["Global_Switch/" + name] = mean
                         else:
                             wandb_dict["Train_Reward_episode/" + key] = mean
 
-                arm_action_std = self.alg_arm.actor_critic.std.clone()
+                arm_action_std = (
+                    self.alg_arm.actor_critic.std.clone()
+                    if self.arm_policy_enabled
+                    else torch.empty(0, device=self.device)
+                )
                 dog_action_std = self.alg_dog.actor_critic.std.clone()
                 if not self.debug:
-                    wandb_dict["Train_Loss/mean_value_loss_arm"] = mean_value_loss_arm
-                    wandb_dict["Train_Loss/mean_surrogate_loss_arm"] = mean_surrogate_loss_arm
-                    wandb_dict["Train_Loss/mean_adaptation_module_loss_arm"] = mean_adaptation_module_loss_arm
+                    if self.arm_policy_enabled:
+                        wandb_dict["Train_Loss/mean_value_loss_arm"] = mean_value_loss_arm
+                        wandb_dict["Train_Loss/mean_surrogate_loss_arm"] = mean_surrogate_loss_arm
+                        wandb_dict["Train_Loss/mean_adaptation_module_loss_arm"] = mean_adaptation_module_loss_arm
 
                     wandb_dict["Train_Loss/mean_value_loss_dog"] = mean_value_loss_dog
                     wandb_dict["Train_Loss/mean_surrogate_loss_dog"] = mean_surrogate_loss_dog
                     wandb_dict["Train_Loss/mean_adaptation_module_loss_dog"] = mean_adaptation_module_loss_dog
 
-                    wandb_dict["Train_std/arm_action_std"] = arm_action_std.mean()
+                    if self.arm_policy_enabled:
+                        wandb_dict["Train_std/arm_action_std"] = arm_action_std.mean()
                     wandb_dict["Train_std/dog_action_std"] = dog_action_std.mean()
 
                     if len(rewbuffer) > 0:
@@ -542,7 +560,8 @@ class Runner:
 
             ep_infos.clear()
 
-        self.save_arm(it)
+        if self.arm_policy_enabled:
+            self.save_arm(it)
         self.save_dog(it)
 
     def save_dog(self, it):
@@ -566,6 +585,8 @@ class Runner:
         traced_script_body_module_dog.save(body_dog_path)
 
     def save_arm(self, it):
+        if not self.arm_policy_enabled:
+            return
         torch.save(
             self.alg_arm.actor_critic.state_dict(), osp.join(self.log_dir, f"checkpoints_arm/ac_weights_{it:06d}.pt")
         )
@@ -636,12 +657,16 @@ class Runner:
                 # wandb.run.summary["latest_video"] = wandb.Video(frames, fps=1 / self.env.dt, format='mp4')
 
     def get_inference_policy(self, device=None):
+        if not self.arm_policy_enabled:
+            raise RuntimeError("Arm inference policy is unavailable during pure stage-1 training.")
         self.alg_arm.actor_critic.eval()
         if device is not None:
             self.alg_arm.actor_critic.to(device)
         return self.alg_arm.actor_critic.act_inference
 
     def get_expert_policy(self, device=None):
+        if not self.arm_policy_enabled:
+            raise RuntimeError("Arm expert policy is unavailable during pure stage-1 training.")
         self.alg_arm.actor_critic.eval()
         if device is not None:
             self.alg_arm.actor_critic.to(device)

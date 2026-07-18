@@ -6,7 +6,7 @@ import torch
 from isaacgym.torch_utils import *
 
 from go1_gym.envs import *
-from go1_gym.envs.roboduet.wbc_env_config import configure_privileged_obs_dims
+from go1_gym.envs.config import configure_privileged_obs_dims
 from go1_gym.envs.roboduet.wbc_env_wrapper import KeyboardStage1Wrapper
 from go1_gym.utils.viz import add_rerun_args, make_rerun_logger
 from scripts.load_policy import load_arm_policy, load_dog_policy, load_env
@@ -57,8 +57,8 @@ def main(args):
         global_switch.stage1_arm_ramp_iterations = ramp_iters
         stage1_arm_intensity = float(getattr(args, "stage1_arm_intensity", 1.0))
         global_switch.stage1_count = int(max(0.0, min(1.0, stage1_arm_intensity)) * ramp_iters)
-        global_switch.pretrained_to_hybrid_start = getattr(args, "num_eval_steps", 30000) + 1
-        global_switch.pretrained_to_hybrid_end = global_switch.pretrained_to_hybrid_start + 1
+        global_switch.pretrained_to_wbc_start = getattr(args, "num_eval_steps", 30000) + 1
+        global_switch.pretrained_to_wbc_end = global_switch.pretrained_to_wbc_start + 1
     else:
         global_switch.open_switch()
 

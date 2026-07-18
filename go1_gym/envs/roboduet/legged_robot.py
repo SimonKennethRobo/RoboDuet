@@ -23,17 +23,15 @@ import torch
 
 from go1_gym import MINI_GYM_ROOT_DIR
 from go1_gym.envs.base.base_task import BaseTask
+from go1_gym.envs.config import ConfigNode
 from go1_gym.utils import global_switch, quaternion_to_rpy
 from go1_gym.utils.math_utils import get_scale_shift, quat_apply_yaw
 from go1_gym.utils.terrain import Terrain
 
-from .wbc_env_config import RoboDuetCfg as Cfg
-
-
 class LeggedRobot(BaseTask):
     def __init__(
         self,
-        cfg: Cfg,
+        cfg: ConfigNode,
         sim_params,
         physics_engine,
         sim_device,
@@ -220,6 +218,7 @@ class LeggedRobot(BaseTask):
         if not self.headless:
             self.render_gui()
         randomize_action_delay = getattr(self.cfg.domain_rand, "randomize_action_delay", False)
+        self.step_locomotion_power.zero_()
         if randomize_action_delay:
             actions_start_decimation = torch.randint(
                 0,
@@ -243,6 +242,13 @@ class LeggedRobot(BaseTask):
             # if self.device == 'cpu':
             self.gym.fetch_results(self.sim, True)
             self.gym.refresh_dof_state_tensor(self.sim)
+            self.step_locomotion_power += torch.sum(
+                torch.abs(
+                    self.torques[:, : self.num_actions_loco]
+                    * self.dof_vel[:, : self.num_actions_loco]
+                ),
+                dim=-1,
+            ) / float(self.cfg.control.decimation)
         self.post_physics_step()
 
         return self.rew_buf_dog, self.rew_buf_arm, self.reset_buf, self.extras
@@ -321,6 +327,18 @@ class LeggedRobot(BaseTask):
         """Final bookkeeping at the end of post_physics_step (plan actions, EE twist cache)."""
         pass
 
+    def _arm_init_performance_metrics_hook(self):
+        """Register arm/WBC performance accumulators after common buffers exist."""
+        pass
+
+    def _arm_update_performance_metrics_hook(self):
+        """Accumulate arm/WBC metrics from physical state, independently of rewards."""
+        pass
+
+    def _arm_log_performance_metrics_hook(self, train_env_ids, episode_steps):
+        """Append arm/WBC episode metrics to ``extras['train/episode']``."""
+        pass
+
     def post_physics_step(self):
         """check terminations, compute observations and rewards
         calls self._post_physics_step_callback() for common computations
@@ -350,11 +368,13 @@ class LeggedRobot(BaseTask):
 
         # compute observations, rewards, resets, ...
         self.check_termination()
+        self._update_performance_metrics()
         self.compute_reward()
         env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
         self.reset_idx(env_ids)
 
-        self.compute_observations()
+        if getattr(self.cfg.env, "arm_policy_enabled", True):
+            self.compute_observations()
 
         self.last_last_actions[:] = self.last_actions[:]
         self.last_actions[:] = self.actions[:]
@@ -393,6 +413,9 @@ class LeggedRobot(BaseTask):
         if len(env_ids) == 0:
             return
 
+        completed_episode_steps = self.episode_length_buf[env_ids].clone()
+        completed_episode_timeouts = self.time_out_buf[env_ids].clone()
+
         # reset robot states
         self._resample_commands(env_ids)
         self._arm_reset_hook(env_ids)
@@ -417,6 +440,12 @@ class LeggedRobot(BaseTask):
         train_env_ids = env_ids[env_ids < self.num_train_envs]
         if len(train_env_ids) > 0:
             self.extras["train/episode"] = {}
+            train_mask = env_ids < self.num_train_envs
+            self._log_performance_metrics(
+                train_env_ids,
+                completed_episode_steps[train_mask],
+                completed_episode_timeouts[train_mask],
+            )
             disable_dog_rewards = bool(getattr(self, "disable_dog_policy_rewards", False))
             for key in self.episode_sums.keys():
                 if (
@@ -446,11 +475,11 @@ class LeggedRobot(BaseTask):
                 device=self.device,
             )
             self.extras["train/episode"]["global_switch_pretrained_start"] = torch.tensor(
-                float(global_switch.pretrained_to_hybrid_start),
+                float(global_switch.pretrained_to_wbc_start),
                 device=self.device,
             )
             self.extras["train/episode"]["global_switch_pretrained_end"] = torch.tensor(
-                float(global_switch.pretrained_to_hybrid_end),
+                float(global_switch.pretrained_to_wbc_end),
                 device=self.device,
             )
             self.extras["train/episode"]["global_switch_open"] = torch.tensor(
@@ -490,20 +519,28 @@ class LeggedRobot(BaseTask):
                     float(self.reset_curriculum_intensity),
                     device=self.device,
                 )
-                self.extras["train/episode"]["reset_curriculum_lin_progress"] = torch.tensor(
-                    float(self.reset_curriculum_lin_progress),
+                self.extras["train/episode"]["reset_curriculum_lin_tracking_score"] = torch.tensor(
+                    float(self.reset_curriculum_lin_tracking_score),
                     device=self.device,
                 )
-                self.extras["train/episode"]["reset_curriculum_ang_progress"] = torch.tensor(
-                    float(self.reset_curriculum_ang_progress),
+                self.extras["train/episode"]["reset_curriculum_ang_tracking_score"] = torch.tensor(
+                    float(self.reset_curriculum_ang_tracking_score),
+                    device=self.device,
+                )
+                self.extras["train/episode"]["reset_curriculum_tracking_score"] = torch.tensor(
+                    float(self.reset_curriculum_tracking_score),
+                    device=self.device,
+                )
+                self.extras["train/episode"]["reset_curriculum_tracking_score_ema"] = torch.tensor(
+                    float(self.reset_curriculum_tracking_score_ema),
+                    device=self.device,
+                )
+                self.extras["train/episode"]["reset_curriculum_stable_iterations"] = torch.tensor(
+                    float(self.reset_curriculum_stable_iterations),
                     device=self.device,
                 )
                 self.extras["train/episode"]["reset_curriculum_started"] = torch.tensor(
                     float(self.reset_curriculum_started),
-                    device=self.device,
-                )
-                self.extras["train/episode"]["reset_curriculum_success_ema"] = torch.tensor(
-                    float(self.reset_curriculum_success_ema),
                     device=self.device,
                 )
 
@@ -515,6 +552,9 @@ class LeggedRobot(BaseTask):
 
         if self.cfg.env.send_timeouts:
             self.extras["time_outs"] = self.time_out_buf[: self.num_train_envs]
+
+        for metric_sum in self.performance_metric_sums.values():
+            metric_sum[env_ids] = 0.0
 
         self.gait_indices[env_ids] = 0
 
@@ -977,56 +1017,135 @@ class LeggedRobot(BaseTask):
 
         return props
 
+    def _init_performance_metrics(self):
+        """Allocate raw physical-performance accumulators, separate from reward bookkeeping."""
+        metric_names = (
+            "vx_abs_error",
+            "vy_abs_error",
+            "yaw_rate_abs_error",
+            "lin_vel_sq_error",
+            "yaw_rate_sq_error",
+            "roll_sq",
+            "pitch_sq",
+            "vertical_velocity_sq",
+            "horizontal_angular_velocity_sq",
+            "base_height_sq_error",
+            "foot_slip_speed_sum",
+            "foot_contact_samples",
+            "locomotion_power_sum",
+        )
+        self.performance_metric_sums = {
+            name: torch.zeros(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
+            for name in metric_names
+        }
+        self.step_locomotion_power = torch.zeros(
+            self.num_envs,
+            dtype=torch.float,
+            device=self.device,
+            requires_grad=False,
+        )
+        self._arm_init_performance_metrics_hook()
+
+    def _update_performance_metrics(self):
+        """Accumulate one simulator-step sample in physical units, without reward functions or scales."""
+        lin_vel_error = self.base_lin_vel[:, :2] - self.commands_dog[:, :2]
+        yaw_rate_error = self.base_ang_vel[:, 2] - self.commands_dog[:, 2]
+        sums = self.performance_metric_sums
+        sums["vx_abs_error"] += torch.abs(lin_vel_error[:, 0])
+        sums["vy_abs_error"] += torch.abs(lin_vel_error[:, 1])
+        sums["yaw_rate_abs_error"] += torch.abs(yaw_rate_error)
+        sums["lin_vel_sq_error"] += torch.sum(torch.square(lin_vel_error), dim=-1)
+        sums["yaw_rate_sq_error"] += torch.square(yaw_rate_error)
+        sums["roll_sq"] += torch.square(self.roll)
+        sums["pitch_sq"] += torch.square(self.pitch)
+        sums["vertical_velocity_sq"] += torch.square(self.base_lin_vel[:, 2])
+        sums["horizontal_angular_velocity_sq"] += torch.sum(torch.square(self.base_ang_vel[:, :2]), dim=-1)
+
+        if isinstance(self.measured_heights, torch.Tensor):
+            if self.measured_heights.ndim > 1:
+                reference_height = torch.mean(self.measured_heights, dim=1)
+            else:
+                reference_height = self.measured_heights
+        else:
+            reference_height = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        height_command = self.commands_dog[:, 5] if self.commands_dog.shape[1] > 5 else 0.0
+        body_height = self.base_pos[:, 2] - reference_height
+        height_target = float(self.cfg.rewards.base_height_target) + height_command
+        sums["base_height_sq_error"] += torch.square(body_height - height_target)
+
+        foot_contact = self.contact_forces[:, self.feet_indices, 2] > 1.0
+        foot_slip_speed = torch.norm(self.foot_velocities[:, :, :2], dim=-1)
+        sums["foot_slip_speed_sum"] += torch.sum(foot_slip_speed * foot_contact.float(), dim=-1)
+        sums["foot_contact_samples"] += torch.sum(foot_contact, dim=-1).float()
+        sums["locomotion_power_sum"] += self.step_locomotion_power
+        self._arm_update_performance_metrics_hook()
+
+    @staticmethod
+    def _mean_valid_metric(values, valid):
+        if torch.any(valid):
+            return torch.mean(values[valid])
+        return torch.zeros((), dtype=values.dtype, device=values.device)
+
+    def _log_performance_metrics(self, train_env_ids, episode_steps, timeouts):
+        valid = episode_steps > 0
+        if not torch.any(valid):
+            return
+
+        steps = torch.clamp(episode_steps.float(), min=1.0)
+        sums = self.performance_metric_sums
+        extras = self.extras["train/episode"]
+
+        def episode_mean(name):
+            return sums[name][train_env_ids] / steps
+
+        def mean_valid(values):
+            return self._mean_valid_metric(values, valid)
+
+        extras["perf_episode_count"] = valid.float().sum()
+        extras["perf_vx_mae_mps"] = mean_valid(episode_mean("vx_abs_error"))
+        extras["perf_vy_mae_mps"] = mean_valid(episode_mean("vy_abs_error"))
+        extras["perf_yaw_rate_mae_rad_s"] = mean_valid(episode_mean("yaw_rate_abs_error"))
+        extras["perf_lin_vel_rmse_mps"] = mean_valid(torch.sqrt(episode_mean("lin_vel_sq_error")))
+        extras["perf_yaw_rate_rmse_rad_s"] = mean_valid(torch.sqrt(episode_mean("yaw_rate_sq_error")))
+        extras["perf_roll_rms_rad"] = mean_valid(torch.sqrt(episode_mean("roll_sq")))
+        extras["perf_pitch_rms_rad"] = mean_valid(torch.sqrt(episode_mean("pitch_sq")))
+        extras["perf_vertical_velocity_rms_mps"] = mean_valid(
+            torch.sqrt(episode_mean("vertical_velocity_sq"))
+        )
+        extras["perf_horizontal_angular_velocity_rms_rad_s"] = mean_valid(
+            torch.sqrt(episode_mean("horizontal_angular_velocity_sq"))
+        )
+        extras["perf_base_height_rmse_m"] = mean_valid(torch.sqrt(episode_mean("base_height_sq_error")))
+        contact_samples = sums["foot_contact_samples"][train_env_ids]
+        contact_valid = valid & (contact_samples > 0)
+        slip_speed = sums["foot_slip_speed_sum"][train_env_ids] / torch.clamp(contact_samples, min=1.0)
+        extras["perf_foot_slip_speed_mps"] = self._mean_valid_metric(slip_speed, contact_valid)
+        extras["perf_locomotion_power_w"] = mean_valid(episode_mean("locomotion_power_sum"))
+        extras["perf_early_termination_rate"] = mean_valid((~timeouts).float())
+        extras["perf_episode_duration_s"] = mean_valid(steps * self.dt)
+        self._arm_log_performance_metrics_hook(train_env_ids, steps)
+
     def _init_reset_curriculum(self):
         self.reset_curriculum_enabled = bool(getattr(self.cfg.terrain, 'reset_curriculum', False))
         self.reset_curriculum_started = False
         self.reset_curriculum_start_iteration = -1
         self.reset_curriculum_intensity = 1.0
-        self.reset_curriculum_lin_progress = 0.0
-        self.reset_curriculum_ang_progress = 0.0
-        self.reset_curriculum_success_ema = 0.0
+        self.reset_curriculum_lin_tracking_score = 0.0
+        self.reset_curriculum_ang_tracking_score = 0.0
+        self.reset_curriculum_tracking_score = 0.0
+        self.reset_curriculum_tracking_score_ema = 0.0
+        self.reset_curriculum_stable_iterations = 0
+        self._reset_curriculum_accum_iteration = -1
+        self._reset_curriculum_lin_score_sum = 0.0
+        self._reset_curriculum_ang_score_sum = 0.0
+        self._reset_curriculum_tracking_score_sum = 0.0
+        self._reset_curriculum_score_count = 0
         if self.reset_curriculum_enabled:
             self.reset_curriculum_intensity = float(
                 getattr(self.cfg.terrain, 'reset_curriculum_initial_fraction', 0.0)
             )
 
-    def _update_reset_curriculum(self, tracking_task_rewards=None, tracking_reward_scales=None):
-        if not getattr(self, 'reset_curriculum_enabled', False):
-            return
-
-        if tracking_task_rewards is None or tracking_reward_scales is None:
-            return
-
-        valid = []
-        reward_threshold = float(getattr(self.cfg.terrain, 'reset_curriculum_reward_threshold', 0.9))
-        for key in ("tracking_lin_vel", "tracking_ang_vel"):
-            reward = tracking_task_rewards.get(key)
-            reward_scale = float(tracking_reward_scales.get(key, 0.0))
-            if reward is None or reward_scale <= 0.0:
-                continue
-            valid.append(reward > (reward_threshold * reward_scale))
-
-        if len(valid) == 0:
-            return
-
-        success = valid[0]
-        for item in valid[1:]:
-            success = success & item
-        batch_success = float(success.float().mean().item())
-
-        alpha = float(getattr(self.cfg.terrain, 'reset_curriculum_success_ema_alpha', 0.05))
-        alpha = float(np.clip(alpha, 0.0, 1.0))
-        self.reset_curriculum_success_ema = (
-            (1.0 - alpha) * self.reset_curriculum_success_ema + alpha * batch_success
-        )
-        self.reset_curriculum_lin_progress = batch_success
-        self.reset_curriculum_ang_progress = self.reset_curriculum_success_ema
-
-        start_threshold = float(getattr(self.cfg.terrain, 'reset_curriculum_start_threshold', 0.9))
-        if not self.reset_curriculum_started and self.reset_curriculum_success_ema >= start_threshold:
-            self.reset_curriculum_started = True
-            self.reset_curriculum_start_iteration = int(getattr(global_switch, 'count', 0))
-
+    def _update_reset_curriculum_intensity(self, iteration):
         initial_fraction = float(getattr(self.cfg.terrain, 'reset_curriculum_initial_fraction', 0.0))
         initial_fraction = float(np.clip(initial_fraction, 0.0, 1.0))
         if not self.reset_curriculum_started:
@@ -1034,9 +1153,76 @@ class LeggedRobot(BaseTask):
             return
 
         growth_iterations = max(1, int(getattr(self.cfg.terrain, 'reset_curriculum_growth_iterations', 2000)))
-        elapsed = max(0, int(getattr(global_switch, 'count', 0)) - self.reset_curriculum_start_iteration)
+        elapsed = max(0, int(iteration) - self.reset_curriculum_start_iteration)
         progress = min(1.0, elapsed / growth_iterations)
         self.reset_curriculum_intensity = initial_fraction + (1.0 - initial_fraction) * progress
+
+    def _finalize_reset_curriculum_iteration(self, next_iteration):
+        if self._reset_curriculum_score_count == 0:
+            return
+
+        count = float(self._reset_curriculum_score_count)
+        self.reset_curriculum_lin_tracking_score = self._reset_curriculum_lin_score_sum / count
+        self.reset_curriculum_ang_tracking_score = self._reset_curriculum_ang_score_sum / count
+        self.reset_curriculum_tracking_score = self._reset_curriculum_tracking_score_sum / count
+
+        alpha = float(getattr(self.cfg.terrain, 'reset_curriculum_tracking_ema_alpha', 0.05))
+        alpha = float(np.clip(alpha, 0.0, 1.0))
+        self.reset_curriculum_tracking_score_ema = (
+            (1.0 - alpha) * self.reset_curriculum_tracking_score_ema
+            + alpha * self.reset_curriculum_tracking_score
+        )
+
+        threshold = float(getattr(self.cfg.terrain, 'reset_curriculum_tracking_threshold', 0.7))
+        if self.reset_curriculum_tracking_score_ema >= threshold:
+            self.reset_curriculum_stable_iterations += 1
+        else:
+            self.reset_curriculum_stable_iterations = 0
+
+        required_stability = max(
+            1,
+            int(getattr(self.cfg.terrain, 'reset_curriculum_stability_iterations', 1)),
+        )
+        if not self.reset_curriculum_started and self.reset_curriculum_stable_iterations >= required_stability:
+            self.reset_curriculum_started = True
+            self.reset_curriculum_start_iteration = int(next_iteration)
+
+    def _reset_reset_curriculum_accumulator(self, iteration):
+        self._reset_curriculum_accum_iteration = int(iteration)
+        self._reset_curriculum_lin_score_sum = 0.0
+        self._reset_curriculum_ang_score_sum = 0.0
+        self._reset_curriculum_tracking_score_sum = 0.0
+        self._reset_curriculum_score_count = 0
+
+    def _update_reset_curriculum(self, tracking_task_rewards=None, tracking_reward_scales=None):
+        if not getattr(self, 'reset_curriculum_enabled', False):
+            return
+
+        iteration = int(getattr(global_switch, 'count', 0))
+        if self._reset_curriculum_accum_iteration < 0:
+            self._reset_reset_curriculum_accumulator(iteration)
+        elif iteration != self._reset_curriculum_accum_iteration:
+            self._finalize_reset_curriculum_iteration(iteration)
+            self._reset_reset_curriculum_accumulator(iteration)
+
+        self._update_reset_curriculum_intensity(iteration)
+        if tracking_task_rewards is None or tracking_reward_scales is None:
+            return
+
+        lin_reward = tracking_task_rewards.get("tracking_lin_vel")
+        ang_reward = tracking_task_rewards.get("tracking_ang_vel")
+        lin_scale = float(tracking_reward_scales.get("tracking_lin_vel", 0.0))
+        ang_scale = float(tracking_reward_scales.get("tracking_ang_vel", 0.0))
+        if lin_reward is None or ang_reward is None or lin_scale <= 0.0 or ang_scale <= 0.0:
+            return
+
+        lin_score = torch.clamp(lin_reward / lin_scale, 0.0, 1.0)
+        ang_score = torch.clamp(ang_reward / ang_scale, 0.0, 1.0)
+        tracking_score = torch.minimum(lin_score, ang_score)
+        self._reset_curriculum_lin_score_sum += float(lin_score.sum().item())
+        self._reset_curriculum_ang_score_sum += float(ang_score.sum().item())
+        self._reset_curriculum_tracking_score_sum += float(tracking_score.sum().item())
+        self._reset_curriculum_score_count += int(tracking_score.numel())
 
     def _get_reset_curriculum_range(self, range_name):
         max_range = float(getattr(self.cfg.terrain, range_name))
@@ -1090,7 +1276,7 @@ class LeggedRobot(BaseTask):
         self.env_command_bins[env_ids.cpu().numpy()] = new_bin_inds
         self.env_command_categories[env_ids.cpu().numpy()] = 0
 
-        if not self.cfg.hybrid.plan_vel and not self.cfg.arm.trajectory.enabled:
+        if not self.cfg.wbc.plan_vel and not self.cfg.wbc.trajectory.enabled:
             self.commands_dog[env_ids, 0] = new_commands[:, 0]
             self.commands_dog[env_ids, 1] = new_commands[:, 1]
             self.commands_dog[env_ids, 2] = new_commands[:, 2]
@@ -1705,6 +1891,7 @@ class LeggedRobot(BaseTask):
         self.rew_buf_neg_arm = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
 
         self._arm_init_buffers_hook()
+        self._init_performance_metrics()
 
     def _init_custom_buffers__(self):
         # domain randomization properties
@@ -1781,18 +1968,18 @@ class LeggedRobot(BaseTask):
             else:
                 self.pretrained_reward_scales[key] *= self.dt
 
-        for key in list(self.hybrid_reward_scales.keys()):
-            self.hybrid_reward_scales[key] *= self.dt
+        for key in list(self.wbc_reward_scales.keys()):
+            self.wbc_reward_scales[key] *= self.dt
 
-        # update pretrained reward scales with hybrid reward scales
+        # Complete the WBC reward table with unchanged stage-1 scales.
         for name, scale in self.pretrained_reward_scales.items():
-            if name not in self.hybrid_reward_scales:
-                self.hybrid_reward_scales[name] = scale
+            if name not in self.wbc_reward_scales:
+                self.wbc_reward_scales[name] = scale
 
         # prepare list of functions
         self.reward_functions = []
         self.reward_names = []
-        for name, scale in self.hybrid_reward_scales.items():
+        for name, scale in self.wbc_reward_scales.items():
             if name == "termination":
                 continue
 
@@ -1807,25 +1994,25 @@ class LeggedRobot(BaseTask):
         # reward episode sums
         self.episode_sums = {
             name: torch.zeros(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
-            for name in self.hybrid_reward_scales.keys()
+            for name in self.wbc_reward_scales.keys()
         }
         self.episode_sums["total"] = torch.zeros(
             self.num_envs, dtype=torch.float, device=self.device, requires_grad=False
         )
         self.episode_sums_eval = {
             name: -1 * torch.ones(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
-            for name in self.hybrid_reward_scales.keys()
+            for name in self.wbc_reward_scales.keys()
         }
         self.episode_sums_eval["total"] = torch.zeros(
             self.num_envs, dtype=torch.float, device=self.device, requires_grad=False
         )
         self.command_sums = {
             name: torch.zeros(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
-            for name in list(self.hybrid_reward_scales.keys())
+            for name in list(self.wbc_reward_scales.keys())
             + ["lin_vel_raw", "ang_vel_raw", "lin_vel_residual", "ang_vel_residual", "ep_timesteps"]
         }
 
-        global_switch.set_reward_scales(self.hybrid_reward_scales, self.pretrained_reward_scales)
+        global_switch.set_reward_scales(self.wbc_reward_scales, self.pretrained_reward_scales)
 
     def _create_ground_plane(self):
         """Adds a ground plane to the simulation, sets friction and restitution based on the cfg."""
@@ -2351,8 +2538,8 @@ class LeggedRobot(BaseTask):
         self.dt = self.cfg.control.decimation * self.sim_params.dt
         self.obs_scales = self.cfg.obs_scales
         self.pretrained_reward_scales = vars(self.cfg.reward_scales)
-        print(type(self.cfg.reward_scales), type(self.cfg.hybrid.reward_scales))
-        self.hybrid_reward_scales = vars(self.cfg.hybrid.reward_scales)
+        print(type(self.cfg.reward_scales), type(self.cfg.wbc.reward_scales))
+        self.wbc_reward_scales = vars(self.cfg.wbc.reward_scales)
         self.curriculum_thresholds = vars(self.cfg.curriculum_thresholds)
 
         cfg.command_ranges = vars(cfg.commands)

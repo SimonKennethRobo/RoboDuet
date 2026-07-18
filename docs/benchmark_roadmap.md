@@ -11,7 +11,7 @@
 - 输出结果直观，能快速比较不同实验、不同 checkpoint、不同 scenario 的性能差异。
 - benchmark 本身可维护，scenario、candidate checkpoint、report、runner 之间职责清晰。
 - benchmark seed 独立于训练 seed，用于保证评估采样和环境 reset 尽可能可复现。
-- candidate 使用 run-like logdir 结构保存，benchmark mode 按 dog-only、arm-only、hybrid 命名，不沿用训练阶段名。
+- candidate 使用 run-like logdir 结构保存，benchmark mode 按 dog-only、arm-only、wbc 命名，不沿用训练阶段名。
 - 未来可以接入服务器上的 CI/CD 或 Jenkins，作为持续回归测试和 candidate promotion 流程的一部分。
 
 ## 当前实现概览
@@ -20,7 +20,7 @@
 
 | 文件 | 作用 |
 | --- | --- |
-| `benchmark/cli.py` | 统一 benchmark 入口，负责选择 `dog_only`、`arm_only` 或 `hybrid` 模式。 |
+| `benchmark/cli.py` | 统一 benchmark 入口，负责选择 `dog_only`、`arm_only` 或 `wbc` 模式。 |
 | `benchmark/dog_policy/cli.py` | dog-only policy 质量评估入口，支持多个 policy 在同一个 IsaacGym simulation 中并行评估。 |
 | `benchmark/dog_policy/evaluation.py` | dog-only evaluation 实现，包括 policy/env 加载、配置兼容性检查、metric 累积和结构化结果保存。 |
 | `benchmark/env_fps.py` | 环境吞吐 benchmark，用不同 env count 测量 FPS、耗时和显存。 |
@@ -47,16 +47,16 @@ policy C -> env [64:96)
 dog_policy + arm_policy
 ```
 
-RoboDuet 的训练流程会分阶段：先训练 dog policy，再训练 arm policy，最后训练或评估两者协同。但 benchmark 分类不应该沿用 `stage1` 这类训练阶段名，否则语义容易混淆。benchmark 应该按被评估对象命名，例如 dog-only、arm-only、hybrid。
+RoboDuet 的训练流程会分阶段：先训练 dog policy，再训练 arm policy，最后训练或评估两者协同。但 benchmark 分类不应该沿用 `stage1` 这类训练阶段名，否则语义容易混淆。benchmark 应该按被评估对象命名，例如 dog-only、arm-only、wbc。
 
-当前 benchmark 只覆盖了 dog-only policy。它还没有真正评估 arm policy，也没有评估 dog policy 和 arm policy 在 hybrid 设置下共同工作的效果。虽然现阶段 arm policy 仍在实验中，还没有稳定可用的 candidate，但 benchmark 的数据结构和代码结构不应该被设计成“永远只有一个 dog checkpoint”。未来 candidate 需要能表达：
+当前 benchmark 只覆盖了 dog-only policy。它还没有真正评估 arm policy，也没有评估 dog policy 和 arm policy 在 wbc 设置下共同工作的效果。虽然现阶段 arm policy 仍在实验中，还没有稳定可用的 candidate，但 benchmark 的数据结构和代码结构不应该被设计成“永远只有一个 dog checkpoint”。未来 candidate 需要能表达：
 
 - dog-only candidate
 - arm-only candidate
 - dog + arm pair candidate
 - dog 固定、只比较 arm
 - arm 固定、只比较 dog
-- dog 和 arm 同时变化的 hybrid candidate
+- dog 和 arm 同时变化的 wbc candidate
 
 当前 `benchmark/candidates/` 中的 candidate 采用和训练输出相同的 run-like logdir 结构：
 
@@ -65,10 +65,10 @@ benchmark/candidates/<run_name>/
   parameters.pkl
   params.txt
   checkpoints_dog/ac_weights_*.pt
-  checkpoints_arm/ac_weights_*.pt  # 未来 hybrid/arm-only 使用
+  checkpoints_arm/ac_weights_*.pt  # 未来 wbc/arm-only 使用
 ```
 
-目录名里的 `stage1` 只表示原始训练 run 名，不表示 benchmark mode。benchmark mode 应该使用 dog-only、arm-only、hybrid。
+目录名里的 `stage1` 只表示原始训练 run 名，不表示 benchmark mode。benchmark mode 应该使用 dog-only、arm-only、wbc。
 
 同一次 dog-only shared simulation 只能比较 dog policy layout 兼容的 candidate。旧 checkpoint 和新 checkpoint 可以分别跑 benchmark，但如果 observation/action/history/adaptation 相关维度不同，就应该放到不同 benchmark group 中，不能混跑。
 
@@ -145,7 +145,7 @@ benchmark/results/<timestamp>/
 
 当前每个 HTML report 已经支持浏览器内多 candidate 对比，不需要单独运行 compare 命令；Summary 和 scenario detail 在多选时使用 metric-grouped 宽表，candidate 作为 sub-column，支持 sub-column 排序。`benchmark.cli --compare_results` 仍保留为生成独立两两 compare artifact 的离线入口。后续仍值得继续做 regression verdict、result annotation 和更稳定的 schema/direction 配置。
 
-这些结果已经覆盖 dog-only benchmark 的日常使用。当前主要缺口是更深入的跨历史 result 交互式对比、candidate promotion / retirement 记录，以及 arm-only/hybrid benchmark。跨历史 result 对比需要兼容性分组，避免把历史 smoke、partial 或不兼容 result 混进当前 report。
+这些结果已经覆盖 dog-only benchmark 的日常使用。当前主要缺口是更深入的跨历史 result 交互式对比、candidate promotion / retirement 记录，以及 arm-only/wbc benchmark。跨历史 result 对比需要兼容性分组，避免把历史 smoke、partial 或不兼容 result 混进当前 report。
 
 ## 当前优点
 
@@ -301,20 +301,20 @@ total_envs = N * M * K
 
 这样一个 simulation run 可以同时覆盖多个 checkpoint 和多个 scenario point。限制是：这些 candidate 必须共享 observation/control layout，且 scenario command 能在 env slice 级别设置。
 
-### 7. Arm / Hybrid benchmark 尚未实现
+### 7. Arm / WBC benchmark 尚未实现
 
-当前 `--stage2` CLI 参数是 reserved，还没有真正实现 hybrid evaluation。未来 RoboDuet 的核心能力不仅是 dog-only locomotion，还需要评估 arm + dog coordination。
+当前 `--stage2` CLI 参数是 reserved，还没有真正实现 WBC evaluation。未来 RoboDuet 的核心能力不仅是 dog-only locomotion，还需要评估 arm + dog coordination。
 
-Arm / hybrid benchmark 需要考虑：
+Arm / wbc benchmark 需要考虑：
 
 - arm trajectory tracking。
 - end-effector pose error。
 - loco stability under arm motion。
 - dog-arm coordination。
 - task success rate。
-- hybrid switch / global_switch 相关状态。
+- wbc switch / global_switch 相关状态。
 
-这部分需要特别注意双 policy 组合带来的 benchmark 设计问题。一个 hybrid 结果不只属于某个单独 checkpoint，而是属于一个 policy bundle：
+这部分需要特别注意双 policy 组合带来的 benchmark 设计问题。一个 wbc 结果不只属于某个单独 checkpoint，而是属于一个 policy bundle：
 
 ```text
 benchmark unit = dog_policy + arm_policy + env/scenario config
@@ -326,7 +326,7 @@ benchmark unit = dog_policy + arm_policy + env/scenario config
 PolicyBundle:
   dog_policy: optional
   arm_policy: optional
-  benchmark_mode: dog_only | arm_only | hybrid
+  benchmark_mode: dog_only | arm_only | wbc
   compatibility: observation/action/command layout
 ```
 
@@ -338,7 +338,7 @@ PolicyBundle:
 | arm-only | fixed or scripted | candidate | 比较机械臂 trajectory/task 能力 |
 | fixed-dog arm comparison | fixed baseline | candidate set | 在相同 dog 下比较 arm policy |
 | fixed-arm dog comparison | candidate set | fixed baseline | 在相同 arm 下比较 dog policy |
-| hybrid pair comparison | candidate pair | candidate pair | 比较完整 RoboDuet 协同能力 |
+| wbc pair comparison | candidate pair | candidate pair | 比较完整 RoboDuet 协同能力 |
 
 当前 benchmark 可以继续保持 dog-only，但未来代码结构需要允许从 dog-only 平滑扩展到 policy bundle。
 
@@ -361,7 +361,7 @@ benchmark/
 
 `benchmark/candidates/.gitignore` 应该使用 allowlist，默认忽略复制进来的训练产物，只保留 benchmark 需要的最小文件集。这样可以直接把 `runs/<date>/<run_name>` 复制到 `benchmark/candidates/<run_name>`，但不会把 logs、wandb、视频、完整脚本快照等无关文件都提交进 Git。
 
-Candidate 本身不需要声明为 `dog_only`、`arm_only` 或 `hybrid`。这些是“本次 benchmark 的模式”，应该通过 CLI 控制：
+Candidate 本身不需要声明为 `dog_only`、`arm_only` 或 `wbc`。这些是“本次 benchmark 的模式”，应该通过 CLI 控制：
 
 ```bash
 python -m benchmark.cli \
@@ -370,7 +370,7 @@ python -m benchmark.cli \
   --profile benchmark/profiles/smoke.json
 ```
 
-`--dog_only` 只要求 candidate 目录中存在 `checkpoints_dog/`；`--arm_only` 未来只要求 `checkpoints_arm/`；`--hybrid` 未来要求两者都存在。
+`--dog_only` 只要求 candidate 目录中存在 `checkpoints_dog/`；`--arm_only` 未来只要求 `checkpoints_arm/`；`--wbc` 未来要求两者都存在。
 
 如果将来需要记录 `baseline`、`tags`、保留原因、淘汰原因等信息，可以在每个 candidate 目录下放可选 `candidate.json`。这比全局 manifest 更不容易和真实文件结构脱节。
 
@@ -605,7 +605,7 @@ Full benchmark 不应该阻塞所有开发 PR，但可以作为模型相关 PR �
 - ✅ 使用 `benchmark/candidates/.gitignore` allowlist 控制 Git 只 track 必要文件。
 - ✅ CLI 支持 `--candidate_dir benchmark/candidates`。
 - ✅ 保留当前 `--logdirs --ckptids --names` 作为低层接口。
-- ✅ Benchmark 模式通过 `--dog_only`、未来的 `--arm_only` / `--hybrid` 控制，而不是写死在 candidate 目录名里。
+- ✅ Benchmark 模式通过 `--dog_only`、未来的 `--arm_only` / `--wbc` 控制，而不是写死在 candidate 目录名里。
 
 Phase 1 已完全落地。`--candidate_dir` 自动发现、symlink 去重、allowlist gitignore 均已验证可用。
 
@@ -642,7 +642,7 @@ Phase 2 已完全落地。HTML report 现在是 Benchmark 的主要人工查看�
 
 在 Phase 1 的目录结构基础上，引入可选 `candidate.json` 文件，为每个 candidate 记录元数据和状态。
 
-- 定义 `candidate.json` schema: `status` (active/baseline/archived/rejected)、`tags` (list)、`description`、`reason` (保留/淘汰原因)、`trained_on` (训练 commit/dataset)、`specialty` (擅长的 scenario)、`benchmark_mode` (dog_only/arm_only/hybrid)、`policy_pair` (dog/arm checkpoint 来源和组合关系)。
+- 定义 `candidate.json` schema: `status` (active/baseline/archived/rejected)、`tags` (list)、`description`、`reason` (保留/淘汰原因)、`trained_on` (训练 commit/dataset)、`specialty` (擅长的 scenario)、`benchmark_mode` (dog_only/arm_only/wbc)、`policy_pair` (dog/arm checkpoint 来源和组合关系)。
 - `discover_run_logdirs()` 读取 candidate.json（如存在），将 status/tag 信息传入 metadata。
 - `_apply_candidate_dir()` 支持 `--status active` 过滤，默认只跑 active candidate。
 - `--baseline` CLI 参数指定 baseline candidate name 或 path，在 metadata 中标记。
@@ -676,13 +676,13 @@ Phase 2 已完全落地。HTML report 现在是 Benchmark 的主要人工查看�
 - PR comment 回填 benchmark summary。
 - benchmark failure 或严重 regression 自动标记 PR。
 
-### Phase 7: Arm / Hybrid Benchmark
+### Phase 7: Arm / WBC Benchmark
 
-- 引入 arm-only 和 hybrid benchmark profile。
+- 引入 arm-only 和 wbc benchmark profile。
 - 支持 fixed-dog arm comparison 和 fixed-arm dog comparison。
 - 支持 dog+arm pair candidate 的完整评估。
 - 增加 arm trajectory tracking、end-effector pose error、task success、coordination stability 等 metric。
-- 明确 dog-only benchmark 与 arm-only/hybrid benchmark 的结果不可直接混合排名，只能在各自 profile 内比较。
+- 明确 dog-only benchmark 与 arm-only/wbc benchmark 的结果不可直接混合排名，只能在各自 profile 内比较。
 
 ## 短期建议（更新）
 
@@ -700,7 +700,7 @@ Phase 1（候选目录）、Phase 1.5 核心 bug 修复和 Phase 2（HTML Report
 4. nightly/full profile
    当前已有 smoke profile 和手工 full 命令，后续应把 nightly/full 的 scenario/step/env 配置固化为版本化 profile。
 
-不建议马上做大规模并行重构或 arm/hybrid benchmark。先把数据质量和管理机制补上，再扩展评估能力。
+不建议马上做大规模并行重构或 arm/wbc benchmark。先把数据质量和管理机制补上，再扩展评估能力。
 
 ## 当前已完成的增量
 
@@ -727,4 +727,4 @@ Phase 1（候选目录）、Phase 1.5 核心 bug 修复和 Phase 2（HTML Report
 - 增加 nightly/full profile，把当前手工 full benchmark 命令固化为可 review 的 profile。
 - 把 `--compare_results` 扩展到 scenario-level 和 test-point-level diff，并在 schema 稳定后支持跨历史 result 的交互式 compare。
 - 把 metric schema 和 direction 从 report 代码中抽出来，减少字段硬编码。
-- 在 arm policy 稳定后实现 `--arm_only` 和 `--hybrid`。
+- 在 arm policy 稳定后实现 `--arm_only` 和 `--wbc`。

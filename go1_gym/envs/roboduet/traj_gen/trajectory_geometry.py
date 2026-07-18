@@ -65,19 +65,19 @@ def sample_trajectory_commands(
 
     # Per-env arc length (curriculum)
     if length is None:
-        lo, hi = cfg.arm.trajectory.length_range
+        lo, hi = cfg.wbc.trajectory.length_range
         length = lo + (hi - lo) * torch.rand(n_envs, device=device)
     length = length.view(n_envs, 1, 1)
 
     # Per-env S-curve amplitude (curriculum)
     if s_curve_amplitude is None:
-        lo, hi = cfg.arm.trajectory.s_curve_amplitude_range
+        lo, hi = cfg.wbc.trajectory.s_curve_amplitude_range
         s_curve_amplitude = lo + (hi - lo) * torch.rand(n_envs, device=device)
     s_curve_amplitude = s_curve_amplitude.view(n_envs, 1, 1)
 
     sphere_direction = torch.randn(n_envs, 3, device=device)
     sphere_direction = sphere_direction / torch.clamp(torch.norm(sphere_direction, dim=-1, keepdim=True), min=1e-6)
-    min_radius = torch.full_like(length, float(cfg.arm.trajectory.length_range[0]))
+    min_radius = torch.full_like(length, float(cfg.wbc.trajectory.length_range[0]))
     start_radius = min_radius + torch.rand(n_envs, 1, 1, device=device) * torch.clamp(length - min_radius, min=0.0)
     start_offset = start_radius * sphere_direction[:, None, :]
     start_pos = grasper_pos[:, None, :] + start_offset
@@ -107,18 +107,18 @@ def sample_trajectory_commands(
 
     s_shape = (
         s_curve_amplitude
-        * torch.sin(2.0 * torch.pi * cfg.arm.trajectory.s_curve_frequency * t)
+        * torch.sin(2.0 * torch.pi * cfg.wbc.trajectory.s_curve_frequency * t)
         * lateral_world[:, None, :]
     )
-    circle_phase = 2.0 * torch.pi * cfg.arm.trajectory.circle_turns * t
-    circle = cfg.arm.trajectory.circle_radius * (
+    circle_phase = 2.0 * torch.pi * cfg.wbc.trajectory.circle_turns * t
+    circle = cfg.wbc.trajectory.circle_radius * (
         torch.sin(circle_phase) * direction_world[:, None, :]
         + (1.0 - torch.cos(circle_phase)) * lateral_world[:, None, :]
     )
 
     # Traj type selection (supports cfg whitelist)
     traj_type_name = (
-        traj_type_override if traj_type_override is not None else getattr(cfg.arm.trajectory, "traj_type", [])
+        traj_type_override if traj_type_override is not None else getattr(cfg.wbc.trajectory, "traj_type", [])
     )
     valid_types = {"line": 0, "s_curve": 1, "circle": 2, "point": 3}
 
@@ -144,8 +144,8 @@ def sample_trajectory_commands(
         + (traj_type == 3).float() * point
     )
 
-    time_range = cfg.arm.trajectory.completion_time_range[1] - cfg.arm.trajectory.completion_time_range[0]
-    target_time = cfg.arm.trajectory.completion_time_range[0] + torch.rand(n_envs, device=device) * time_range
+    time_range = cfg.wbc.trajectory.completion_time_range[1] - cfg.wbc.trajectory.completion_time_range[0]
+    target_time = cfg.wbc.trajectory.completion_time_range[0] + torch.rand(n_envs, device=device) * time_range
     traj_quat = start_quat[:, None, :].expand(-1, num_waypoints, -1).clone()
 
     return (
