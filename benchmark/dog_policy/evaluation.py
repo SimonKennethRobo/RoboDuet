@@ -11,17 +11,21 @@ import isaacgym  # noqa: F401 - must precede torch
 import torch
 from go1_gym.envs.roboduet.wbc_env_wrapper import HistoryWrapper
 from go1_gym.envs.roboduet.wbc_env import WBCEnv
-from go1_gym.envs.roboduet.wbc_env_config import (
-    ROBODUET_DEFAULTS,
-    RoboDuetCfg as Cfg,
-    configure_external_recipes,
+from go1_gym.envs.config import (
+    ConfigNode,
+    apply_config_snapshot,
+    build_roboduet_config,
     configure_privileged_obs_dims,
+    recompute_observation_dims,
 )
+from go1_gym.envs.config.roboduet import ROBODUET_OVERRIDES
 from go1_gym.utils.global_switch import global_switch
 from go1_gym.utils.math_utils import quat_apply_yaw
 from go1_gym_learn.ppo_cse_automatic.dog_ac import DogActorCritic
 from isaacgym.torch_utils import quat_conjugate, quat_from_angle_axis, quat_mul, quat_rotate_inverse
-from scripts.load_policy import _ensure_asset_file, _ensure_play_cfg_defaults, _recompute_play_dims
+from scripts.load_policy import _ensure_asset_file
+
+DEFAULT_CFG = build_roboduet_config()
 
 SCENARIO_META = {
     "vel_grid": (
@@ -112,8 +116,8 @@ def detect_command_layout(cfg) -> CommandLayout:
 def _read_dog_dims(logdir: str) -> dict:
     """Extract dog network dims from a logdir's parameters.pkl.
 
-    Does NOT touch the global Cfg singleton — safe to call for every logdir.
-    Falls back to the ROBODUET_DEFAULTS for any key that is absent.
+    Does not mutate a process-global config — safe to call for every logdir.
+    Falls back to the centralized WBC task defaults for any key that is absent.
     """
     with open(logdir + "/parameters.pkl", "rb") as f:
         cfg_dict = pkl.load(f)["Cfg"]
@@ -123,7 +127,7 @@ def _read_dog_dims(logdir: str) -> dict:
     def _get(key, default):
         v = dog.get(key)
         if v is None:
-            v = getattr(ROBODUET_DEFAULTS.dog, key, default)
+            v = ROBODUET_OVERRIDES.get(f"dog.{key}", default)
         return v
 
     obs = _get("dog_num_observations", 48)
@@ -393,7 +397,9 @@ def _cfg_value(cfg_dict: dict, path: str):
     value = _nested_get_dict(cfg_dict, path)
     if value is not None:
         return value
-    return _nested_get_attr(ROBODUET_DEFAULTS, path)
+    if path in ROBODUET_OVERRIDES:
+        return ROBODUET_OVERRIDES[path]
+    return _nested_get_attr(DEFAULT_CFG, path)
 
 
 def read_dog_num_commands(logdir: str) -> int:
@@ -421,32 +427,17 @@ def validate_shared_env_compatibility(base_logdir: str, candidate_logdirs: List[
         )
 
 
-def _load_cfg_from_pkl(logdir: str, robot: Optional[str] = None) -> Cfg:
-    configure_external_recipes(Cfg)
+def _load_cfg_from_pkl(logdir: str, robot: Optional[str] = None) -> ConfigNode:
+    cfg = build_roboduet_config()
     checkpoint_asset_file = None
     with open(logdir + "/parameters.pkl", "rb") as f:
         pkl_cfg = pkl.load(f)
-        for key, value in pkl_cfg["Cfg"].items():
-            if not hasattr(Cfg, key):
-                continue
-            if key in ["dog", "arm", "hybrid"]:
-                for k2, v2 in value.items():
-                    if not isinstance(v2, dict):
-                        setattr(getattr(Cfg, key), k2, v2)
-                    else:
-                        for k3, v3 in v2.items():
-                            setattr(getattr(getattr(Cfg, key), k2), k3, v3)
-            elif isinstance(value, dict):
-                for k2, v2 in value.items():
-                    if key == "asset" and k2 == "file":
-                        checkpoint_asset_file = v2
-                    setattr(getattr(Cfg, key), k2, v2)
-            else:
-                setattr(Cfg, key, value)
-    _ensure_play_cfg_defaults(Cfg)
-    _ensure_asset_file(Cfg, robot=robot, checkpoint_asset_file=checkpoint_asset_file)
-    _recompute_play_dims(Cfg)
-    return Cfg
+        cfg_snapshot = pkl_cfg["Cfg"]
+        checkpoint_asset_file = cfg_snapshot.get("asset", {}).get("file")
+        apply_config_snapshot(cfg, cfg_snapshot)
+    _ensure_asset_file(cfg, robot=robot, checkpoint_asset_file=checkpoint_asset_file)
+    recompute_observation_dims(cfg)
+    return cfg
 
 
 def _apply_benchmark_env_overrides(cfg, total_envs: int, envs_per_policy: int):

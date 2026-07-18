@@ -8,6 +8,7 @@ import torch
 from isaacgym import gymapi, gymtorch, gymutil
 from isaacgym.torch_utils import quat_apply, quat_from_euler_xyz, quat_mul, quat_rotate, to_torch, torch_rand_float
 
+from go1_gym.envs.config import ConfigNode
 from go1_gym.utils.global_switch import global_switch
 from go1_gym.utils.math_utils import (
     ee_twist_body_6d,
@@ -21,8 +22,6 @@ from go1_gym.utils.math_utils import (
 from .legged_robot import LeggedRobot, quaternion_to_rpy
 from .traj_gen.trajectory_geometry import sample_trajectory_commands
 from .utils import ObservationBuilder, clip_observation
-from .wbc_env_config import RoboDuetCfg as Cfg
-
 dog_cmd_idx = {
     "x_vel": 0,
     "y_vel": 1,
@@ -48,8 +47,8 @@ class WBCEnv(LeggedRobot):
         sim_device,
         headless,
         num_envs=None,
-        cfg: Cfg = None,
-        eval_cfg: Cfg = None,
+        cfg: ConfigNode = None,
+        eval_cfg: ConfigNode = None,
         initial_dynamics_dict=None,
         physics_engine="SIM_PHYSX",
         graphics_device_id=None,

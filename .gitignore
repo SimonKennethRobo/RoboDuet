@@ -80,3 +80,5 @@ __pycache__
 
 benchmark/candidates
 benchmark/results
+
+tests

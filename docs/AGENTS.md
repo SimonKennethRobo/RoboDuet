@@ -14,7 +14,8 @@ Core files:
 
 - `go1_gym/envs/roboduet/legged_robot.py`: base IsaacGym task, sim stepping, reset, root/DOF tensors, terrain, actor creation, common dog observations/rewards, and generic domain randomization.
 - `go1_gym/envs/roboduet/wbc_env.py`: RoboDuet arm/WBC extension. Arm commands, trajectory tracking, arm observations/rewards, stage switching, arm-specific domain randomization, and the `plan()` path that translates arm-policy outputs into smoothed dog commands.
-- `go1_gym/envs/roboduet/wbc_env_config.py`: RoboDuet config source of truth. It materializes values from Go1/WTW/asset recipes and contains all `cfg.arm.*`, `cfg.dog.*`, `cfg.commands.*`, and obs-dim builders (`env_obs_dim_parts`, `arm_obs_dim_parts`, etc.).
+- `go1_gym/envs/config/`: flat configuration package. `legged_robot.py`, `go1.py`, `wtw.py`, and `roboduet.py` contain profiles; `core.py` contains schema materialization, profile composition, runtime build, serialization, validation, and observation/action layout derivation.
+- `go1_gym/envs/config/roboduet.py`: complete editable RoboDuet profile. `ROBODUET_OVERRIDES` can override any base/Go1/WTW field without modifying another task profile.
 - `go1_gym/envs/roboduet/wbc_env_wrapper.py`: interactive wrappers and `HistoryWrapper`. `HistoryWrapper.step(action_dog, action_arm)` is the canonical step API for training and play.
 - `go1_gym/envs/roboduet/utils.py`: `StageSchedule`, `apply_hybrid_reward_settings`, `ObservationBuilder` (asserts obs width vs. `cfg.*_num_observations`).
 - `go1_gym/envs/roboduet/traj_gen/trajectory_geometry.py`: `sample_trajectory_commands` — supports `line`, `s_curve`, `circle`, `point` types and consumes an optional `orientation_scale` curriculum from the env.
@@ -22,8 +23,8 @@ Core files:
 - `go1_gym/utils/global_switch.py`: process-global `global_switch` singleton driving stage transitions and reward-scale ramping.
 - `go1_gym_learn/ppo_cse_automatic/__init__.py`: dual-PPO `Runner` orchestrating arm and dog learners, stage transitions, and stage-2 locomotion freezing.
 - `go1_gym_learn/ppo_cse_automatic/ppo.py`: PPO algorithm; supports `set_learning_rate()` and `clear_storage()` (used when dog policy is frozen).
-- `scripts/auto_train.py`: main training entrypoint. Builds `Cfg`, configures stage schedule, loads optional checkpoints, copies dog command limits from the dog checkpoint, and runs `Runner.learn()`.
-- `scripts/load_policy.py`: play/eval loader. It loads `parameters.pkl`, overwrites `Cfg`, then applies play-time overrides.
+- `scripts/auto_train.py`: main training entrypoint. Builds an independent `cfg`, configures stage schedule, loads optional checkpoints, copies dog command limits from the dog checkpoint, and runs `Runner.learn()`.
+- `scripts/load_policy.py`: play/eval loader. It builds an independent `cfg`, restores the complete `parameters.pkl` snapshot, then applies play-time overrides.
 - `scripts/play_by_joy.py`: interactive joystick play; see "Play Scripts" and "Joystick Commands".
 
 ## Training Pipeline
@@ -127,7 +128,7 @@ Action layout is config-dependent:
 
 ### Stage-2 Trajectory + Dynamic Gait MDP
 
-For `traj_track=True` and `dyna_gait=True`, keep the arm policy and dog command layout aligned with `wbc_env_config.py` and `WBCEnv.plan()`. The arm policy action width is `cfg.arm.num_actions_arm_cd`: first the 6 arm joint actions, then plan actions consumed by `WBCEnv.plan()`. The current plan-action layout is 9 dimensions:
+For `traj_track=True` and `dyna_gait=True`, keep the arm policy and dog command layout aligned with `config/core.py` and `WBCEnv.plan()`. The arm policy action width is `cfg.arm.num_actions_arm_cd`: first the 6 arm joint actions, then plan actions consumed by `WBCEnv.plan()`. The current plan-action layout is 9 dimensions:
 
 - `0:3`: delta dog velocity command (`x_vel`, `y_vel`, `yaw_vel`).
 - `3:6`: dog body pose command (`body_pitch`, `body_roll`, `body_height`).
@@ -384,9 +385,9 @@ Both are derived from the same joint `tracking_lin_vel & tracking_ang_vel` succe
 
 `_update_reset_curriculum` is called once per `_resample_commands` call (i.e., once per reset batch). EMA update frequency scales with termination rate, which depends on episode length. The growth timer (`global_switch.count`) is iteration-based. In runs with short episodes, the EMA warms up faster relative to the iteration clock, so the curriculum may activate earlier than intended.
 
-### `wbc_env_config.py` sets `reset_curriculum = True` with `initial_fraction = 0.0`
+### The RoboDuet profile sets `reset_curriculum = True` with `initial_fraction = 0.1`
 
-This means all WBC training runs start with **zero orientation randomization** (all resets are flat). Restoring from a checkpoint trained without this curriculum will experience a sudden change in reset distribution.
+This means WBC training starts at 10% of the configured reset-randomization ranges and grows toward the full ranges after the success gate opens.
 
 ## Trajectory Tracking Notes
 

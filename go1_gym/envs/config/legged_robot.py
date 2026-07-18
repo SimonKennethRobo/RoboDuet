@@ -1,13 +1,13 @@
 # License: see [LICENSE, LICENSES/legged_gym/LICENSE]
-"""Common legged robot ParamsProto schema.
+"""Framework-level legged-robot default profile.
 
-RoboDuet/WBC-specific schema and defaults live in `wbc_env_config.py`.
+The nested classes are an immutable template only. ``core.build_config``
+materializes them into an independent ``ConfigNode`` tree for every build.
 """
 
-from params_proto import PrefixProto, ParamsProto
 
-class LeggedRobotCfg(PrefixProto, cli=False):
-    class env(PrefixProto, cli=False):
+class LeggedRobotDefaults:
+    class env:
         num_envs = 4096
         num_observations = 48
         num_scalar_observations = 42
@@ -57,7 +57,7 @@ class LeggedRobotCfg(PrefixProto, cli=False):
         priv_observe_desired_contact_states = False
         priv_observe_dummy_variable = False
 
-    class terrain(PrefixProto, cli=False):
+    class terrain:
         mesh_type = 'trimesh'  # "heightfield" # none, plane, heightfield or trimesh
         horizontal_scale = 0.1  # [m]
         vertical_scale = 0.005  # [m]
@@ -106,7 +106,7 @@ class LeggedRobotCfg(PrefixProto, cli=False):
         center_robots = False
         center_span = 5
 
-    class commands(PrefixProto, cli=False):
+    class commands:
         use_dynamic_gait = False
         command_curriculum = False
         max_reverse_curriculum = 1.
@@ -198,13 +198,13 @@ class LeggedRobotCfg(PrefixProto, cli=False):
         balance_gait_distribution = True
         gaitwise_curricula = True
 
-    class curriculum_thresholds(PrefixProto, cli=False):
+    class curriculum_thresholds:
         tracking_lin_vel = 0.8  # closer to 1 is tighter
         tracking_ang_vel = 0.5
         tracking_contacts_shaped_force = 0.8  # closer to 1 is tighter
         tracking_contacts_shaped_vel = 0.8
 
-    class init_state(PrefixProto, cli=False):
+    class init_state:
         pos = [0.0, 0.0, 1.]  # x,y,z [m]
         rot = [0.0, 0.0, 0.0, 1.0]  # x,y,z,w [quat]
         lin_vel = [0.0, 0.0, 0.0]  # x,y,z [m/s]
@@ -212,7 +212,7 @@ class LeggedRobotCfg(PrefixProto, cli=False):
         # target angles when action = 0.0
         default_joint_angles = {"joint_a": 0., "joint_b": 0.}
 
-    class control(PrefixProto, cli=False):
+    class control:
         control_type = 'actuator_net' #'P'  # P: position, V: velocity, T: torques
         # PD Drive parameters:
         stiffness = {'joint_a': 10.0, 'joint_b': 15.}  # [N*m/rad]
@@ -223,7 +223,7 @@ class LeggedRobotCfg(PrefixProto, cli=False):
         # decimation: Number of control action updates @ sim DT per policy DT
         decimation = 4
 
-    class asset(PrefixProto, cli=False):
+    class asset:
         file = ""
         foot_name = "None"  # name of the feet bodies, used to index body state and contact force tensors
         penalize_contacts_on = []
@@ -247,7 +247,7 @@ class LeggedRobotCfg(PrefixProto, cli=False):
         armature = 0.
         thickness = 0.01
 
-    class domain_rand(PrefixProto, cli=False):
+    class domain_rand:
         rand_interval_s = 10
         randomize_rigids_after_start = True
         randomize_friction = True
@@ -278,7 +278,7 @@ class LeggedRobotCfg(PrefixProto, cli=False):
         randomize_lag_timesteps = True
         lag_timesteps = 6
 
-    class rewards(PrefixProto, cli=False):
+    class rewards:
         only_positive_rewards = False  # if true negative total rewards are clipped at zero (avoids early termination problems)
         only_positive_rewards_ji22_style = False
         sigma_rew_neg = 5
@@ -303,7 +303,7 @@ class LeggedRobotCfg(PrefixProto, cli=False):
         gait_vel_sigma = 0.5
         footswing_height = 0.09
 
-    class reward_scales(ParamsProto, cli=False):
+    class reward_scales:
         termination = -0.0
         tracking_lin_vel = 1.0
         tracking_ang_vel = 0.5
@@ -336,7 +336,7 @@ class LeggedRobotCfg(PrefixProto, cli=False):
         feet_impact_vel = 0.0
         raibert_heuristic = 0.0
 
-    class normalization(PrefixProto, cli=False):
+    class normalization:
         clip_observations = 100.
         clip_actions = 100.
 
@@ -359,7 +359,7 @@ class LeggedRobotCfg(PrefixProto, cli=False):
         gravity_range = [-1.0, 1.0]
         motion = [-0.01, 0.01]
 
-    class obs_scales(PrefixProto, cli=False):
+    class obs_scales:
         lin_vel = 2.0
         ang_vel = 0.25
         dof_pos = 1.0
@@ -384,11 +384,11 @@ class LeggedRobotCfg(PrefixProto, cli=False):
         rgb_image = 1.0
         depth_image = 1.0
 
-    class noise(PrefixProto, cli=False):
+    class noise:
         add_noise = True
         noise_level = 1.0  # scales other values
 
-    class noise_scales(PrefixProto, cli=False):
+    class noise_scales:
         dof_pos = 0.01
         dof_vel = 1.5
         lin_vel = 0.1
@@ -403,12 +403,12 @@ class LeggedRobotCfg(PrefixProto, cli=False):
         depth_image = 0.0
 
     # viewer camera:
-    class viewer(PrefixProto, cli=False):
+    class viewer:
         ref_env = 0
         pos = [10, 0, 6]  # [m]
         lookat = [11., 5, 3.]  # [m]
 
-    class sim(PrefixProto, cli=False):
+    class sim:
         dt = 0.005
         substeps = 1
         gravity = [0., 0., -9.81]  # [m/s^2]
@@ -416,15 +416,18 @@ class LeggedRobotCfg(PrefixProto, cli=False):
 
         use_gpu_pipeline = True
 
-        class physx(PrefixProto, cli=False):
-            num_threads = 10
-            solver_type = 1  # 0: pgs, 1: tgs
-            num_position_iterations = 4
-            num_velocity_iterations = 1
-            contact_offset = 0.01  # [m]
-            rest_offset = 0.0  # [m]
-            bounce_threshold_velocity = 0.5  # 0.5 [m/s]
-            max_depenetration_velocity = 1.0
-            max_gpu_contact_pairs = 2 ** 23  # 2**24 -> needed for 8000 envs and more
-            default_buffer_size_multiplier = 5
-            contact_collection = 2  # 0: never, 1: last sub-step, 2: all sub-steps (default=2)
+        # IsaacGym's ``gymutil.parse_sim_config`` requires this leaf to be a
+        # mapping, rather than an attribute namespace.
+        physx = {
+            "num_threads": 10,
+            "solver_type": 1,  # 0: pgs, 1: tgs
+            "num_position_iterations": 4,
+            "num_velocity_iterations": 1,
+            "contact_offset": 0.01,  # [m]
+            "rest_offset": 0.0,  # [m]
+            "bounce_threshold_velocity": 0.5,
+            "max_depenetration_velocity": 1.0,
+            "max_gpu_contact_pairs": 2 ** 23,
+            "default_buffer_size_multiplier": 5,
+            "contact_collection": 2,  # 0: never, 1: last sub-step, 2: all sub-steps
+        }

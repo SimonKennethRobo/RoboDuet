@@ -23,17 +23,15 @@ import torch
 
 from go1_gym import MINI_GYM_ROOT_DIR
 from go1_gym.envs.base.base_task import BaseTask
+from go1_gym.envs.config import ConfigNode
 from go1_gym.utils import global_switch, quaternion_to_rpy
 from go1_gym.utils.math_utils import get_scale_shift, quat_apply_yaw
 from go1_gym.utils.terrain import Terrain
 
-from .wbc_env_config import RoboDuetCfg as Cfg
-
-
 class LeggedRobot(BaseTask):
     def __init__(
         self,
-        cfg: Cfg,
+        cfg: ConfigNode,
         sim_params,
         physics_engine,
         sim_device,

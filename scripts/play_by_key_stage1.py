@@ -6,7 +6,7 @@ import torch
 from isaacgym.torch_utils import *
 
 from go1_gym.envs import *
-from go1_gym.envs.roboduet.wbc_env_config import configure_privileged_obs_dims
+from go1_gym.envs.config import configure_privileged_obs_dims
 from go1_gym.envs.roboduet.wbc_env_wrapper import KeyboardStage1Wrapper
 from go1_gym.utils.viz import add_rerun_args, make_rerun_logger
 from scripts.load_policy import load_arm_policy, load_dog_policy, load_env

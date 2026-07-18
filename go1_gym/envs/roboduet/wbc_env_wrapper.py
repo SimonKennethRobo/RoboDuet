@@ -7,9 +7,9 @@ import gym
 import torch
 from isaacgym import gymapi
 
+from go1_gym.envs.config import ConfigNode
 from go1_gym.envs.roboduet.wbc_env import WBCEnv, dog_cmd_idx
 from go1_gym.envs.roboduet.utils import get_play_command_limit
-from go1_gym.envs.roboduet.wbc_env_config import Cfg
 from go1_gym.utils.global_switch import global_switch
 
 
@@ -21,8 +21,8 @@ class EvaluationWrapper(WBCEnv):
         num_envs=None,
         prone=False,
         deploy=False,
-        cfg: Cfg = None,
-        eval_cfg: Cfg = None,
+        cfg: ConfigNode = None,
+        eval_cfg: ConfigNode = None,
         initial_dynamics_dict=None,
         physics_engine="SIM_PHYSX",
     ):
@@ -216,7 +216,7 @@ class HistoryWrapper(gym.Wrapper):
     def __init__(self, env):
         super().__init__(env)
         self.env: WBCEnv = env
-        cfg: Cfg = self.env.cfg
+        cfg: ConfigNode = self.env.cfg
         self.obs_history_length = self.env.cfg.env.num_observation_history
 
         self.num_obs_history = self.obs_history_length * self.num_obs

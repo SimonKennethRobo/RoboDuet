@@ -8,8 +8,8 @@ import joylink_client
 import torch
 
 from go1_gym.envs import *  # noqa: F403
+from go1_gym.envs.config import configure_privileged_obs_dims
 from go1_gym.envs.roboduet.wbc_env import WBCEnv
-from go1_gym.envs.roboduet.wbc_env_config import configure_privileged_obs_dims
 from go1_gym.utils.viz import add_rerun_args, make_rerun_logger
 from go1_gym.envs.roboduet.utils import get_play_command_limits
 from scripts.load_policy import load_arm_policy, load_dog_policy, load_env

@@ -2,6 +2,8 @@ import argparse
 import dataclasses
 import inspect
 
+from go1_gym.envs.config import ConfigNode, cfg_to_dict
+
 
 def _to_wandb_value(value):
     if isinstance(value, argparse.Namespace):
@@ -15,6 +17,9 @@ def _to_wandb_value(value):
             field.name: _to_wandb_value(getattr(value, field.name))
             for field in dataclasses.fields(value)
         }
+
+    if isinstance(value, ConfigNode):
+        return cfg_to_dict(value)
 
     if isinstance(value, dict):
         return {str(k): _to_wandb_value(v) for k, v in value.items() if _include_config_key(str(k), v)}

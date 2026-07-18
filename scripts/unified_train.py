@@ -5,7 +5,7 @@ import torch
 import argparse
 
 from go1_gym.envs.roboduet.utils import StageSchedule, apply_hybrid_reward_settings
-from go1_gym.envs.roboduet.wbc_env_config import RoboDuetCfg as Cfg, configure_task_from_args
+from go1_gym.envs.config import build_roboduet_config, cfg_to_dict
 
 import wandb
 import os
@@ -67,8 +67,8 @@ def train_go1(headless=True):
     args.seed = set_seed(args.seed)
     args.tags.append(f"seed{args.seed}")
 
-    configure_task_from_args(Cfg, args, traj_track_reward_scale=1.0)
-    Unified2AC_Args.num_actions_arm = Cfg.arm.num_actions_arm_cd
+    cfg = build_roboduet_config(args, traj_track_reward_scale=1.0)
+    Unified2AC_Args.num_actions_arm = cfg.arm.num_actions_arm_cd
     configure_train_stage(args)
     UnifiedRunnerArgs.num_steps_per_env = args.num_steps_per_env
     UnifiedPPO_Args.num_mini_batches = args.num_mini_batches
@@ -77,7 +77,7 @@ def train_go1(headless=True):
     # global_switch.init_linear_lr()
 
     if args.train_stage == "stage2":
-        apply_hybrid_reward_settings(Cfg)
+        apply_hybrid_reward_settings(cfg)
 
     # if args.headless:
     #     UnifiedRunnerArgs.log_video = False
@@ -86,7 +86,7 @@ def train_go1(headless=True):
     stem = Path(__file__).stem
     wandb_config = build_wandb_config(
         args=args,
-        Cfg=Cfg,
+        Cfg=cfg,
         UnifiedRunnerArgs=UnifiedRunnerArgs,
         Unified2AC_Args=Unified2AC_Args,
         UnifiedPPO_Args=UnifiedPPO_Args,
@@ -117,7 +117,6 @@ def train_go1(headless=True):
 
         shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/scripts/unified_train.py", f"{args.log_dir}/scripts/unified_train.py")
         shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet/legged_robot.py", f"{args.log_dir}/scripts/legged_robot.py")
-        shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet/legged_robot_config.py", f"{args.log_dir}/scripts/legged_robot_config.py")
         shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet/__init__.py", f"{args.log_dir}/scripts/env__init__.py")
         shutil.copyfile(
             f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet/wbc_env.py",
@@ -126,10 +125,12 @@ def train_go1(headless=True):
         shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet/observation_builder.py", f"{args.log_dir}/scripts/observation_builder.py")
         shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet/trajectory_geometry.py", f"{args.log_dir}/scripts/trajectory_geometry.py")
         shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet/utils.py", f"{args.log_dir}/scripts/utils.py")
-        shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet/wbc_env_config.py", f"{args.log_dir}/scripts/wbc_env_config.py")
-        shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet/asset_config.py", f"{args.log_dir}/scripts/asset_config.py")
-        shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/go1/go1_config.py", f"{args.log_dir}/scripts/go1_config.py")
-        shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/go1/wtw_config.py", f"{args.log_dir}/scripts/wtw_config.py")
+        shutil.copytree(
+            f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/config",
+            f"{args.log_dir}/scripts/config",
+            dirs_exist_ok=True,
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+        )
 
         shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/go1_gym_learn/ppo_cse_unified/__init__.py", f"{args.log_dir}/scripts/ppo_cse_unified__init__.py")
         shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/go1_gym_learn/ppo_cse_unified/unified2head_ac.py", f"{args.log_dir}/scripts/unified2head_ac.py")
@@ -139,7 +140,7 @@ def train_go1(headless=True):
 
         wandb.run.log_code(f"{args.log_dir}/scripts")
 
-        temp_dict = {"Cfg": vars(Cfg), "RunnerArgs": vars(UnifiedRunnerArgs), "Unified2AC_Args": vars(Unified2AC_Args), "PPO_Args": vars(UnifiedPPO_Args),}
+        temp_dict = {"Cfg": cfg_to_dict(cfg), "RunnerArgs": vars(UnifiedRunnerArgs), "Unified2AC_Args": vars(Unified2AC_Args), "PPO_Args": vars(UnifiedPPO_Args),}
 
         with open(f"{args.log_dir}/params.txt", "w", encoding="utf-8") as f:
             format_temp_dict = format_code(str(temp_dict))
@@ -157,7 +158,7 @@ def train_go1(headless=True):
     env = WBCEnv(
         sim_device=args.sim_device,
         headless=args.headless,
-        cfg=Cfg,
+        cfg=cfg,
         graphics_device_id=args.graphics_device_id,
     )
     env = HistoryWrapper(env)
