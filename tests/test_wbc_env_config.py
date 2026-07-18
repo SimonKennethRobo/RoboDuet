@@ -3,11 +3,15 @@ from types import SimpleNamespace
 
 from go1_gym.envs.config import (
     apply_config_snapshot,
+    build_config,
     build_roboduet_config,
     build_wtw_config,
     cfg_to_dict,
     set_cfg_value,
 )
+from go1_gym.envs.config.go1 import GO1_PROFILE
+from go1_gym.envs.config.roboduet import ROBODUET_OVERRIDES
+from go1_gym.envs.config.wtw import WTW_PROFILE
 
 
 def _args(*, traj_track=False, dyna_gait=False):
@@ -23,6 +27,22 @@ def _args(*, traj_track=False, dyna_gait=False):
 
 
 class UnifiedConfigTest(unittest.TestCase):
+    def test_roboduet_profile_contains_no_redundant_overrides(self):
+        inherited_cfg = build_config(GO1_PROFILE, WTW_PROFILE)
+        redundant = []
+
+        for path, override_value in ROBODUET_OVERRIDES.items():
+            inherited_value = inherited_cfg
+            for part in path.split("."):
+                if not hasattr(inherited_value, part):
+                    break
+                inherited_value = getattr(inherited_value, part)
+            else:
+                if type(inherited_value) is type(override_value) and inherited_value == override_value:
+                    redundant.append(path)
+
+        self.assertEqual(redundant, [])
+
     def test_feature_layout_dimensions(self):
         expected = {
             (False, False): (66, 31, 72, 8, 6),
