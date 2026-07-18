@@ -17,7 +17,7 @@ from params_proto import PrefixProto
 import wandb
 from go1_gym import MINI_GYM_ROOT_DIR
 from go1_gym.envs.roboduet.wbc_env_wrapper import HistoryWrapper
-from go1_gym.envs.roboduet.utils import apply_hybrid_reward_settings
+from go1_gym.envs.roboduet.utils import apply_wbc_reward_settings
 from go1_gym.utils import global_switch
 
 from .unified2head_ac import Unified2ActorCritic
@@ -124,7 +124,7 @@ class Runner:
         if not global_switch.switch_open:
             global_switch.stage1_count += 1
 
-        if iteration != global_switch.pretrained_to_hybrid_start or global_switch.switch_open:
+        if iteration != global_switch.pretrained_to_wbc_start or global_switch.switch_open:
             return
 
         blue_bold_text = "\033[1;34m"
@@ -140,7 +140,7 @@ class Runner:
         )
 
         global_switch.open_switch()
-        apply_hybrid_reward_settings(self.env.cfg)
+        apply_wbc_reward_settings(self.env.cfg)
 
     def learn(self, num_learning_iterations, init_at_random_ep_len=False, eval_freq=100, eval_expert=False, width=80, pad=35):
 

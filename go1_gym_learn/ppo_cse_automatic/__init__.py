@@ -15,7 +15,7 @@ from params_proto import PrefixProto
 
 import wandb
 from go1_gym import MINI_GYM_ROOT_DIR
-from go1_gym.envs.roboduet.utils import apply_hybrid_reward_settings
+from go1_gym.envs.roboduet.utils import apply_wbc_reward_settings
 from go1_gym.envs.roboduet.wbc_env_wrapper import HistoryWrapper
 from go1_gym.utils import global_switch
 
@@ -224,7 +224,7 @@ class Runner:
         if not global_switch.switch_open:
             global_switch.stage1_count += 1
 
-        if iteration != global_switch.pretrained_to_hybrid_start or global_switch.switch_open:
+        if iteration != global_switch.pretrained_to_wbc_start or global_switch.switch_open:
             return
 
         blue_bold_text = "\033[1;34m"  # bold blue
@@ -233,13 +233,13 @@ class Runner:
             blue_bold_text
             + "=" * 160
             + "\n"
-            + "Multi-agents Policy Output: Pretrained model training finished, start to train hybrid model."
+            + "Multi-agents Policy Output: Pretrained model training finished, start to train WBC model."
             + "\n"
             + "=" * 160
             + reset_color
         )
         global_switch.open_switch()
-        apply_hybrid_reward_settings(self.env.cfg)
+        apply_wbc_reward_settings(self.env.cfg)
         self._apply_stage2_loco_policy_settings()
 
     def learn(

@@ -56,8 +56,8 @@ def get_play_command_limit(cfg, target, command_key, fallback):
     return pair if pair is not None else fallback
 
 
-def apply_hybrid_reward_settings(cfg):
-    for key, value in vars(cfg.hybrid.rewards).items():
+def apply_wbc_reward_settings(cfg):
+    for key, value in vars(cfg.wbc.rewards).items():
         setattr(cfg.rewards, key, value)
 
 
@@ -103,31 +103,31 @@ class StageSchedule:
         global_switch.stage1_arm_ramp_iterations = max(1, int(self._stage1_learning_iterations()))
 
         if self.train_stage == self.STAGE1:
-            global_switch.pretrained_to_hybrid_start = self.num_learning_iterations + 1
-            global_switch.pretrained_to_hybrid_end = global_switch.pretrained_to_hybrid_start + 1
+            global_switch.pretrained_to_wbc_start = self.num_learning_iterations + 1
+            global_switch.pretrained_to_wbc_end = global_switch.pretrained_to_wbc_start + 1
             return
 
         if self.train_stage == self.STAGE2:
-            global_switch.pretrained_to_hybrid_start = -1
-            global_switch.pretrained_to_hybrid_end = 0
-            global_switch.count = global_switch.pretrained_to_hybrid_end
+            global_switch.pretrained_to_wbc_start = -1
+            global_switch.pretrained_to_wbc_end = 0
+            global_switch.count = global_switch.pretrained_to_wbc_end
             global_switch.open_switch()
             return
 
-        global_switch.pretrained_to_hybrid_start = self.default_switch_iteration
-        global_switch.pretrained_to_hybrid_end = global_switch.pretrained_to_hybrid_start + 0
-        if self.debug and global_switch.pretrained_to_hybrid_start > 0:
-            global_switch.pretrained_to_hybrid_start = self.debug_switch_iteration
-            global_switch.pretrained_to_hybrid_end = global_switch.pretrained_to_hybrid_start + 2
+        global_switch.pretrained_to_wbc_start = self.default_switch_iteration
+        global_switch.pretrained_to_wbc_end = global_switch.pretrained_to_wbc_start + 0
+        if self.debug and global_switch.pretrained_to_wbc_start > 0:
+            global_switch.pretrained_to_wbc_start = self.debug_switch_iteration
+            global_switch.pretrained_to_wbc_end = global_switch.pretrained_to_wbc_start + 2
             global_switch.stage1_arm_ramp_iterations = self.debug_switch_iteration
 
     def maybe_switch(self, iteration, global_switch, env, message):
-        if global_switch.switch_open or iteration != global_switch.pretrained_to_hybrid_start:
+        if global_switch.switch_open or iteration != global_switch.pretrained_to_wbc_start:
             return False
 
         print(message)
         global_switch.open_switch()
-        apply_hybrid_reward_settings(env.cfg)
+        apply_wbc_reward_settings(env.cfg)
         return True
 
 

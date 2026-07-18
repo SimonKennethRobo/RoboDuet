@@ -10,7 +10,7 @@ from go1_gym.envs.config import (
     build_roboduet_config,
     recompute_observation_dims,
 )
-from go1_gym.envs.config.roboduet import ROBOT_ASSET_FILES
+from go1_gym.envs.config.wbc import ROBOT_ASSET_FILES
 
 
 def _ensure_asset_file(cfg, robot=None, checkpoint_asset_file=None):
@@ -148,9 +148,9 @@ def load_env(logdir, wrapper, headless=False, device='cuda:0', robot=None):
     cfg.rewards.use_terminal_body_height = False
     cfg.rewards.use_terminal_roll = False
     cfg.rewards.use_terminal_pitch = False
-    cfg.hybrid.rewards.use_terminal_body_height = False
-    cfg.hybrid.rewards.use_terminal_roll = False
-    cfg.hybrid.rewards.use_terminal_pitch = False
+    cfg.wbc.rewards.use_terminal_body_height = False
+    cfg.wbc.rewards.use_terminal_roll = False
+    cfg.wbc.rewards.use_terminal_pitch = False
     cfg.arm.commands.T_traj = [20000, 30000]
     # Cfg.sim.physx["num_position_iterations"] = 8
     # Cfg.sim.physx["num_velocity_iterations"] = 8

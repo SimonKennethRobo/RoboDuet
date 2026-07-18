@@ -9,63 +9,63 @@ class GlobalSwitch():
         self.switch_flag = False
         self.count = 0
         self.stage1_count = 0
-        self.hybrid_reward_scales = None
+        self.wbc_reward_scales = None
         self.pretrained_reward_scales = None
 
-        self.pretrained_to_hybrid_start = 20
-        self.pretrained_to_hybrid_end = self.pretrained_to_hybrid_start + 20
+        self.pretrained_to_wbc_start = 20
+        self.pretrained_to_wbc_end = self.pretrained_to_wbc_start + 20
 
 
     def init_sigmoid_lr(self):
-        range_len = self.pretrained_to_hybrid_end - self.pretrained_to_hybrid_start
+        range_len = self.pretrained_to_wbc_end - self.pretrained_to_wbc_start
         divide = np.linspace(-7, 7, range_len)
         self.lr_down = 1-sigmoid(divide)
 
     def init_linear_lr(self):
-        range_len = self.pretrained_to_hybrid_end - self.pretrained_to_hybrid_start
+        range_len = self.pretrained_to_wbc_end - self.pretrained_to_wbc_start
         self.lr_down = np.linspace(1, 0, range_len)
 
-    def set_reward_scales(self, hybrid_reward_scales, pretrained_reward_scales):
-        self.hybrid_reward_scales = hybrid_reward_scales
+    def set_reward_scales(self, wbc_reward_scales, pretrained_reward_scales):
+        self.wbc_reward_scales = wbc_reward_scales
         self.pretrained_reward_scales = pretrained_reward_scales
 
     def get_reward_scales(self):
-        if self.count < self.pretrained_to_hybrid_start:
+        if self.count < self.pretrained_to_wbc_start:
             return self.pretrained_reward_scales
 
-        elif self.count < self.pretrained_to_hybrid_end:
+        elif self.count < self.pretrained_to_wbc_end:
             reward_scales = {}
-            lr = self.lr_down[self.count - self.pretrained_to_hybrid_start]
-            for key, end in self.hybrid_reward_scales.items():
+            lr = self.lr_down[self.count - self.pretrained_to_wbc_start]
+            for key, end in self.wbc_reward_scales.items():
                 start = self.pretrained_reward_scales[key]
-                # reward_scales[key] = start + (end - start) * (self.count - self.pretrained_to_hybrid_start) / (self.pretrained_to_hybrid_end - self.pretrained_to_hybrid_start)
+                # reward_scales[key] = start + (end - start) * (self.count - self.pretrained_to_wbc_start) / (self.pretrained_to_wbc_end - self.pretrained_to_wbc_start)
                 reward_scales[key] = start * lr + end * (1 - lr)
 
             return reward_scales
 
         else:
-            return self.hybrid_reward_scales
+            return self.wbc_reward_scales
 
     # def get_reward_scales(self):
-    #     if self.count < self.pretrained_to_hybrid_start:
+    #     if self.count < self.pretrained_to_wbc_start:
     #         return self.pretrained_reward_scales
 
-    #     elif self.count < self.pretrained_to_hybrid_end:
+    #     elif self.count < self.pretrained_to_wbc_end:
     #         reward_scales = {}
-    #         for key, end in self.hybrid_reward_scales.items():
+    #         for key, end in self.wbc_reward_scales.items():
     #             start = self.pretrained_reward_scales[key]
-    #             reward_scales[key] = start + (end - start) * (self.count - self.pretrained_to_hybrid_start) / (self.pretrained_to_hybrid_end - self.pretrained_to_hybrid_start)
+    #             reward_scales[key] = start + (end - start) * (self.count - self.pretrained_to_wbc_start) / (self.pretrained_to_wbc_end - self.pretrained_to_wbc_start)
     #         return reward_scales
 
     #     else:
-    #         return self.hybrid_reward_scales
+    #         return self.wbc_reward_scales
 
     def get_beta(self):
-        if self.count <= self.pretrained_to_hybrid_start:
+        if self.count <= self.pretrained_to_wbc_start:
             return 0.0
 
-        elif self.count < self.pretrained_to_hybrid_end:
-            return 0.5 * (self.count - self.pretrained_to_hybrid_start) / (self.pretrained_to_hybrid_end - self.pretrained_to_hybrid_start)
+        elif self.count < self.pretrained_to_wbc_end:
+            return 0.5 * (self.count - self.pretrained_to_wbc_start) / (self.pretrained_to_wbc_end - self.pretrained_to_wbc_start)
 
         else:
             return 0.5

@@ -4,7 +4,7 @@ assert isaacgym
 import torch
 import argparse
 
-from go1_gym.envs.roboduet.utils import StageSchedule, apply_hybrid_reward_settings
+from go1_gym.envs.roboduet.utils import StageSchedule, apply_wbc_reward_settings
 from go1_gym.envs.config import build_roboduet_config, cfg_to_dict
 
 import wandb
@@ -43,7 +43,7 @@ def configure_train_stage(args):
 
 def unified_reward_scales_wrapper(self):
     def get_reward_scales():
-        return self.hybrid_reward_scales
+        return self.wbc_reward_scales
 
     return get_reward_scales
 
@@ -77,7 +77,7 @@ def train_go1(headless=True):
     # global_switch.init_linear_lr()
 
     if args.train_stage == "stage2":
-        apply_hybrid_reward_settings(cfg)
+        apply_wbc_reward_settings(cfg)
 
     # if args.headless:
     #     UnifiedRunnerArgs.log_video = False
@@ -91,8 +91,8 @@ def train_go1(headless=True):
         Unified2AC_Args=Unified2AC_Args,
         UnifiedPPO_Args=UnifiedPPO_Args,
         GlobalSwitch={
-            "pretrained_to_hybrid_start": global_switch.pretrained_to_hybrid_start,
-            "pretrained_to_hybrid_end": global_switch.pretrained_to_hybrid_end,
+            "pretrained_to_wbc_start": global_switch.pretrained_to_wbc_start,
+            "pretrained_to_wbc_end": global_switch.pretrained_to_wbc_end,
             "stage1_arm_ramp_iterations": getattr(global_switch, "stage1_arm_ramp_iterations", None),
         },
     )
@@ -151,8 +151,8 @@ def train_go1(headless=True):
         wandb.save(osp.join(args.log_dir, "parameters.pkl"), policy="now")
 
         wandb.log({
-            "Global_Switch/start": global_switch.pretrained_to_hybrid_start,
-            "Global_Switch/end": global_switch.pretrained_to_hybrid_end,
+            "Global_Switch/start": global_switch.pretrained_to_wbc_start,
+            "Global_Switch/end": global_switch.pretrained_to_wbc_end,
             }, step=0)
 
     env = WBCEnv(

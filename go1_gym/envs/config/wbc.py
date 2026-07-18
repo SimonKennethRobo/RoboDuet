@@ -58,13 +58,12 @@ ROBODUET_OVERRIDES = {
     },
     "control.control_type": "M",
     "control.stiffness": {"joint": 35.0, "widow": 5.0, "zarx": 5.0, "zarx_j3": 20.0},
-    "control.update_obs_freq": 20,
-
+    "control.update_obs_freq": 20,  # only effective when use_vision is True
     # Asset values common to both robots. The URDF path is selected below from
     # ROBOT_ASSET_FILES after parsing --robot.
     "asset.penalize_contacts_on": ["base", "trunk", "wrist", "thigh", "calf", "Head"],
     "asset.terminate_after_contacts_on": [""],
-    "asset.self_collisions": 1,
+    "asset.self_collisions": 1,  # 1 = disable, 0 = enable
     "asset.render_sphere": True,
 
     # Environment and policy layout source values. Observation widths are
@@ -78,19 +77,16 @@ ROBODUET_OVERRIDES = {
     "env.priv_observe_Kd_factor": True,
     "env.priv_observe_dof_damping": True,
     "env.priv_observe_vel": True,
-    "env.priv_observe_high_freq_goal": False,
-    "env.observe_two_prev_actions": False,
+    "env.priv_observe_high_freq_goal": False,  # 是否向 privileged observation 添加未降采样的目标相对 EE 位姿
+    "env.observe_two_prev_actions": False,  # add last last actions
     "env.record_video": False,
     "env.recording_width_px": 500,
     "env.recording_height_px": 320,
-    "env.recording_mode": "COLOR",
     "env.num_recording_envs": 1,
-    "env.recording_frame_stride": 1,
+    "env.recording_frame_stride": 2,
     "env.recording_overlay_text": True,
     "env.recording_overlay_trajectory": True,
     "env.debug_viz": False,
-    "env.all_agents_share": False,
-
     # Stage-1 arm disturbance curriculum.
     "env.stage1_arm_fixed_fraction": 0.1,
     "env.stage1_arm_saturation_fraction": 0.8,
@@ -99,14 +95,12 @@ ROBODUET_OVERRIDES = {
     "env.stage1_arm_zero_vel_probability": 0.005,
     "env.stage1_arm_max_accel": 10.0,
     "env.stage1_arm_max_vel": 5.0,
-    "env.stage1_arm_max_offset": 999.0,
     "env.stage1_arm_init_dof_pos_noise": 1.0,
 
     # Dog command distribution and limits.
-    "commands.distributional_commands": False,
     "commands.body_roll_range": [-0.4, 0.4],
     "commands.limit_body_roll": [-0.4, 0.4],
-    "commands.T_force_range": [2.0, 4.0],
+    "commands.T_force_range": [2.0, 4.0],  # only effective when randomize_end_effector_force=True
     "commands.add_force_thres": 0.3,
 
     # Locomotion and arm rewards.
@@ -115,34 +109,14 @@ ROBODUET_OVERRIDES = {
     "rewards.manip_weight_rpy": 1.0,
     "reward_scales.loco_energy": -0.00004,
 
-    # WBC hybrid reward configuration.
-    "hybrid.num_actions": 18,
-    "hybrid.plan_vel": False,
-    "hybrid.use_vision": False,
-    "hybrid.rewards.terminal_body_height": 0.17,
-    "hybrid.rewards.use_terminal_body_height": True,
-    "hybrid.rewards.use_terminal_roll": False,
-    "hybrid.rewards.use_terminal_pitch": False,
-    "hybrid.rewards.terminal_body_roll": 0.10,
-    "hybrid.rewards.terminal_body_pitch": 0.2,
-    "hybrid.rewards.terminal_body_pitch_roll": math.radians(80.0),
-    "hybrid.rewards.headupdown_thres": 0.1,
-    "hybrid.reward_scales.jump": 5.0,
-    "hybrid.reward_scales.arm_manip_commands_tracking_combine": 1.0,
-    "hybrid.reward_scales.vis_manip_commands_tracking_lpy": 1.0,
-    "hybrid.reward_scales.vis_manip_commands_tracking_rpy": 1.0,
-    "hybrid.reward_scales.orientation_heuristic": -2.0,
-    "hybrid.reward_scales.orientation_control": -10.0,
-    "hybrid.reward_scales.hip_action_l2": -0.05,
-    "hybrid.reward_scales.raibert_heuristic": -0.0,
-    "hybrid.reward_scales.arm_dogcommand_smoothness_1": -0.1,
-    "hybrid.reward_scales.arm_control_limits": -0.0001,
-    "hybrid.reward_scales.traj_track": 0.0,
-    "hybrid.reward_scales.trajectory_current_tracking": 0.0,
-    "hybrid.reward_scales.trajectory_completion_time": 0.0,
-    "hybrid.reward_scales.arm_delta_vel_cmd": 0.0,
-    "hybrid.reward_scales.ee_smoothness": 0.0,
-    "hybrid.reward_scales.arm_contact": -1.0,
+    # Dog policy/controller layout.
+    "dog.num_actions_loco": 12,
+    "dog.dog_num_observation_history": 30,
+    "dog.dog_num_commands": 6,
+    "dog.dog_actions": 12,
+    "dog.use_adaptation_module": False,
+    "dog.control.stiffness_leg": {"joint": 35.0},
+    "dog.control.damping_leg": {"joint": 1.0},
 
     # Arm commands, trajectory curriculum and controller.
     "arm.num_actions_arm": 6,
@@ -156,41 +130,10 @@ ROBODUET_OVERRIDES = {
     "arm.commands.roll_ee": [-math.pi * 0.45, math.pi * 0.45],
     "arm.commands.pitch_ee": [-math.radians(60.0), math.radians(60.0)],
     "arm.commands.yaw_ee": [-math.radians(75.0), math.radians(75.0)],
-    "arm.commands.T_traj": [2.0, 3.0],
-    "arm.commands.T_force_range": [1.0, 4.0],
-    "arm.commands.add_force_thres": 0.3,
-    "arm.trajectory.enabled": False,
-    "arm.trajectory.traj_type": ["point"],
-    "arm.trajectory.window_offsets": [0, 1, 2, 4, 8, 16, 32, 64],
-    "arm.trajectory.num_waypoints": 96,
-    "arm.trajectory.start_radius": 0.0,
-    "arm.trajectory.length_range": [0.05, 1.0],
-    "arm.trajectory.s_curve_amplitude_range": [0.02, 0.12],
-    "arm.trajectory.s_curve_frequency": 1.0,
-    "arm.trajectory.circle_radius": 0.5,
-    "arm.trajectory.circle_turns": 1.0,
-    "arm.trajectory.completion_time_range": [2.0, 5.0],
-    "arm.trajectory.completion_pos_threshold": 0.05,
-    "arm.trajectory.completion_rot_threshold": 0.25,
-    "arm.trajectory.curriculum_levels": 6,
-    "arm.trajectory.curriculum_success_threshold": 0.6,
-    "arm.trajectory.delta_vel_limit": [0.4, 0.25, 0.6],
-    "arm.trajectory.user_cmd_mode": "zero",
-    "arm.trajectory.user_lin_vel_x": [-0.3, 0.3],
-    "arm.trajectory.user_lin_vel_y": [-0.2, 0.2],
-    "arm.trajectory.user_ang_vel_yaw": [-0.4, 0.4],
-    "arm.trajectory.pos_error_scale": 4.0,
-    "arm.trajectory.rot_error_scale": 1.0,
-    "arm.trajectory.completion_time_sigma": 1.0,
-    "arm.trajectory.dog_command_smoothing_alpha": 0.2,
-    "arm.trajectory.dog_command_smoothness_weight_delta_vel": 1.0,
-    "arm.trajectory.dog_command_smoothness_weight_body_pose": 1.0,
-    "arm.trajectory.dog_command_smoothness_weight_gait": 2.0,
-    "arm.trajectory.stage2_base_unlock_curriculum": True,
-    "arm.trajectory.stage2_base_unlock_success_threshold": 0.9,
-    "arm.trajectory.stage2_base_unlock_success_ema_alpha": 0.05,
-    "arm.trajectory.stage2_base_unlock_ramp_iterations": 1000,
-    "arm.trajectory.stage2_base_unlock_force_point_until_unlocked": True,
+    "arm.commands.T_traj": [
+        2.0,
+        3.0,
+    ],  # 非 trajectory 模式下 arm command 的重采样周期，随机为 2–3 秒。trajectory 模式改用 wbc.trajectory.completion_time_range
     "arm.obs_scales.l": 1.0,
     "arm.obs_scales.p": 1.0,
     "arm.obs_scales.y": 1.0,
@@ -220,14 +163,67 @@ ROBODUET_OVERRIDES = {
         "zarx_j8": 20.0,
     },
 
-    # Dog policy/controller layout.
-    "dog.num_actions_loco": 12,
-    "dog.dog_num_observation_history": 30,
-    "dog.dog_num_commands": 6,
-    "dog.dog_actions": 12,
-    "dog.use_adaptation_module": False,
-    "dog.control.stiffness_leg": {"joint": 35.0},
-    "dog.control.damping_leg": {"joint": 1.0},
+    # WBC planning and reward configuration.
+    "wbc.plan_vel": False,  # 非 trajectory、非 dynamic-gait 模式下，决定 dog 速度命令是由 command curriculum 采样还是由 arm plan action控制
+    "wbc.use_vision": False,
+    "wbc.rewards.terminal_body_height": 0.17,
+    "wbc.rewards.use_terminal_body_height": True,
+    "wbc.rewards.use_terminal_roll": False,  # whether to terminate episode when roll exceeds threshold
+    "wbc.rewards.use_terminal_pitch": False,
+    "wbc.rewards.terminal_body_roll": 0.10,
+    "wbc.rewards.terminal_body_pitch": 0.2,
+    "wbc.rewards.headupdown_thres": 0.1,  # 根据 arm 球坐标目标计算期望高度差 delta_z， 判断目标明显向上/向下
+    "wbc.reward_scales.jump": 5.0,
+    "wbc.reward_scales.arm_manip_commands_tracking_combine": 1.0,  # 同时奖励 EE 的球坐标位置 l,p,y 和姿态跟踪
+    "wbc.reward_scales.vis_manip_commands_tracking_lpy": 1.0,  # only for logging, not counted in total reward
+    "wbc.reward_scales.vis_manip_commands_tracking_rpy": 1.0,
+    "wbc.reward_scales.orientation_heuristic": -2.0,  # 根据目标向上/向下方向，引导机身 pitch
+    "wbc.reward_scales.orientation_control": -10.0,  # 惩罚实际机身 roll/pitch 与 dog body-pose command 不一致
+    "wbc.reward_scales.hip_action_l2": -0.05,
+    "wbc.reward_scales.raibert_heuristic": -0.0,
+    "wbc.reward_scales.arm_dogcommand_smoothness_1": -0.1,
+    "wbc.reward_scales.arm_control_limits": -0.0001,
+    "wbc.reward_scales.traj_track": 0.0,
+    "wbc.reward_scales.trajectory_current_tracking": 0.0,
+    "wbc.reward_scales.trajectory_completion_time": 0.0,
+    "wbc.reward_scales.arm_delta_vel_cmd": 0.0,
+    "wbc.reward_scales.ee_smoothness": 0.0,
+    "wbc.reward_scales.arm_contact": -1.0,
+    "wbc.trajectory.enabled": False,
+    "wbc.trajectory.traj_type": ["point"],
+    "wbc.trajectory.window_offsets": [0, 1, 2, 4, 8, 16, 32, 64],
+    "wbc.trajectory.num_waypoints": 96,
+    "wbc.trajectory.start_radius": 0.0,
+    "wbc.trajectory.length_range": [0.05, 1.0],
+    "wbc.trajectory.s_curve_amplitude_range": [0.02, 0.12],
+    "wbc.trajectory.s_curve_frequency": 1.0,
+    "wbc.trajectory.circle_radius": 0.5,
+    "wbc.trajectory.circle_turns": 1.0,
+    "wbc.trajectory.completion_time_range": [2.0, 5.0],
+    "wbc.trajectory.completion_pos_threshold": 0.05,
+    "wbc.trajectory.completion_rot_threshold": 0.25,
+    "wbc.trajectory.curriculum_levels": 6,
+    "wbc.trajectory.delta_vel_limit": [
+        0.4,
+        0.25,
+        0.6,
+    ],  # trajectory arm policy 前 3 个 plan action 对 dog 速度的最大增量。也用于归一化 arm_delta_vel_cmd penalty
+    "wbc.trajectory.user_cmd_mode": "zero",
+    "wbc.trajectory.user_lin_vel_x": [-0.3, 0.3],
+    "wbc.trajectory.user_lin_vel_y": [-0.2, 0.2],
+    "wbc.trajectory.user_ang_vel_yaw": [-0.4, 0.4],
+    "wbc.trajectory.pos_error_scale": 4.0,  # weights to calculate traj tracking reward
+    "wbc.trajectory.rot_error_scale": 1.0,
+    "wbc.trajectory.completion_time_sigma": 1.0,
+    "wbc.trajectory.dog_command_smoothing_alpha": 0.2,
+    "wbc.trajectory.dog_command_smoothness_weight_delta_vel": 1.0,
+    "wbc.trajectory.dog_command_smoothness_weight_body_pose": 1.0,
+    "wbc.trajectory.dog_command_smoothness_weight_gait": 2.0,
+    "wbc.trajectory.stage2_base_unlock_curriculum": True,
+    "wbc.trajectory.stage2_base_unlock_success_threshold": 0.9,
+    "wbc.trajectory.stage2_base_unlock_success_ema_alpha": 0.05,
+    "wbc.trajectory.stage2_base_unlock_ramp_iterations": 1000,
+    "wbc.trajectory.stage2_base_unlock_force_point_until_unlocked": True,
 
     # Domain randomization.
     "domain_rand.added_mass_range": [-2.0, 2.0],
@@ -260,19 +256,15 @@ ROBODUET_OVERRIDES = {
     "domain_rand.stage2_arm.motor_strength_range": [0.85, 1.15],
     "domain_rand.stage2_arm.randomize_motor_offset": True,
     "domain_rand.stage2_arm.motor_offset_range": 0.025,
-    "domain_rand.stage2_arm.randomize_link_mass": True,
-    "domain_rand.stage2_arm.link_mass_range": [0.85, 1.15],
-    "domain_rand.stage2_arm.randomize_link_com": True,
+    "domain_rand.stage2_arm.randomize_link_mass": False,
+    "domain_rand.stage2_arm.link_mass_range": [0.9, 1.1],
+    "domain_rand.stage2_arm.randomize_link_com": False,
     "domain_rand.stage2_arm.link_com_range": 0.01,
-
-    # Privileged-observation normalization changed for arm randomization.
-    "normalization.Kp_factor_range": [0.5, 1.5],
-    "normalization.Kd_factor_range": [0.2, 2.0],
 }
 
 
-# Non-Cfg constants used while deriving hybrid rewards and feature layouts.
-HYBRID_REWARD_FACTORS = {
+# Non-Cfg constants used while deriving WBC rewards and feature layouts.
+WBC_REWARD_FACTORS = {
     "tracking_lin_vel": 0.7,
     "tracking_ang_vel": 0.5,
     "arm_energy": -0.00004,

@@ -134,17 +134,17 @@ def build_wtw_config():
     return build_config(GO1_PROFILE, WTW_PROFILE)
 
 
-def _derive_hybrid_rewards(cfg, factors):
-    cfg.hybrid.reward_scales.tracking_lin_vel = factors["tracking_lin_vel"] * cfg.reward_scales.tracking_lin_vel
-    cfg.hybrid.reward_scales.tracking_ang_vel = factors["tracking_ang_vel"] * cfg.reward_scales.tracking_ang_vel
-    cfg.hybrid.reward_scales.arm_energy = factors["arm_energy"]
-    cfg.hybrid.reward_scales.arm_dof_vel = factors["arm_dof_vel"] * cfg.reward_scales.dof_vel
-    cfg.hybrid.reward_scales.arm_dof_acc = factors["arm_dof_acc"] * cfg.reward_scales.dof_acc
-    cfg.hybrid.reward_scales.arm_action_rate = factors["arm_action_rate"] * cfg.reward_scales.action_rate
-    cfg.hybrid.reward_scales.arm_action_smoothness_1 = (
+def _derive_wbc_rewards(cfg, factors):
+    cfg.wbc.reward_scales.tracking_lin_vel = factors["tracking_lin_vel"] * cfg.reward_scales.tracking_lin_vel
+    cfg.wbc.reward_scales.tracking_ang_vel = factors["tracking_ang_vel"] * cfg.reward_scales.tracking_ang_vel
+    cfg.wbc.reward_scales.arm_energy = factors["arm_energy"]
+    cfg.wbc.reward_scales.arm_dof_vel = factors["arm_dof_vel"] * cfg.reward_scales.dof_vel
+    cfg.wbc.reward_scales.arm_dof_acc = factors["arm_dof_acc"] * cfg.reward_scales.dof_acc
+    cfg.wbc.reward_scales.arm_action_rate = factors["arm_action_rate"] * cfg.reward_scales.action_rate
+    cfg.wbc.reward_scales.arm_action_smoothness_1 = (
         factors["arm_action_smoothness_1"] * cfg.reward_scales.action_smoothness_1
     )
-    cfg.hybrid.reward_scales.arm_action_smoothness_2 = factors["arm_action_smoothness_2"] * cfg.reward_scales.action_smoothness_2
+    cfg.wbc.reward_scales.arm_action_smoothness_2 = factors["arm_action_smoothness_2"] * cfg.reward_scales.action_smoothness_2
 
 
 @dataclass(frozen=True)
@@ -221,14 +221,14 @@ def env_obs_dim_parts(cfg):
         parts["heading"] = 1
     if cfg.env.observe_contact_states:
         parts["contact_states"] = 4
-    if cfg.arm.trajectory.enabled:
+    if cfg.wbc.trajectory.enabled:
         parts.update(
             {
                 "arm_dof_vel": cfg.arm.num_actions_arm,
                 "base_height": 1,
                 "ee_pose_body": 9,
                 "ee_twist_body": 6,
-                "trajectory_window": len(cfg.arm.trajectory.window_offsets) * 9,
+                "trajectory_window": len(cfg.wbc.trajectory.window_offsets) * 9,
                 "trajectory_progress_index": 1,
             }
         )
@@ -236,7 +236,7 @@ def env_obs_dim_parts(cfg):
 
 
 def arm_obs_dim_parts(cfg):
-    if cfg.arm.trajectory.enabled:
+    if cfg.wbc.trajectory.enabled:
         parts = {
             "arm_dof_pos": cfg.arm.num_actions_arm,
             "arm_dof_vel": cfg.arm.num_actions_arm,
@@ -247,7 +247,7 @@ def arm_obs_dim_parts(cfg):
             "trajectory_completion_time_command": 1,
             "ee_pose_body": 9,
             "ee_twist_body": 6,
-            "trajectory_window": len(cfg.arm.trajectory.window_offsets) * 9,
+            "trajectory_window": len(cfg.wbc.trajectory.window_offsets) * 9,
             "trajectory_progress_index": 1,
         }
         if cfg.commands.use_dynamic_gait:
@@ -298,7 +298,7 @@ def dog_obs_dim_parts(cfg):
         parts["heading"] = 1
     if cfg.env.observe_contact_states:
         parts["contact_states"] = 4
-    if cfg.arm.trajectory.enabled:
+    if cfg.wbc.trajectory.enabled:
         parts["ee_pose_body"] = 9
     return parts
 
@@ -357,14 +357,14 @@ def recompute_observation_dims(cfg):
 
 
 def configure_privileged_obs_dims(cfg):
-    from .roboduet import ROBODUET_OVERRIDES
+    from .wbc import ROBODUET_OVERRIDES
 
     dog_parts = privileged_obs_dim_parts(cfg, cfg.dog.num_actions_loco, policy="dog")
     base_arm_action_dim = ROBODUET_OVERRIDES["arm.num_actions_arm_cd"]
     arm_parts = privileged_obs_dim_parts(cfg, base_arm_action_dim, policy="arm")
-    if cfg.arm.trajectory.enabled:
+    if cfg.wbc.trajectory.enabled:
         arm_parts["foot_contact_states"] = 4
-        arm_parts["full_trajectory"] = cfg.arm.trajectory.num_waypoints * 9
+        arm_parts["full_trajectory"] = cfg.wbc.trajectory.num_waypoints * 9
 
     dog_dim = sum_dim_parts(dog_parts)
     arm_dim = sum_dim_parts(arm_parts)
@@ -375,29 +375,58 @@ def configure_privileged_obs_dims(cfg):
     cfg.dog.dog_num_privileged_obs = dog_dim
 
 
+def derive_privileged_normalization_ranges(cfg):
+    """Cover every enabled dog/arm Kp/Kd randomization with one stable range."""
+
+    randomization_profiles = (
+        cfg.domain_rand,
+        cfg.domain_rand.stage1_arm,
+        cfg.domain_rand.stage2_arm,
+    )
+    for factor in ("Kp", "Kd"):
+        if not getattr(cfg.env, f"priv_observe_{factor}_factor", False):
+            continue
+        enabled_ranges = [
+            getattr(profile, f"{factor}_factor_range")
+            for profile in randomization_profiles
+            if getattr(profile, f"randomize_{factor}_factor", False)
+        ]
+        if not enabled_ranges:
+            continue
+
+        lower = min(float(value[0]) for value in enabled_ranges)
+        upper = max(float(value[1]) for value in enabled_ranges)
+        if lower >= upper:
+            raise ValueError(f"Invalid enabled {factor} factor ranges: {enabled_ranges}")
+
+        path = f"normalization.{factor}_factor_range"
+        setattr(cfg.normalization, f"{factor}_factor_range", [lower, upper])
+        cfg._provenance[path] = "derived:domain_rand"
+
+
 def enable_rot6d(cfg, layout):
-    from .roboduet import FEATURE_LAYOUT
+    from .wbc import FEATURE_LAYOUT
 
     cfg.use_rot6d = True
     layout.arm_cmd += FEATURE_LAYOUT["rot6d_command_dims"]
 
 
 def enable_traj_track(cfg, layout, traj_track_reward_scale=5.0):
-    from .roboduet import FEATURE_LAYOUT, TRAJECTORY_REWARD_CONFIG
+    from .wbc import FEATURE_LAYOUT, TRAJECTORY_REWARD_CONFIG
 
-    cfg.arm.trajectory.enabled = True
+    cfg.wbc.trajectory.enabled = True
     layout.arm_action_cd = cfg.arm.num_actions_arm + FEATURE_LAYOUT["trajectory_plan_action_dims"]
 
-    cfg.hybrid.reward_scales.arm_manip_commands_tracking_combine = 0.0
-    cfg.hybrid.reward_scales.vis_manip_commands_tracking_lpy = 0.0
-    cfg.hybrid.reward_scales.vis_manip_commands_tracking_rpy = 0.0
-    cfg.hybrid.reward_scales.traj_track = traj_track_reward_scale
+    cfg.wbc.reward_scales.arm_manip_commands_tracking_combine = 0.0
+    cfg.wbc.reward_scales.vis_manip_commands_tracking_lpy = 0.0
+    cfg.wbc.reward_scales.vis_manip_commands_tracking_rpy = 0.0
+    cfg.wbc.reward_scales.traj_track = traj_track_reward_scale
     for name, value in TRAJECTORY_REWARD_CONFIG.items():
-        setattr(cfg.hybrid.reward_scales, name, value)
+        setattr(cfg.wbc.reward_scales, name, value)
 
 
 def enable_dyna_gait(cfg, layout, min_frequency=0.0):
-    from .roboduet import DYNAMIC_GAIT_BIN_CONFIG, FEATURE_LAYOUT
+    from .wbc import DYNAMIC_GAIT_BIN_CONFIG, FEATURE_LAYOUT
 
     cfg.commands.use_dynamic_gait = True
     cfg.commands.gait_frequency_cmd_range = [min_frequency, cfg.commands.gait_frequency_cmd_range[1]]
@@ -409,14 +438,14 @@ def enable_dyna_gait(cfg, layout, min_frequency=0.0):
 
     layout.dog_cmd += FEATURE_LAYOUT["dynamic_gait_command_dims"]
     layout.arm_action_cd = cfg.arm.num_actions_arm + FEATURE_LAYOUT["dynamic_gait_plan_action_dims"]
-    if cfg.arm.trajectory.enabled:
+    if cfg.wbc.trajectory.enabled:
         layout.arm_action_cd += FEATURE_LAYOUT["trajectory_plan_action_dims"]
     cfg.env.observe_gait_commands = True
     apply_cfg_overrides(cfg, DYNAMIC_GAIT_BIN_CONFIG)
 
 
 def configure_robot_asset(cfg, robot):
-    from .roboduet import ROBOT_ASSET_FILES
+    from .wbc import ROBOT_ASSET_FILES
 
     try:
         cfg.asset.file = ROBOT_ASSET_FILES[robot]
@@ -443,13 +472,14 @@ def build_roboduet_config(args=None, *, options=None, traj_track_reward_scale=5.
     """Build one finalized RoboDuet config without mutating another build."""
 
     from .go1 import GO1_PROFILE
-    from .roboduet import HYBRID_REWARD_FACTORS, ROBODUET_PROFILE
+    from .wbc import WBC_REWARD_FACTORS, ROBODUET_PROFILE
     from .wtw import WTW_PROFILE
 
     if options is None:
         options = RoboDuetRuntimeOptions.from_args(args) if args is not None else RoboDuetRuntimeOptions(4096, "go2")
     cfg = build_config(GO1_PROFILE, WTW_PROFILE, ROBODUET_PROFILE)
-    _derive_hybrid_rewards(cfg, HYBRID_REWARD_FACTORS)
+    _derive_wbc_rewards(cfg, WBC_REWARD_FACTORS)
+    derive_privileged_normalization_ranges(cfg)
     cfg.env.num_envs = options.num_envs
     cfg.env.stage1_arm_curriculum = options.stage1_arm_curriculum
 

@@ -33,16 +33,16 @@ class Rewards:
         # Penalize changes in actions
         diff = torch.square(self.env.plan_actions - self.env.last_plan_actions)
         diff = diff * (self.env.last_plan_actions != 0)  # ignore first step
-        if not getattr(self.env.cfg.arm.trajectory, "enabled", False):
+        if not getattr(self.env.cfg.wbc.trajectory, "enabled", False):
             return torch.sum(diff, dim=1)
 
-        reward = self.env.cfg.arm.trajectory.dog_command_smoothness_weight_delta_vel * torch.sum(diff[:, :3], dim=1)
+        reward = self.env.cfg.wbc.trajectory.dog_command_smoothness_weight_delta_vel * torch.sum(diff[:, :3], dim=1)
         if diff.shape[1] > 3:
-            reward += self.env.cfg.arm.trajectory.dog_command_smoothness_weight_body_pose * torch.sum(
+            reward += self.env.cfg.wbc.trajectory.dog_command_smoothness_weight_body_pose * torch.sum(
                 diff[:, 3 : min(6, diff.shape[1])], dim=1
             )
         if diff.shape[1] > 6:
-            reward += self.env.cfg.arm.trajectory.dog_command_smoothness_weight_gait * torch.sum(diff[:, 6:], dim=1)
+            reward += self.env.cfg.wbc.trajectory.dog_command_smoothness_weight_gait * torch.sum(diff[:, 6:], dim=1)
         return reward
 
     def _reward_arm_dogcommand_smoothness_2(self):
@@ -99,18 +99,18 @@ class Rewards:
         return self.env.get_trajectory_current_tracking_reward()
 
     def _reward_trajectory_completion_time(self):
-        low, high = self.env.cfg.arm.trajectory.completion_time_range
+        low, high = self.env.cfg.wbc.trajectory.completion_time_range
         early = (low - self.env.traj_elapsed_time).clip(min=0.0)
         late = (self.env.traj_elapsed_time - high).clip(min=0.0)
         time_error = early + late
         time_reward = torch.exp(
-            -torch.square(time_error) / self.env.cfg.arm.trajectory.completion_time_sigma
+            -torch.square(time_error) / self.env.cfg.wbc.trajectory.completion_time_sigma
         )
         return time_reward * self.env.traj_complete_buf.float()
 
     def _reward_arm_delta_vel_cmd(self):
         limits = torch.tensor(
-            self.env.cfg.arm.trajectory.delta_vel_limit,
+            self.env.cfg.wbc.trajectory.delta_vel_limit,
             dtype=torch.float,
             device=self.env.device,
         ).view(1, 3)
@@ -274,8 +274,8 @@ class Rewards:
 
     def _reward_orientation_heuristic(self):
         guide = torch.zeros_like(self.env.pitch)
-        down_flag = self.env.delta_z < -self.env.cfg.hybrid.rewards.headupdown_thres
-        up_flag = self.env.delta_z > self.env.cfg.hybrid.rewards.headupdown_thres+0.3
+        down_flag = self.env.delta_z < -self.env.cfg.wbc.rewards.headupdown_thres
+        up_flag = self.env.delta_z > self.env.cfg.wbc.rewards.headupdown_thres+0.3
         guide[down_flag] = torch.square(self.env.pitch - 0.4)[down_flag]
         guide[up_flag] = torch.square(self.env.pitch + 0.3)[up_flag]
 

@@ -15,7 +15,7 @@ def parse_args(argv: Optional[List[str]] = None):
     mode.add_argument("--inspect", action="store_true", help="Inspect candidate policy checkpoint layouts")
     mode.add_argument("--compare_results", action="store_true", help="Compare two saved benchmark result directories")
     mode.add_argument("--arm_only", action="store_true", help="[Reserved] Run arm-policy benchmark")
-    mode.add_argument("--hybrid", action="store_true", help="[Reserved] Run dog+arm benchmark")
+    mode.add_argument("--wbc", action="store_true", help="[Reserved] Run dog+arm benchmark")
     args, remaining = parser.parse_known_args(argv)
     return args, remaining
 
@@ -25,8 +25,8 @@ def main(argv: Optional[List[str]] = None):
 
     if args.arm_only:
         raise NotImplementedError("arm_only benchmark mode is reserved but not implemented yet")
-    if args.hybrid:
-        raise NotImplementedError("hybrid benchmark mode is reserved but not implemented yet")
+    if args.wbc:
+        raise NotImplementedError("wbc benchmark mode is reserved but not implemented yet")
     if args.inspect:
         from benchmark.inspect import main as inspect_main
 

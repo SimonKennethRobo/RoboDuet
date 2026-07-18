@@ -91,7 +91,7 @@ conda run -n roboduet python -m benchmark.cli \
 未来模式：
 
 - `--arm_only`: 只评估 arm policy，要求 candidate 有 `checkpoints_arm/`。
-- `--hybrid`: 评估 dog + arm pair，要求 candidate 同时有 `checkpoints_dog/` 和 `checkpoints_arm/`。
+- `--wbc`: 评估 dog + arm pair，要求 candidate 同时有 `checkpoints_dog/` 和 `checkpoints_arm/`。
 
 这两个模式的统一入口参数已预留，但当前尚未实现。
 
@@ -122,7 +122,7 @@ python -m benchmark.cli \
   --candidate_dir benchmark/candidates
 ```
 
-inspect 会读取 `parameters.pkl`、`checkpoints_dog/` 和 `checkpoints_arm/`，输出 dog/arm 的 observation、history、privileged obs、action、command、adaptation module 和 checkpoint shape。它用于回答“这个 policy bundle 内部结构是否自洽”，以及“它属于哪一代 policy layout”。它不会保证该 policy 能在当前 env 中直接执行；真正执行仍然需要通过 dog-only、arm-only 或 hybrid benchmark 的 shared-env compatibility check。
+inspect 会读取 `parameters.pkl`、`checkpoints_dog/` 和 `checkpoints_arm/`，输出 dog/arm 的 observation、history、privileged obs、action、command、adaptation module 和 checkpoint shape。它用于回答“这个 policy bundle 内部结构是否自洽”，以及“它属于哪一代 policy layout”。它不会保证该 policy 能在当前 env 中直接执行；真正执行仍然需要通过 dog-only、arm-only 或 wbc benchmark 的 shared-env compatibility check。
 
 例如旧版 RoboDuet policy 可能显示：
 

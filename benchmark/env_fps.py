@@ -385,7 +385,7 @@ def run_single(args):
     env = HistoryWrapper(env)
 
     if args.stage2:
-        global_switch.count = global_switch.pretrained_to_hybrid_end
+        global_switch.count = global_switch.pretrained_to_wbc_end
         global_switch.open_switch()
 
     env.reset()

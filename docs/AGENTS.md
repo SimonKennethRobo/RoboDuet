@@ -17,7 +17,7 @@ Core files:
 - `go1_gym/envs/config/`: flat configuration package. `legged_robot.py`, `go1.py`, `wtw.py`, and `roboduet.py` contain profiles; `core.py` contains schema materialization, profile composition, runtime build, serialization, validation, and observation/action layout derivation.
 - `go1_gym/envs/config/roboduet.py`: complete editable RoboDuet profile. `ROBODUET_OVERRIDES` can override any base/Go1/WTW field without modifying another task profile.
 - `go1_gym/envs/roboduet/wbc_env_wrapper.py`: interactive wrappers and `HistoryWrapper`. `HistoryWrapper.step(action_dog, action_arm)` is the canonical step API for training and play.
-- `go1_gym/envs/roboduet/utils.py`: `StageSchedule`, `apply_hybrid_reward_settings`, `ObservationBuilder` (asserts obs width vs. `cfg.*_num_observations`).
+- `go1_gym/envs/roboduet/utils.py`: `StageSchedule`, `apply_wbc_reward_settings`, `ObservationBuilder` (asserts obs width vs. `cfg.*_num_observations`).
 - `go1_gym/envs/roboduet/traj_gen/trajectory_geometry.py`: `sample_trajectory_commands` — supports `line`, `s_curve`, `circle`, `point` types and consumes an optional `orientation_scale` curriculum from the env.
 - `go1_gym/envs/rewards/rewards.py`: reward function registry. Reward methods named `_reward_<name>` are auto-wired by `cfg.rewards.scales.<name>`.
 - `go1_gym/utils/global_switch.py`: process-global `global_switch` singleton driving stage transitions and reward-scale ramping.
@@ -39,8 +39,8 @@ A process-global `global_switch` singleton (`go1_gym/utils/global_switch.py`)
 gates the curriculum:
 
 - `global_switch.count`: iteration counter, incremented per learning iteration.
-- `global_switch.switch_open` (alias for `switch_flag`): once `True`, stage-2 is active — the arm policy participates in training, hybrid reward scales are applied, and trajectory-tracking logic runs in `WBCEnv`.
-- `global_switch.pretrained_to_hybrid_start` / `_end`: iteration window over which `get_reward_scales()` linearly interpolates from stage-1 (pretrained) scales to stage-2 (hybrid) scales via a sigmoid ramp (`init_sigmoid_lr()`).
+- `global_switch.switch_open` (alias for `switch_flag`): once `True`, stage-2 is active — the arm policy participates in training, WBC reward scales are applied, and trajectory-tracking logic runs in `WBCEnv`.
+- `global_switch.pretrained_to_wbc_start` / `_end`: iteration window over which `get_reward_scales()` linearly interpolates from stage-1 (pretrained) scales to stage-2 (WBC) scales via a sigmoid ramp (`init_sigmoid_lr()`).
 - `global_switch.stage1_count` / `stage1_arm_ramp_iterations`: drive the stage-1 arm-disturbance intensity curriculum.
 
 `StageSchedule.configure(global_switch)` (in `wbc_env/utils.py`) sets the
@@ -141,9 +141,9 @@ For `traj_track=True` and `dyna_gait=True`, keep the arm policy and dog command 
 
 All arm-policy commands sent to the dog policy should pass through the dog-command smoothing path in `WBCEnv` and be clipped/mapped using the dog policy command ranges. Stage-2 training loads command ranges from the dog policy `parameters.pkl` in `scripts/auto_train.py`; if this fails, print and inspect the runtime values. Limit violations use one `arm_control_limits` reward scale. Smoothness can be weighted separately by command group with:
 
-- `cfg.arm.trajectory.dog_command_smoothness_weight_delta_vel`
-- `cfg.arm.trajectory.dog_command_smoothness_weight_body_pose`
-- `cfg.arm.trajectory.dog_command_smoothness_weight_gait`
+- `cfg.wbc.trajectory.dog_command_smoothness_weight_delta_vel`
+- `cfg.wbc.trajectory.dog_command_smoothness_weight_body_pose`
+- `cfg.wbc.trajectory.dog_command_smoothness_weight_gait`
 
 Arm observations in trajectory mode intentionally include the full previous arm-policy action width (`cfg.arm.num_actions_arm_cd`), not only the 6 joint actions. This keeps body-height and gait plan dimensions observable. Arm observations also include arm DOF velocity. Foot contact states are not normal arm observations; they are privileged-only for the arm policy.
 
@@ -160,7 +160,7 @@ tracked in three buffers (all shape `(num_envs, dog_num_commands)`):
 
 - `plan_actions_raw`: the un-scaled policy output for the plan slice; used by `_reward_arm_control_limits` to penalize `|raw| > 1`.
 - `dog_command_plan_targets`: the per-step plan target after clipping to `cfg.commands.limit_*`.
-- `dog_command_plan_smoothed`: EMA of `dog_command_plan_targets` with coefficient `cfg.arm.trajectory.dog_command_smoothing_alpha` (default 0.2); this buffer is what gets written to `commands_dog` and consumed by the dog policy.
+- `dog_command_plan_smoothed`: EMA of `dog_command_plan_targets` with coefficient `cfg.wbc.trajectory.dog_command_smoothing_alpha` (default 0.2); this buffer is what gets written to `commands_dog` and consumed by the dog policy.
 
 `_smooth_dog_command_values(indices, values)` is the single place that
 performs the EMA write; never set `commands_dog[:, plan_indices]` directly
@@ -189,7 +189,7 @@ Useful when reading or modifying trajectory code:
 - `traj_progress_idx`: long tensor, current waypoint index per env, driven by `traj_elapsed_time / traj_target_time`.
 - `traj_type`: long tensor encoding `{line:0, s_curve:1, circle:2, point:3}`. Reward branches off this.
 - `traj_visited_mask`: bool tensor marking waypoints that have been the current target at least once. Drives `get_trajectory_error_sum` averaging and `get_trajectory_progress_index_obs` guarding.
-- `traj_curriculum_level` / `_traj_curriculum_params(env_ids)`: per-env integer level in `[0, cfg.arm.trajectory.curriculum_levels - 1]`; returns `length`, `s_curve_amplitude`, and `orientation_scale` interpolated by `level / max_level`. The orientation scale shrinks the sampled roll/pitch/yaw ranges around 0, so level 0 produces start_quat ≈ base_quat and higher levels approach the full `cfg.arm.commands.roll_ee/pitch_ee/yaw_ee` ranges.
+- `traj_curriculum_level` / `_traj_curriculum_params(env_ids)`: per-env integer level in `[0, cfg.wbc.trajectory.curriculum_levels - 1]`; returns `length`, `s_curve_amplitude`, and `orientation_scale` interpolated by `level / max_level`. The orientation scale shrinks the sampled roll/pitch/yaw ranges around 0, so level 0 produces start_quat ≈ base_quat and higher levels approach the full `cfg.arm.commands.roll_ee/pitch_ee/yaw_ee` ranges.
 - `traj_target_time` / `traj_elapsed_time`: per-episode sampled completion time and accumulator. `arm_time_buf` drives elapsed time and is zeroed at reset.
 - `traj_complete_buf` / `traj_episode_success_buf`: termination/curriculum-advance signals; success requires reaching the final waypoint with pos and rot errors under `completion_pos_threshold` / `completion_rot_threshold`.
 
@@ -418,7 +418,7 @@ S-curve amplitude (see `_traj_curriculum_params` / `traj_curriculum_level`).
 roll/pitch/yaw by that per-env scale, so a freshly-spawned env starts with
 `start_quat ≈ base_quat` and progressively unlocks the full configured EE
 orientation range as it succeeds. There is no separate orientation
-curriculum config; reuse `cfg.arm.trajectory.curriculum_levels`.
+curriculum config; reuse `cfg.wbc.trajectory.curriculum_levels`.
 
 ## Reward and Curriculum Notes
 

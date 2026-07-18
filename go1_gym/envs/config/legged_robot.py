@@ -125,7 +125,6 @@ class LeggedRobotDefaults:
         heading_command = True  # if true: compute ang vel command from heading error
         global_reference = False
         observe_accel = False
-        distributional_commands = False
         curriculum_type = "RewardThresholdCurriculum"
         lipschitz_threshold = 0.9
 
@@ -313,16 +312,9 @@ class LeggedRobotDefaults:
         torques = -0.00001
         dof_vel = -0.
         dof_acc = -2.5e-7
-        base_height = -0.
-        feet_air_time = 1.0
         collision = -1.
         arm_contact = -1.
-        feet_stumble = -0.0
         action_rate = -0.01
-        tracking_lin_vel_lat = 0.
-        tracking_lin_vel_long = 0.
-        tracking_contacts = 0.
-        tracking_contacts_shaped = 0.
         tracking_contacts_shaped_force = 0.
         tracking_contacts_shaped_vel = 0.
         jump = 0.0

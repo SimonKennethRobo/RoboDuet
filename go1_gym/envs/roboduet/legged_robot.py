@@ -444,11 +444,11 @@ class LeggedRobot(BaseTask):
                 device=self.device,
             )
             self.extras["train/episode"]["global_switch_pretrained_start"] = torch.tensor(
-                float(global_switch.pretrained_to_hybrid_start),
+                float(global_switch.pretrained_to_wbc_start),
                 device=self.device,
             )
             self.extras["train/episode"]["global_switch_pretrained_end"] = torch.tensor(
-                float(global_switch.pretrained_to_hybrid_end),
+                float(global_switch.pretrained_to_wbc_end),
                 device=self.device,
             )
             self.extras["train/episode"]["global_switch_open"] = torch.tensor(
@@ -1088,7 +1088,7 @@ class LeggedRobot(BaseTask):
         self.env_command_bins[env_ids.cpu().numpy()] = new_bin_inds
         self.env_command_categories[env_ids.cpu().numpy()] = 0
 
-        if not self.cfg.hybrid.plan_vel and not self.cfg.arm.trajectory.enabled:
+        if not self.cfg.wbc.plan_vel and not self.cfg.wbc.trajectory.enabled:
             self.commands_dog[env_ids, 0] = new_commands[:, 0]
             self.commands_dog[env_ids, 1] = new_commands[:, 1]
             self.commands_dog[env_ids, 2] = new_commands[:, 2]
@@ -1779,18 +1779,18 @@ class LeggedRobot(BaseTask):
             else:
                 self.pretrained_reward_scales[key] *= self.dt
 
-        for key in list(self.hybrid_reward_scales.keys()):
-            self.hybrid_reward_scales[key] *= self.dt
+        for key in list(self.wbc_reward_scales.keys()):
+            self.wbc_reward_scales[key] *= self.dt
 
-        # update pretrained reward scales with hybrid reward scales
+        # Complete the WBC reward table with unchanged stage-1 scales.
         for name, scale in self.pretrained_reward_scales.items():
-            if name not in self.hybrid_reward_scales:
-                self.hybrid_reward_scales[name] = scale
+            if name not in self.wbc_reward_scales:
+                self.wbc_reward_scales[name] = scale
 
         # prepare list of functions
         self.reward_functions = []
         self.reward_names = []
-        for name, scale in self.hybrid_reward_scales.items():
+        for name, scale in self.wbc_reward_scales.items():
             if name == "termination":
                 continue
 
@@ -1805,25 +1805,25 @@ class LeggedRobot(BaseTask):
         # reward episode sums
         self.episode_sums = {
             name: torch.zeros(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
-            for name in self.hybrid_reward_scales.keys()
+            for name in self.wbc_reward_scales.keys()
         }
         self.episode_sums["total"] = torch.zeros(
             self.num_envs, dtype=torch.float, device=self.device, requires_grad=False
         )
         self.episode_sums_eval = {
             name: -1 * torch.ones(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
-            for name in self.hybrid_reward_scales.keys()
+            for name in self.wbc_reward_scales.keys()
         }
         self.episode_sums_eval["total"] = torch.zeros(
             self.num_envs, dtype=torch.float, device=self.device, requires_grad=False
         )
         self.command_sums = {
             name: torch.zeros(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
-            for name in list(self.hybrid_reward_scales.keys())
+            for name in list(self.wbc_reward_scales.keys())
             + ["lin_vel_raw", "ang_vel_raw", "lin_vel_residual", "ang_vel_residual", "ep_timesteps"]
         }
 
-        global_switch.set_reward_scales(self.hybrid_reward_scales, self.pretrained_reward_scales)
+        global_switch.set_reward_scales(self.wbc_reward_scales, self.pretrained_reward_scales)
 
     def _create_ground_plane(self):
         """Adds a ground plane to the simulation, sets friction and restitution based on the cfg."""
@@ -2349,8 +2349,8 @@ class LeggedRobot(BaseTask):
         self.dt = self.cfg.control.decimation * self.sim_params.dt
         self.obs_scales = self.cfg.obs_scales
         self.pretrained_reward_scales = vars(self.cfg.reward_scales)
-        print(type(self.cfg.reward_scales), type(self.cfg.hybrid.reward_scales))
-        self.hybrid_reward_scales = vars(self.cfg.hybrid.reward_scales)
+        print(type(self.cfg.reward_scales), type(self.cfg.wbc.reward_scales))
+        self.wbc_reward_scales = vars(self.cfg.wbc.reward_scales)
         self.curriculum_thresholds = vars(self.cfg.curriculum_thresholds)
 
         cfg.command_ranges = vars(cfg.commands)

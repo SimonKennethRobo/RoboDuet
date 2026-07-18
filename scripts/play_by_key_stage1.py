@@ -57,8 +57,8 @@ def main(args):
         global_switch.stage1_arm_ramp_iterations = ramp_iters
         stage1_arm_intensity = float(getattr(args, "stage1_arm_intensity", 1.0))
         global_switch.stage1_count = int(max(0.0, min(1.0, stage1_arm_intensity)) * ramp_iters)
-        global_switch.pretrained_to_hybrid_start = getattr(args, "num_eval_steps", 30000) + 1
-        global_switch.pretrained_to_hybrid_end = global_switch.pretrained_to_hybrid_start + 1
+        global_switch.pretrained_to_wbc_start = getattr(args, "num_eval_steps", 30000) + 1
+        global_switch.pretrained_to_wbc_end = global_switch.pretrained_to_wbc_start + 1
     else:
         global_switch.open_switch()
 

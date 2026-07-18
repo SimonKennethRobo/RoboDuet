@@ -501,8 +501,8 @@ def main(args):
         global_switch.switch_flag = False
         global_switch.count = 0
         global_switch.stage1_count = 0
-        global_switch.pretrained_to_hybrid_start = 10**12
-        global_switch.pretrained_to_hybrid_end = global_switch.pretrained_to_hybrid_start + 1
+        global_switch.pretrained_to_wbc_start = 10**12
+        global_switch.pretrained_to_wbc_end = global_switch.pretrained_to_wbc_start + 1
     else:
         global_switch.open_switch()
 

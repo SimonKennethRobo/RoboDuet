@@ -43,7 +43,6 @@ GO1_PROFILE = ConfigProfile(
         "reward_scales.action_rate": -0.01,
         "reward_scales.dof_pos_limits": -10.0,
         "reward_scales.orientation": -5.0,
-        "reward_scales.base_height": -30.0,
         "terrain.mesh_type": "trimesh",
         "terrain.measure_heights": False,
         "terrain.terrain_noise_magnitude": 0.0,

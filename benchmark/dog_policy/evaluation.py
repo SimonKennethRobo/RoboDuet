@@ -18,7 +18,7 @@ from go1_gym.envs.config import (
     configure_privileged_obs_dims,
     recompute_observation_dims,
 )
-from go1_gym.envs.config.roboduet import ROBODUET_OVERRIDES
+from go1_gym.envs.config.wbc import ROBODUET_OVERRIDES
 from go1_gym.utils.global_switch import global_switch
 from go1_gym.utils.math_utils import quat_apply_yaw
 from go1_gym_learn.ppo_cse_automatic.dog_ac import DogActorCritic
@@ -355,7 +355,7 @@ CRITICAL_COMPAT_CFG_PATHS = [
     "dog.num_actions_loco",
     "arm.arm_num_commands",
     "arm.num_actions_arm",
-    "arm.trajectory.enabled",
+    "wbc.trajectory.enabled",
     "commands.global_reference",
     "env.observe_two_prev_actions",
     "env.observe_timing_parameter",
@@ -365,7 +365,7 @@ CRITICAL_COMPAT_CFG_PATHS = [
     "env.observe_only_lin_vel",
     "env.observe_yaw",
     "env.observe_contact_states",
-    "hybrid.use_vision",
+    "wbc.use_vision",
     "use_rot6d",
 ]
 
@@ -477,9 +477,9 @@ def _apply_benchmark_env_overrides(cfg, total_envs: int, envs_per_policy: int):
     cfg.rewards.use_terminal_body_height = True
     cfg.rewards.use_terminal_roll = True
     cfg.rewards.use_terminal_pitch = True
-    cfg.hybrid.rewards.use_terminal_body_height = True
-    cfg.hybrid.rewards.use_terminal_roll = True
-    cfg.hybrid.rewards.use_terminal_pitch = True
+    cfg.wbc.rewards.use_terminal_body_height = True
+    cfg.wbc.rewards.use_terminal_roll = True
+    cfg.wbc.rewards.use_terminal_pitch = True
     cfg.arm.commands.T_traj = [20000, 30000]
     cfg.env.stage1_arm_curriculum = True
 
@@ -510,8 +510,8 @@ def configure_stage1(arm_intensity: float, ramp_iters: int = 1000):
     global_switch.count = 0
     global_switch.stage1_arm_ramp_iterations = ramp_iters
     global_switch.stage1_count = int(max(0.0, min(1.0, arm_intensity)) * ramp_iters)
-    global_switch.pretrained_to_hybrid_start = 10_000_000
-    global_switch.pretrained_to_hybrid_end = 10_000_001
+    global_switch.pretrained_to_wbc_start = 10_000_000
+    global_switch.pretrained_to_wbc_end = 10_000_001
 
 
 # ---------------------------------------------------------------------------

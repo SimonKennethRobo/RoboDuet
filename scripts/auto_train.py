@@ -11,7 +11,7 @@ from datetime import datetime
 import wandb
 from go1_gym import MINI_GYM_ROOT_DIR
 from go1_gym.envs.config import build_roboduet_config, cfg_to_dict
-from go1_gym.envs.roboduet.utils import StageSchedule, apply_hybrid_reward_settings
+from go1_gym.envs.roboduet.utils import StageSchedule, apply_wbc_reward_settings
 from go1_gym.envs.roboduet.wbc_env import WBCEnv
 from go1_gym.envs.roboduet.wbc_env_wrapper import HistoryWrapper
 from go1_gym.utils import format_code, global_switch, set_seed
@@ -157,7 +157,7 @@ def main(args):
     # global_switch.init_linear_lr()
 
     if args.train_stage == "stage2":
-        apply_hybrid_reward_settings(cfg)
+        apply_wbc_reward_settings(cfg)
 
     now = datetime.now()
     wandb_config = build_wandb_config(
@@ -170,8 +170,8 @@ def main(args):
         DogAC_Args=DogAC_Args,
         PPO_Args=PPO_Args,
         GlobalSwitch={
-            "pretrained_to_hybrid_start": global_switch.pretrained_to_hybrid_start,
-            "pretrained_to_hybrid_end": global_switch.pretrained_to_hybrid_end,
+            "pretrained_to_wbc_start": global_switch.pretrained_to_wbc_start,
+            "pretrained_to_wbc_end": global_switch.pretrained_to_wbc_end,
             "stage1_arm_ramp_iterations": getattr(global_switch, "stage1_arm_ramp_iterations", None),
         },
     )
@@ -248,8 +248,8 @@ def main(args):
 
         wandb.log(
             {
-                "Global_Switch/start": global_switch.pretrained_to_hybrid_start,
-                "Global_Switch/end": global_switch.pretrained_to_hybrid_end,
+                "Global_Switch/start": global_switch.pretrained_to_wbc_start,
+                "Global_Switch/end": global_switch.pretrained_to_wbc_end,
             },
             step=0,
         )
