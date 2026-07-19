@@ -367,7 +367,7 @@ class LeggedRobotDefaults:
         imu = 0.1
         height_measurements = 5.0
         friction_measurements = 1.0
-        body_height_cmd = 2.0
+        body_height_cmd = 1.0
         gait_phase_cmd = 1.0
         gait_freq_cmd = 1.0
         gait_offset_cmd = 1.0

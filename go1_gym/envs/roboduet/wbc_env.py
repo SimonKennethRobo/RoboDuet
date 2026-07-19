@@ -1194,7 +1194,9 @@ class WBCEnv(LeggedRobot):
                 dim=1,
             )
 
-        if self.cfg.env.priv_observe_com_displacement:
+        if self.cfg.env.priv_observe_com_displacement and (
+            policy != "dog" or self.cfg.dog.priv_observe_com_displacement
+        ):
             scale, shift = get_scale_shift(self.cfg.normalization.com_displacement_range)
             privileged_obs_buf = torch.cat(
                 (privileged_obs_buf, (self.com_displacements - shift) * scale),
@@ -1206,6 +1208,21 @@ class WBCEnv(LeggedRobot):
             privileged_obs_buf = torch.cat(
                 (privileged_obs_buf, (self.stage1_ee_payload_mass.unsqueeze(1) - shift) * scale),
                 dim=1,
+            )
+
+        if policy == "dog" and self.cfg.dog.priv_observe_motor_strength:
+            scale, shift = get_scale_shift(self.cfg.normalization.motor_strength_range)
+            # Global dog motor strength is sampled once per env and broadcast
+            # across all leg joints, so one scalar carries the full information.
+            dog_motor_strength = self.motor_strengths[:, dof_slice.start : dof_slice.start + 1]
+            privileged_obs_buf = torch.cat(
+                (privileged_obs_buf, (dog_motor_strength - shift) * scale), dim=1
+            )
+
+        if policy == "dog" and self.cfg.dog.priv_observe_motor_offset:
+            scale, shift = get_scale_shift(self.cfg.normalization.motor_offset_range)
+            privileged_obs_buf = torch.cat(
+                (privileged_obs_buf, (self.motor_offsets[:, dof_slice] - shift) * scale), dim=1
             )
 
         if self.cfg.env.priv_observe_motor_strength:
@@ -1223,27 +1240,49 @@ class WBCEnv(LeggedRobot):
             )
 
         if self.cfg.env.priv_observe_Kp_factor:
-            scale, shift = get_scale_shift(self.cfg.normalization.Kp_factor_range)
+            kp_range = (
+                self.cfg.normalization.dog_Kp_factor_range
+                if policy == "dog"
+                else self.cfg.normalization.Kp_factor_range
+            )
+            scale, shift = get_scale_shift(kp_range)
+            kp_factors = self.Kp_factors[:, dof_slice]
+            if policy == "dog":
+                # Global leg Kp is one per-env scalar broadcast to 12 joints.
+                kp_factors = kp_factors[:, :1]
             privileged_obs_buf = torch.cat(
-                (privileged_obs_buf, (self.Kp_factors[:, dof_slice] - shift) * scale),
+                (privileged_obs_buf, (kp_factors - shift) * scale),
                 dim=1,
             )
 
         if self.cfg.env.priv_observe_Kd_factor:
-            scale, shift = get_scale_shift(self.cfg.normalization.Kd_factor_range)
+            kd_range = (
+                self.cfg.normalization.dog_Kd_factor_range
+                if policy == "dog"
+                else self.cfg.normalization.Kd_factor_range
+            )
+            scale, shift = get_scale_shift(kd_range)
+            kd_factors = self.Kd_factors[:, dof_slice]
+            if policy == "dog":
+                # Global leg Kd is one per-env scalar broadcast to 12 joints.
+                kd_factors = kd_factors[:, :1]
             privileged_obs_buf = torch.cat(
-                (privileged_obs_buf, (self.Kd_factors[:, dof_slice] - shift) * scale),
+                (privileged_obs_buf, (kd_factors - shift) * scale),
                 dim=1,
             )
 
-        if self.cfg.env.priv_observe_joint_friction:
+        if self.cfg.env.priv_observe_joint_friction and (
+            policy != "dog" or self.cfg.dog.priv_observe_joint_friction
+        ):
             scale, shift = get_scale_shift(self.cfg.normalization.joint_friction_range)
             privileged_obs_buf = torch.cat(
                 (privileged_obs_buf, (self.dof_frictions[:, dof_slice] - shift) * scale),
                 dim=1,
             )
 
-        if getattr(self.cfg.env, "priv_observe_dof_damping", False):
+        if getattr(self.cfg.env, "priv_observe_dof_damping", False) and (
+            policy != "dog" or self.cfg.dog.priv_observe_dof_damping
+        ):
             scale, shift = get_scale_shift(self.cfg.normalization.dof_damping_range)
             privileged_obs_buf = torch.cat(
                 (privileged_obs_buf, (self.dof_dampings[:, dof_slice] - shift) * scale),
@@ -1259,7 +1298,11 @@ class WBCEnv(LeggedRobot):
 
         if self.cfg.env.priv_observe_gravity:
             scale, shift = get_scale_shift(self.cfg.normalization.gravity_range)
-            privileged_obs_buf = torch.cat((privileged_obs_buf, (self.gravities - shift) / scale), dim=1)
+            privileged_obs_buf = torch.cat((privileged_obs_buf, (self.gravities - shift) * scale), dim=1)
+
+        if policy == "dog" and self.cfg.dog.priv_observe_gravity:
+            scale, shift = get_scale_shift(self.cfg.normalization.gravity_range)
+            privileged_obs_buf = torch.cat((privileged_obs_buf, (self.gravities - shift) * scale), dim=1)
 
         if self.cfg.env.priv_observe_body_velocity or self.cfg.env.priv_observe_vel:
             if self.cfg.commands.global_reference:
@@ -1281,6 +1324,10 @@ class WBCEnv(LeggedRobot):
         if self.cfg.env.priv_observe_desired_contact_states:
             privileged_obs_buf = torch.cat((privileged_obs_buf, self.desired_contact_states), dim=1)
 
+        if policy == "dog" and self.cfg.dog.priv_observe_contact_states:
+            foot_contact_states = (self.contact_forces[:, self.feet_indices, 2] > 1.0).float()
+            privileged_obs_buf = torch.cat((privileged_obs_buf, foot_contact_states), dim=1)
+
         if self.cfg.env.priv_observe_high_freq_goal:
             privileged_obs_buf = torch.cat(
                 (privileged_obs_buf, self.obj_pose_in_ee.clone(), self.obj_abg_in_ee.clone()),
@@ -1292,6 +1339,39 @@ class WBCEnv(LeggedRobot):
 
         if policy == "dog":
             arm_slice = slice(self.num_actions_loco, self.num_actions_loco + self.num_actions_arm)
+            if self.cfg.dog.priv_observe_arm_dynamics:
+                scale, shift = get_scale_shift(self.cfg.normalization.arm_Kp_factor_range)
+                arm_kp = (self.Kp_factors[:, arm_slice] - shift) * scale
+                scale, shift = get_scale_shift(self.cfg.normalization.arm_Kd_factor_range)
+                arm_kd = (self.Kd_factors[:, arm_slice] - shift) * scale
+                scale, shift = get_scale_shift(self.cfg.normalization.arm_motor_strength_range)
+                arm_motor_strength = (self.motor_strengths[:, arm_slice] - shift) * scale
+                scale, shift = get_scale_shift(self.cfg.normalization.arm_motor_offset_range)
+                arm_motor_offset = (self.motor_offsets[:, arm_slice] - shift) * scale
+
+                expected_links = int(self.cfg.arm.num_privileged_links)
+                actual_links = self.arm_link_mass_scales.shape[1]
+                if actual_links != expected_links:
+                    raise AssertionError(
+                        f"arm privileged link count ({expected_links}) != runtime arm link count ({actual_links})"
+                    )
+                scale, shift = get_scale_shift(self.cfg.normalization.arm_link_mass_scale_range)
+                arm_link_mass_scale = (self.arm_link_mass_scales - shift) * scale
+                scale, shift = get_scale_shift(self.cfg.normalization.arm_link_com_offset_range)
+                arm_link_com_offset = (self.arm_link_com_offsets.reshape(self.num_envs, -1) - shift) * scale
+                privileged_obs_buf = torch.cat(
+                    (
+                        privileged_obs_buf,
+                        arm_kp,
+                        arm_kd,
+                        arm_motor_strength,
+                        arm_motor_offset,
+                        arm_link_mass_scale,
+                        arm_link_com_offset,
+                    ),
+                    dim=1,
+                )
+
             arm_dof_pos = (self.dof_pos[:, arm_slice] - self.default_dof_pos[:, arm_slice]) * self.obs_scales.dof_pos
             arm_dof_vel = self.dof_vel[:, arm_slice] * self.obs_scales.dof_vel
             privileged_obs_buf = torch.cat((privileged_obs_buf, arm_dof_pos, arm_dof_vel), dim=1)
@@ -2051,11 +2131,11 @@ class WBCEnv(LeggedRobot):
     def _dog_obs_layout(self):
         """Ordered (name, width, noise_scale, droppable) description of
         get_dog_observations()'s actor-facing segments. Single source of
-        truth for both the per-element noise vector and the per-segment
-        frame-drop offsets built once in _arm_init_buffers_hook -- avoids
-        keeping two hand-mirrored copies in sync. [NOTE] must still be
-        updated by hand if get_dog_observations()'s layout changes, same
-        caveat as _get_noise_scale_vec.
+        truth for the post-concatenation independent-noise vector and the
+        per-segment frame-drop offsets built once in _arm_init_buffers_hook.
+        Velocity/pose measurement noise is injected earlier so tracking
+        errors can share the same noisy actual values. [NOTE] this layout
+        must still be updated by hand if get_dog_observations() changes.
 
         droppable=True marks an actual sensor reading (IMU, encoders,
         contacts, ...) that can independently simulate a dropped frame.
@@ -2091,24 +2171,16 @@ class WBCEnv(LeggedRobot):
         if cfg.env.observe_clock_inputs:
             layout.append(("clock_inputs", 4, 0.0, False))
 
-        layout.append(("base_ang_vel", 3, ns.ang_vel * level * s.ang_vel, True))
-        lin_vel_scale = ns.lin_vel * level * s.lin_vel if cfg.dog.observe_lin_vel else 0.0
-        layout.append(("base_lin_vel", 3, lin_vel_scale, True))
+        # Velocity and pose measurements are noised explicitly in
+        # get_dog_observations() so their error terms can reuse exactly the
+        # same noisy actual values. Keep their independent noise scales zero
+        # here to avoid adding a second noise sample after concatenation.
+        layout.append(("base_ang_vel", 3, 0.0, True))
+        layout.append(("base_lin_vel", 3, 0.0, True))
         # Fixed tracking slot. Pose actual and tracking errors are independently
         # zero-filled by their dog-policy switches. Only the measured actual
         # pose gets sensor noise; errors receive no independent noise.
-        pose_actual_noise = (
-            torch.tensor(
-                [
-                    ns.gravity * level * s.body_height_cmd,
-                    ns.gravity * level * s.body_pitch_cmd,
-                    ns.gravity * level * s.body_roll_cmd,
-                ]
-            )
-            if cfg.dog.observe_pose_actual
-            else 0.0
-        )
-        layout.append(("body_pose_actual", 3, pose_actual_noise, False))
+        layout.append(("body_pose_actual", 3, 0.0, False))
         layout.append(("body_pose_error", 3, 0.0, False))
         layout.append(("velocity_error", 3, 0.0, False))
 
@@ -2173,48 +2245,79 @@ class WBCEnv(LeggedRobot):
         if self.cfg.env.observe_clock_inputs:
             obs_buf = torch.cat((obs_buf, self.clock_inputs), dim=-1)
 
-        # Fixed width regardless of dog.observe_lin_vel: ang_vel is always
-        # real; lin_vel's slot always exists but is zeros when the switch
-        # is off, so toggling it never changes dog_num_observations.
-        if self.cfg.dog.observe_lin_vel:
-            lin_vel_term = (
-                self.root_states[: self.num_envs, 7:10] * self.obs_scales.lin_vel
-                if self.cfg.commands.global_reference
-                else self.base_lin_vel * self.obs_scales.lin_vel
+        # Generate each measured actual once, then reuse it in the associated
+        # tracking error. This keeps actual + error == command even with noise.
+        lin_vel_actual = (
+            self.root_states[: self.num_envs, 7:10]
+            if self.cfg.commands.global_reference
+            else self.base_lin_vel
+        )
+        ang_vel_measured = self.base_ang_vel * self.obs_scales.ang_vel
+        lin_vel_measured = lin_vel_actual * self.obs_scales.lin_vel
+        tracking_lin_vel_measured = self.base_lin_vel * self.obs_scales.lin_vel
+        pose_measured = torch.stack(
+            (
+                self.base_pos[:, 2] * self.obs_scales.body_height_cmd,
+                self.pitch * self.obs_scales.body_pitch_cmd,
+                self.roll * self.obs_scales.body_roll_cmd,
+            ),
+            dim=-1,
+        )
+        # getattr keeps configs restored from checkpoints created before this
+        # dog-specific switch compatible with the previous noise-on behavior.
+        dog_obs_noise_enabled = self.cfg.noise.add_noise and getattr(
+            self.cfg.dog, "add_obs_noise", True
+        )
+        if dog_obs_noise_enabled:
+            noise_level = self.cfg.noise.noise_level
+            ang_vel_noise = torch.randn_like(ang_vel_measured) * (
+                self.cfg.noise_scales.ang_vel * noise_level * self.obs_scales.ang_vel
             )
+            lin_vel_noise = torch.randn_like(lin_vel_measured) * (
+                self.cfg.noise_scales.lin_vel * noise_level * self.obs_scales.lin_vel
+            )
+            pose_noise_scale = pose_measured.new_tensor(
+                [
+                    self.cfg.noise_scales.gravity * noise_level * self.obs_scales.body_height_cmd,
+                    self.cfg.noise_scales.gravity * noise_level * self.obs_scales.body_pitch_cmd,
+                    self.cfg.noise_scales.gravity * noise_level * self.obs_scales.body_roll_cmd,
+                ]
+            )
+            ang_vel_measured = ang_vel_measured + ang_vel_noise
+            lin_vel_measured = lin_vel_measured + lin_vel_noise
+            tracking_lin_vel_measured = tracking_lin_vel_measured + lin_vel_noise
+            pose_measured = pose_measured + torch.randn_like(pose_measured) * pose_noise_scale
+
+        # Fixed width regardless of dog.observe_lin_vel: ang_vel is always
+        # real; lin_vel's slot always exists but is zeros when the switch is
+        # off, so toggling it never changes dog_num_observations.
+        if self.cfg.dog.observe_lin_vel:
+            lin_vel_term = lin_vel_measured
         else:
             lin_vel_term = torch.zeros(self.num_envs, 3, device=self.device)
-        obs_buf = torch.cat((obs_buf, self.base_ang_vel * self.obs_scales.ang_vel, lin_vel_term), dim=-1)
+        obs_buf = torch.cat((obs_buf, ang_vel_measured, lin_vel_term), dim=-1)
 
         # Fixed 9-wide tracking slot: pose actual is controlled independently
         # from pose/velocity errors. Errors are command - actual.
-        if self.cfg.dog.observe_pose_actual or self.cfg.dog.observe_track_error:
-            height_actual = self.base_pos[:, 2]
-            height_target = float(self.cfg.rewards.base_height_target) + self.commands_dog[:, dog_cmd_idx["body_height"]]
         if self.cfg.dog.observe_pose_actual:
-            pose_actual = torch.stack(
-                (
-                    height_actual * self.obs_scales.body_height_cmd,
-                    self.pitch * self.obs_scales.body_pitch_cmd,
-                    self.roll * self.obs_scales.body_roll_cmd,
-                ),
-                dim=-1,
-            )
+            pose_actual = pose_measured
         else:
             pose_actual = torch.zeros(self.num_envs, 3, device=self.device)
         if self.cfg.dog.observe_track_error:
-            pose_error = torch.stack(
+            height_target = float(self.cfg.rewards.base_height_target) + self.commands_dog[:, dog_cmd_idx["body_height"]]
+            pose_target = torch.stack(
                 (
-                    (height_target - height_actual) * self.obs_scales.body_height_cmd,
-                    (self.commands_dog[:, dog_cmd_idx["body_pitch"]] - self.pitch) * self.obs_scales.body_pitch_cmd,
-                    (self.commands_dog[:, dog_cmd_idx["body_roll"]] - self.roll) * self.obs_scales.body_roll_cmd,
+                    height_target * self.obs_scales.body_height_cmd,
+                    self.commands_dog[:, dog_cmd_idx["body_pitch"]] * self.obs_scales.body_pitch_cmd,
+                    self.commands_dog[:, dog_cmd_idx["body_roll"]] * self.obs_scales.body_roll_cmd,
                 ),
                 dim=-1,
             )
+            pose_error = pose_target - pose_measured
             velocity_error = torch.cat(
                 (
-                    (self.commands_dog[:, :2] - self.base_lin_vel[:, :2]) * self.obs_scales.lin_vel,
-                    (self.commands_dog[:, 2:3] - self.base_ang_vel[:, 2:3]) * self.obs_scales.ang_vel,
+                    self.commands_dog[:, :2] * self.obs_scales.lin_vel - tracking_lin_vel_measured[:, :2],
+                    self.commands_dog[:, 2:3] * self.obs_scales.ang_vel - ang_vel_measured[:, 2:3],
                 ),
                 dim=-1,
             )
@@ -2243,8 +2346,11 @@ class WBCEnv(LeggedRobot):
         arm_vel = self.dof_vel[:, arm_slice] * self.obs_scales.dof_vel
         obs_buf = torch.cat((obs_buf, arm_pos, arm_vel), dim=-1)
 
-        if self.cfg.noise.add_noise:
-            obs_buf = obs_buf + (2 * torch.rand_like(obs_buf) - 1) * self.dog_obs_noise_scale_vec
+        if dog_obs_noise_enabled:
+            # Per-element zero-mean Gaussian sensor noise. The configured
+            # dog_obs_noise_scale_vec values are interpreted as standard
+            # deviations in the already-scaled observation space.
+            obs_buf = obs_buf + torch.randn_like(obs_buf) * self.dog_obs_noise_scale_vec
 
         privileged_obs_buf = self._get_physics_privileged_observations("dog")
 

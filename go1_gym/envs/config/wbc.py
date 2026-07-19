@@ -127,14 +127,28 @@ ROBODUET_OVERRIDES = {
     "dog.dog_num_commands": 6,
     "dog.dog_actions": 12,
     "dog.use_adaptation_module": False,
+    "dog.add_obs_noise": True,
     "dog.observe_lin_vel": True,
     "dog.observe_pose_actual": True,
     "dog.observe_track_error": True,
+    # Dog-critic-only privileged dynamics. Shared leg factors are represented
+    # compactly; arm factors remain per joint because they are sampled so.
+    "dog.priv_observe_motor_strength": True,
+    "dog.priv_observe_motor_offset": True,
+    "dog.priv_observe_gravity": True,
+    "dog.priv_observe_contact_states": True,
+    "dog.priv_observe_arm_dynamics": True,
+    # These shared env-side fields remain available to the arm critic but are
+    # omitted from dog privileged obs because they are fixed in this profile.
+    "dog.priv_observe_com_displacement": False,
+    "dog.priv_observe_joint_friction": False,
+    "dog.priv_observe_dof_damping": False,
     "dog.control.stiffness_leg": {"joint": 35.0},
     "dog.control.damping_leg": {"joint": 1.0},
 
     # Arm commands, trajectory curriculum and controller.
     "arm.num_actions_arm": 6,
+    "arm.num_privileged_links": 8,
     "arm.arm_num_observation_history": 60,
     "arm.arm_num_commands": 6,
     "arm.num_actions_arm_cd": 8,
@@ -278,7 +292,6 @@ ROBODUET_OVERRIDES = {
     "domain_rand.stage1_arm.randomize_ee_payload": True,
     "domain_rand.stage1_arm.ee_payload_mass_range": [0.0, 1.5],  # kg
     "env.priv_observe_stage1_ee_payload_mass": True,
-    "normalization.stage1_ee_payload_mass_range": [0.0, 1.5],
     "domain_rand.stage2_arm.randomize_Kp_factor": True,
     "domain_rand.stage2_arm.Kp_factor_range": [0.9, 1.1],
     "domain_rand.stage2_arm.randomize_Kd_factor": True,

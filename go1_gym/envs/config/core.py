@@ -323,37 +323,58 @@ def privileged_obs_dim_parts(cfg, dof_dim, policy=None):
         parts["restitution"] = 1
     if cfg.env.priv_observe_base_mass:
         parts["base_mass"] = 1
-    if cfg.env.priv_observe_com_displacement:
+    if cfg.env.priv_observe_com_displacement and (
+        policy != "dog" or cfg.dog.priv_observe_com_displacement
+    ):
         parts["com_displacement"] = 3
     if getattr(cfg.env, "priv_observe_stage1_ee_payload_mass", False):
         parts["stage1_ee_payload_mass"] = 1
+    if policy == "dog" and cfg.dog.priv_observe_motor_strength:
+        parts["dog_motor_strength"] = 1
+    if policy == "dog" and cfg.dog.priv_observe_motor_offset:
+        parts["dog_motor_offset"] = dof_dim
     if cfg.env.priv_observe_motor_strength:
         parts["motor_strength"] = dof_dim
     if cfg.env.priv_observe_motor_offset:
         parts["motor_offset"] = dof_dim
     if cfg.env.priv_observe_Kp_factor:
-        parts["kp_factor"] = dof_dim
+        parts["kp_factor"] = 1 if policy == "dog" else dof_dim
     if cfg.env.priv_observe_Kd_factor:
-        parts["kd_factor"] = dof_dim
-    if cfg.env.priv_observe_joint_friction:
+        parts["kd_factor"] = 1 if policy == "dog" else dof_dim
+    if cfg.env.priv_observe_joint_friction and (
+        policy != "dog" or cfg.dog.priv_observe_joint_friction
+    ):
         parts["dof_friction"] = dof_dim
-    if getattr(cfg.env, "priv_observe_dof_damping", False):
+    if getattr(cfg.env, "priv_observe_dof_damping", False) and (
+        policy != "dog" or cfg.dog.priv_observe_dof_damping
+    ):
         parts["dof_damping"] = dof_dim
     if cfg.env.priv_observe_body_height:
         parts["body_height"] = 1
     if cfg.env.priv_observe_gravity:
         parts["gravity"] = 3
+    if policy == "dog" and cfg.dog.priv_observe_gravity:
+        parts["dog_gravity"] = 3
     if cfg.env.priv_observe_body_velocity or cfg.env.priv_observe_vel:
         parts["base_velocity"] = 6
     if cfg.env.priv_observe_clock_inputs:
         parts["clock_inputs"] = 4
     if cfg.env.priv_observe_desired_contact_states:
         parts["desired_contact_states"] = 4
+    if policy == "dog" and cfg.dog.priv_observe_contact_states:
+        parts["dog_contact_states"] = 4
     if cfg.env.priv_observe_high_freq_goal:
         parts["high_freq_goal"] = 6
     if getattr(cfg.env, "priv_observe_arm_mount_tf", False):
         parts["arm_mount_tf"] = 6
     if policy == "dog":
+        if cfg.dog.priv_observe_arm_dynamics:
+            parts["arm_kp_factor"] = cfg.arm.num_actions_arm
+            parts["arm_kd_factor"] = cfg.arm.num_actions_arm
+            parts["arm_motor_strength"] = cfg.arm.num_actions_arm
+            parts["arm_motor_offset"] = cfg.arm.num_actions_arm
+            parts["arm_link_mass_scale"] = cfg.arm.num_privileged_links
+            parts["arm_link_com_offset"] = 3 * cfg.arm.num_privileged_links
         parts["arm_dof_pos"] = cfg.arm.num_actions_arm
         parts["arm_dof_vel"] = cfg.arm.num_actions_arm
     return parts
@@ -388,7 +409,28 @@ def configure_privileged_obs_dims(cfg):
 
 
 def derive_privileged_normalization_ranges(cfg):
-    """Cover every enabled dog/arm Kp/Kd randomization with one stable range."""
+    """Align privileged normalization ranges with enabled randomizations."""
+
+    direct_ranges = {
+        "friction_range": "friction_range",
+        "restitution_range": "restitution_range",
+        "added_mass_range": "added_mass_range",
+        "motor_strength_range": "motor_strength_range",
+        "motor_offset_range": "motor_offset_range",
+        "gravity_range": "gravity_range",
+    }
+    for normalization_name, randomization_name in direct_ranges.items():
+        value = deepcopy(getattr(cfg.domain_rand, randomization_name))
+        setattr(cfg.normalization, normalization_name, value)
+        cfg._provenance[f"normalization.{normalization_name}"] = "derived:domain_rand"
+    for factor in ("Kp", "Kd"):
+        value = deepcopy(getattr(cfg.domain_rand, f"{factor}_factor_range"))
+        setattr(cfg.normalization, f"dog_{factor}_factor_range", value)
+        cfg._provenance[f"normalization.dog_{factor}_factor_range"] = "derived:domain_rand"
+    if getattr(cfg.env, "priv_observe_stage1_ee_payload_mass", False):
+        value = deepcopy(cfg.domain_rand.stage1_arm.ee_payload_mass_range)
+        cfg.normalization.stage1_ee_payload_mass_range = value
+        cfg._provenance["normalization.stage1_ee_payload_mass_range"] = "derived:domain_rand"
 
     randomization_profiles = (
         cfg.domain_rand,
@@ -414,6 +456,27 @@ def derive_privileged_normalization_ranges(cfg):
         path = f"normalization.{factor}_factor_range"
         setattr(cfg.normalization, f"{factor}_factor_range", [lower, upper])
         cfg._provenance[path] = "derived:domain_rand"
+
+    arm_profiles = (cfg.domain_rand.stage1_arm, cfg.domain_rand.stage2_arm)
+
+    def derive_arm_range(source_field, target_field, enabled_field, *, symmetric=False):
+        values = [getattr(profile, source_field) for profile in arm_profiles if getattr(profile, enabled_field, False)]
+        if not values:
+            return
+        if symmetric:
+            radius = max(abs(float(value)) for value in values)
+            result = [-radius, radius]
+        else:
+            result = [min(float(value[0]) for value in values), max(float(value[1]) for value in values)]
+        setattr(cfg.normalization, target_field, result)
+        cfg._provenance[f"normalization.{target_field}"] = "derived:domain_rand"
+
+    derive_arm_range("motor_strength_range", "arm_motor_strength_range", "randomize_motor_strength")
+    derive_arm_range("motor_offset_range", "arm_motor_offset_range", "randomize_motor_offset", symmetric=True)
+    derive_arm_range("Kp_factor_range", "arm_Kp_factor_range", "randomize_Kp_factor")
+    derive_arm_range("Kd_factor_range", "arm_Kd_factor_range", "randomize_Kd_factor")
+    derive_arm_range("link_mass_range", "arm_link_mass_scale_range", "randomize_link_mass")
+    derive_arm_range("link_com_range", "arm_link_com_offset_range", "randomize_link_com", symmetric=True)
 
 
 def enable_rot6d(cfg, layout):
