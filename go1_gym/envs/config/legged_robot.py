@@ -22,12 +22,6 @@ class LeggedRobotDefaults:
         observe_vel = True
         observe_only_ang_vel = False
         observe_only_lin_vel = False
-        # Dog obs only: whether get_dog_observations()'s always-present
-        # lin_vel slot is filled with real data (True) or left at zero
-        # (False). Distinct from observe_vel/observe_only_lin_vel above,
-        # which change dog_num_observations when toggled -- this one never
-        # does. See WBCEnv._dog_obs_layout.
-        observe_lin_vel = False
         observe_yaw = False
         observe_contact_states = False
         observe_command = True

@@ -2092,8 +2092,25 @@ class WBCEnv(LeggedRobot):
             layout.append(("clock_inputs", 4, 0.0, False))
 
         layout.append(("base_ang_vel", 3, ns.ang_vel * level * s.ang_vel, True))
-        lin_vel_scale = ns.lin_vel * level * s.lin_vel if cfg.env.observe_lin_vel else 0.0
+        lin_vel_scale = ns.lin_vel * level * s.lin_vel if cfg.dog.observe_lin_vel else 0.0
         layout.append(("base_lin_vel", 3, lin_vel_scale, True))
+        # Fixed tracking slot. Pose actual and tracking errors are independently
+        # zero-filled by their dog-policy switches. Only the measured actual
+        # pose gets sensor noise; errors receive no independent noise.
+        pose_actual_noise = (
+            torch.tensor(
+                [
+                    ns.gravity * level * s.body_height_cmd,
+                    ns.gravity * level * s.body_pitch_cmd,
+                    ns.gravity * level * s.body_roll_cmd,
+                ]
+            )
+            if cfg.dog.observe_pose_actual
+            else 0.0
+        )
+        layout.append(("body_pose_actual", 3, pose_actual_noise, False))
+        layout.append(("body_pose_error", 3, 0.0, False))
+        layout.append(("velocity_error", 3, 0.0, False))
 
         if cfg.env.observe_yaw:
             layout.append(("heading", 1, 0.0, False))
@@ -2156,10 +2173,10 @@ class WBCEnv(LeggedRobot):
         if self.cfg.env.observe_clock_inputs:
             obs_buf = torch.cat((obs_buf, self.clock_inputs), dim=-1)
 
-        # Fixed width regardless of env.observe_lin_vel: ang_vel is always
+        # Fixed width regardless of dog.observe_lin_vel: ang_vel is always
         # real; lin_vel's slot always exists but is zeros when the switch
         # is off, so toggling it never changes dog_num_observations.
-        if self.cfg.env.observe_lin_vel:
+        if self.cfg.dog.observe_lin_vel:
             lin_vel_term = (
                 self.root_states[: self.num_envs, 7:10] * self.obs_scales.lin_vel
                 if self.cfg.commands.global_reference
@@ -2168,6 +2185,44 @@ class WBCEnv(LeggedRobot):
         else:
             lin_vel_term = torch.zeros(self.num_envs, 3, device=self.device)
         obs_buf = torch.cat((obs_buf, self.base_ang_vel * self.obs_scales.ang_vel, lin_vel_term), dim=-1)
+
+        # Fixed 9-wide tracking slot: pose actual is controlled independently
+        # from pose/velocity errors. Errors are command - actual.
+        if self.cfg.dog.observe_pose_actual or self.cfg.dog.observe_track_error:
+            height_actual = self.base_pos[:, 2]
+            height_target = float(self.cfg.rewards.base_height_target) + self.commands_dog[:, dog_cmd_idx["body_height"]]
+        if self.cfg.dog.observe_pose_actual:
+            pose_actual = torch.stack(
+                (
+                    height_actual * self.obs_scales.body_height_cmd,
+                    self.pitch * self.obs_scales.body_pitch_cmd,
+                    self.roll * self.obs_scales.body_roll_cmd,
+                ),
+                dim=-1,
+            )
+        else:
+            pose_actual = torch.zeros(self.num_envs, 3, device=self.device)
+        if self.cfg.dog.observe_track_error:
+            pose_error = torch.stack(
+                (
+                    (height_target - height_actual) * self.obs_scales.body_height_cmd,
+                    (self.commands_dog[:, dog_cmd_idx["body_pitch"]] - self.pitch) * self.obs_scales.body_pitch_cmd,
+                    (self.commands_dog[:, dog_cmd_idx["body_roll"]] - self.roll) * self.obs_scales.body_roll_cmd,
+                ),
+                dim=-1,
+            )
+            velocity_error = torch.cat(
+                (
+                    (self.commands_dog[:, :2] - self.base_lin_vel[:, :2]) * self.obs_scales.lin_vel,
+                    (self.commands_dog[:, 2:3] - self.base_ang_vel[:, 2:3]) * self.obs_scales.ang_vel,
+                ),
+                dim=-1,
+            )
+        else:
+            pose_error = torch.zeros(self.num_envs, 3, device=self.device)
+            velocity_error = torch.zeros(self.num_envs, 3, device=self.device)
+        track_obs = torch.cat((pose_actual, pose_error, velocity_error), dim=-1)
+        obs_buf = torch.cat((obs_buf, track_obs), dim=-1)
 
         if self.cfg.env.observe_yaw:
             forward = quat_apply(self.base_quat, self.forward_vec)

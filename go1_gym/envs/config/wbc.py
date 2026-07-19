@@ -120,11 +120,6 @@ ROBODUET_OVERRIDES = {
     # Cross-policy channel: let the arm policy see the dog's gait phase,
     # foot contact state, and (v_actual - v_cmd) tracking residual.
     "env.arm_observe_dog_state": True,
-    # Base linear velocity (fixed-width slot, zero-filled when off),
-    # sim2real observation noise, and per-sensor simulated dropped frames
-    # for the dog policy (see WBCEnv._dog_obs_layout / get_dog_observations).
-    "env.observe_lin_vel": True,
-    "domain_rand.dog_obs_frame_drop_prob": 0.02,
 
     # Dog policy/controller layout.
     "dog.num_actions_loco": 12,
@@ -132,6 +127,9 @@ ROBODUET_OVERRIDES = {
     "dog.dog_num_commands": 6,
     "dog.dog_actions": 12,
     "dog.use_adaptation_module": False,
+    "dog.observe_lin_vel": True,
+    "dog.observe_pose_actual": True,
+    "dog.observe_track_error": True,
     "dog.control.stiffness_leg": {"joint": 35.0},
     "dog.control.damping_leg": {"joint": 1.0},
 
@@ -243,6 +241,7 @@ ROBODUET_OVERRIDES = {
     "wbc.trajectory.stage2_base_unlock_force_point_until_unlocked": True,
 
     # Domain randomization.
+    "domain_rand.dog_obs_frame_drop_prob": 0.02,
     "domain_rand.added_mass_range": [-2.0, 2.0],
     "domain_rand.randomize_lag_timesteps": False,
     "domain_rand.randomize_end_effector_force": False,
