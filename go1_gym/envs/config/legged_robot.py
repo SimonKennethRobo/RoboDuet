@@ -22,6 +22,12 @@ class LeggedRobotDefaults:
         observe_vel = True
         observe_only_ang_vel = False
         observe_only_lin_vel = False
+        # Dog obs only: whether get_dog_observations()'s always-present
+        # lin_vel slot is filled with real data (True) or left at zero
+        # (False). Distinct from observe_vel/observe_only_lin_vel above,
+        # which change dog_num_observations when toggled -- this one never
+        # does. See WBCEnv._dog_obs_layout.
+        observe_lin_vel = False
         observe_yaw = False
         observe_contact_states = False
         observe_command = True
@@ -123,7 +129,7 @@ class LeggedRobotDefaults:
         jump_duration_s = 0.1  # duration of jump
         jump_height = 0.3
         heading_command = True  # if true: compute ang vel command from heading error
-        global_reference = False
+        global_reference = False # if true: vel obs are in global frame
         observe_accel = False
         curriculum_type = "RewardThresholdCurriculum"
         lipschitz_threshold = 0.9
@@ -276,6 +282,10 @@ class LeggedRobotDefaults:
         randomize_action_delay = True
         randomize_lag_timesteps = True
         lag_timesteps = 6
+        # Per-step, per-env probability that get_dog_observations() re-delivers
+        # the previous step's (already-noised) observation instead of a fresh
+        # one -- simulates a dropped sensor/comms frame. 0 = disabled.
+        dog_obs_frame_drop_prob = 0.0
 
     class rewards:
         only_positive_rewards = False  # if true negative total rewards are clipped at zero (avoids early termination problems)

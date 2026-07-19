@@ -284,7 +284,6 @@ def dog_obs_dim_parts(cfg):
         "dog_actions": cfg.dog.num_actions_loco,
         "dog_commands": cfg.dog.dog_num_commands,
         "arm_commands": cfg.arm.arm_num_commands,
-        "base_roll_pitch": 2,
         "arm_dof_pos": cfg.arm.num_actions_arm,
         "arm_dof_vel": cfg.arm.num_actions_arm,
     }
@@ -294,12 +293,12 @@ def dog_obs_dim_parts(cfg):
         parts["timing_parameter"] = 1
     if cfg.env.observe_clock_inputs:
         parts["clock_inputs"] = 4
-    if cfg.env.observe_vel:
-        parts["base_velocity"] = 6
-    if cfg.env.observe_only_ang_vel:
-        parts["base_ang_vel"] = 3
-    if cfg.env.observe_only_lin_vel:
-        parts["base_lin_vel"] = 3
+    # Fixed width regardless of env.observe_lin_vel: ang_vel is always real;
+    # lin_vel's slot always exists but is zero-filled when the switch is
+    # off (see WBCEnv._dog_obs_layout / get_dog_observations), so toggling
+    # it never changes dog_num_observations.
+    parts["base_ang_vel"] = 3
+    parts["base_lin_vel"] = 3
     if cfg.env.observe_yaw:
         parts["heading"] = 1
     if cfg.env.observe_contact_states:

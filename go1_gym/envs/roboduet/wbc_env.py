@@ -910,6 +910,21 @@ class WBCEnv(LeggedRobot):
         self.stage2_base_unlock_started = False
         self.stage2_base_unlock_start_iteration = 0
 
+        # See _dog_obs_layout / get_dog_observations.
+        dog_obs_layout = self._dog_obs_layout()
+        self.dog_obs_noise_scale_vec = torch.cat(
+            [torch.ones(w) * scale for _, w, scale, _ in dog_obs_layout if w > 0]
+        ).to(self.device)
+        self.dog_obs_droppable_segments = []
+        cursor = 0
+        for _, w, _, droppable in dog_obs_layout:
+            if droppable and w > 0:
+                self.dog_obs_droppable_segments.append((cursor, cursor + w))
+            cursor += w
+        self.dog_last_delivered_obs = torch.zeros(
+            self.num_envs, self.cfg.dog.dog_num_observations, dtype=torch.float, device=self.device
+        )
+
 
     def _arm_pre_step_hook(self):
         self._apply_stage1_arm_curriculum_actions()
@@ -969,6 +984,7 @@ class WBCEnv(LeggedRobot):
         # stage1_arm_target_offset / vel / accel are re-initialised in
         # _arm_post_reset_refresh_hook (after the randomised dof_pos is known).
         self._resample_stage1_ee_payload(env_ids)
+        self.dog_last_delivered_obs[env_ids] = 0.0
         self.prev_ee_twist_body[env_ids] = 0.0
 
     def _update_traj_curriculum(self, env_ids):
@@ -2032,10 +2048,66 @@ class WBCEnv(LeggedRobot):
 
         return obs_buf, privileged_obs_buf
 
+    def _dog_obs_layout(self):
+        """Ordered (name, width, noise_scale, droppable) description of
+        get_dog_observations()'s actor-facing segments. Single source of
+        truth for both the per-element noise vector and the per-segment
+        frame-drop offsets built once in _arm_init_buffers_hook -- avoids
+        keeping two hand-mirrored copies in sync. [NOTE] must still be
+        updated by hand if get_dog_observations()'s layout changes, same
+        caveat as _get_noise_scale_vec.
+
+        droppable=True marks an actual sensor reading (IMU, encoders,
+        contacts, ...) that can independently simulate a dropped frame.
+        Commanded/internal segments (dog_commands, our own last action,
+        gait clock, ...) are never dropped -- we always know those exactly,
+        there's no sensor to fail."""
+        cfg = self.cfg
+        ns = cfg.noise_scales
+        level = cfg.noise.noise_level
+        s = self.obs_scales
+
+        layout = [
+            ("projected_gravity", 3, ns.gravity * level, True),
+            ("dog_dof_pos", self.num_actions_loco, ns.dof_pos * level * s.dof_pos, True),
+            ("dog_dof_vel", self.num_actions_loco, ns.dof_vel * level * s.dof_vel, True),
+            ("dog_actions", self.num_actions_loco, 0.0, False),
+        ]
+        if cfg.wbc.use_vision:
+            layout += [
+                ("dog_commands", cfg.dog.dog_num_commands, 0.0, False),
+                ("obj_pose_in_ee", 3, 0.0, False),
+                ("obj_abg_in_ee", 3, 0.0, False),
+            ]
+        else:
+            layout += [
+                ("dog_commands", cfg.dog.dog_num_commands, 0.0, False),
+                ("arm_commands", cfg.arm.arm_num_commands, 0.0, False),
+            ]
+        if cfg.env.observe_two_prev_actions:
+            layout.append(("two_prev_actions", self.num_actions_loco, 0.0, False))
+        if cfg.env.observe_timing_parameter:
+            layout.append(("timing_parameter", 1, 0.0, False))
+        if cfg.env.observe_clock_inputs:
+            layout.append(("clock_inputs", 4, 0.0, False))
+
+        layout.append(("base_ang_vel", 3, ns.ang_vel * level * s.ang_vel, True))
+        lin_vel_scale = ns.lin_vel * level * s.lin_vel if cfg.env.observe_lin_vel else 0.0
+        layout.append(("base_lin_vel", 3, lin_vel_scale, True))
+
+        if cfg.env.observe_yaw:
+            layout.append(("heading", 1, 0.0, False))
+        if cfg.env.observe_contact_states:
+            layout.append(("contact_states", 4, ns.contact_states * level, True))
+        if cfg.wbc.trajectory.enabled:
+            layout.append(("ee_pose_body", 9, 0.0, True))  # no dedicated noise scale yet
+
+        layout.append(("arm_dof_pos", self.num_actions_arm, ns.dof_pos * level * s.dof_pos, True))
+        layout.append(("arm_dof_vel", self.num_actions_arm, ns.dof_vel * level * s.dof_vel, True))
+        return layout
+
     def get_dog_observations(self):
         """Computes observations"""
-        rpy = quaternion_to_rpy(self.base_quat)
-        roll, pitch, yaw = rpy[:, 0], rpy[:, 1], rpy[:, 2]
         obs_buf = torch.cat(
             (
                 self.projected_gravity,
@@ -2059,8 +2131,6 @@ class WBCEnv(LeggedRobot):
                     (self.obj_obs_abg_in_ee[:])
                     if global_switch.switch_open
                     else torch.zeros_like(self.obj_obs_abg_in_ee[:]),
-                    roll.unsqueeze(1),
-                    pitch.unsqueeze(1),
                 ),
                 dim=-1,
             )
@@ -2073,8 +2143,6 @@ class WBCEnv(LeggedRobot):
                     (self.commands_arm_obs[:, :idx])  # l,p,y,rot6d
                     if global_switch.switch_open
                     else torch.zeros_like(self.commands_arm_obs[:, :idx]),
-                    roll.unsqueeze(1),
-                    pitch.unsqueeze(1),
                 ),
                 dim=-1,
             )
@@ -2088,27 +2156,18 @@ class WBCEnv(LeggedRobot):
         if self.cfg.env.observe_clock_inputs:
             obs_buf = torch.cat((obs_buf, self.clock_inputs), dim=-1)
 
-        if self.cfg.env.observe_vel:
-            if self.cfg.commands.global_reference:
-                obs_buf = torch.cat(
-                    (
-                        self.root_states[: self.num_envs, 7:10] * self.obs_scales.lin_vel,
-                        self.base_ang_vel * self.obs_scales.ang_vel,
-                        obs_buf,
-                    ),
-                    dim=-1,
-                )
-            else:
-                obs_buf = torch.cat(
-                    (self.base_lin_vel * self.obs_scales.lin_vel, self.base_ang_vel * self.obs_scales.ang_vel, obs_buf),
-                    dim=-1,
-                )
-
-        if self.cfg.env.observe_only_ang_vel:
-            obs_buf = torch.cat((self.base_ang_vel * self.obs_scales.ang_vel, obs_buf), dim=-1)
-
-        if self.cfg.env.observe_only_lin_vel:
-            obs_buf = torch.cat((self.base_lin_vel * self.obs_scales.lin_vel, obs_buf), dim=-1)
+        # Fixed width regardless of env.observe_lin_vel: ang_vel is always
+        # real; lin_vel's slot always exists but is zeros when the switch
+        # is off, so toggling it never changes dog_num_observations.
+        if self.cfg.env.observe_lin_vel:
+            lin_vel_term = (
+                self.root_states[: self.num_envs, 7:10] * self.obs_scales.lin_vel
+                if self.cfg.commands.global_reference
+                else self.base_lin_vel * self.obs_scales.lin_vel
+            )
+        else:
+            lin_vel_term = torch.zeros(self.num_envs, 3, device=self.device)
+        obs_buf = torch.cat((obs_buf, self.base_ang_vel * self.obs_scales.ang_vel, lin_vel_term), dim=-1)
 
         if self.cfg.env.observe_yaw:
             forward = quat_apply(self.base_quat, self.forward_vec)
@@ -2129,9 +2188,8 @@ class WBCEnv(LeggedRobot):
         arm_vel = self.dof_vel[:, arm_slice] * self.obs_scales.dof_vel
         obs_buf = torch.cat((obs_buf, arm_pos, arm_vel), dim=-1)
 
-        # add noise if needed
-        # if self.add_noise:
-        #     obs_buf += (2 * torch.rand_like(obs_buf) - 1) * self.noise_scale_vec
+        if self.cfg.noise.add_noise:
+            obs_buf = obs_buf + (2 * torch.rand_like(obs_buf) - 1) * self.dog_obs_noise_scale_vec
 
         privileged_obs_buf = self._get_physics_privileged_observations("dog")
 
@@ -2145,6 +2203,22 @@ class WBCEnv(LeggedRobot):
         obs_builder = ObservationBuilder(self, "dog", self.cfg.dog.dog_num_observations)
         obs_builder.add(obs_buf)
         obs_buf = obs_builder.build()
+
+        # Simulated dropped sensor frames: each droppable segment (a real
+        # sensor reading -- IMU, encoders, contacts, ... -- see
+        # _dog_obs_layout) independently, per env, has a chance of
+        # re-delivering its own last value instead of this step's fresh
+        # one. Commanded/internal segments are never dropped.
+        drop_prob = float(getattr(self.cfg.domain_rand, "dog_obs_frame_drop_prob", 0.0))
+        if drop_prob > 0.0 and self.dog_obs_droppable_segments:
+            dropped = (
+                torch.rand(self.num_envs, len(self.dog_obs_droppable_segments), device=self.device) < drop_prob
+            )
+            for i, (start, end) in enumerate(self.dog_obs_droppable_segments):
+                mask = dropped[:, i].unsqueeze(-1)
+                obs_buf[:, start:end] = torch.where(mask, self.dog_last_delivered_obs[:, start:end], obs_buf[:, start:end])
+        self.dog_last_delivered_obs = obs_buf.clone()
+
         if privileged_obs_buf is not None:
             privileged_obs_buf = clip_observation(self, privileged_obs_buf)
 
