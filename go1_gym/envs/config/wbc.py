@@ -91,7 +91,7 @@ ROBODUET_OVERRIDES = {
     # stage-2, unified training and play keep the arm-policy path available.
     "env.arm_policy_enabled": True,
     # Stage-1 arm disturbance curriculum.
-    "env.stage1_arm_ramp_iterations": 8000,
+    "env.stage1_arm_ramp_iterations": 20000,
     "env.stage1_arm_fixed_fraction": 0.1,
     "env.stage1_arm_saturation_fraction": 0.8,
     "env.stage1_arm_accel_resample_time_s": 0.01,
@@ -112,6 +112,14 @@ ROBODUET_OVERRIDES = {
     "rewards.manip_weight_lpy": 3.0,
     "rewards.manip_weight_rpy": 1.0,
     "reward_scales.loco_energy": -0.00004,
+    # Penalizes the leg policy's base-velocity response for drifting from a
+    # first-order reference model of commands_dog, so an upstream planner
+    # (v_ff) can rely on a predictable, fixed time-constant leg response
+    # regardless of payload/posture disturbance.
+    "reward_scales.response_consistency": -0.05,
+    # Cross-policy channel: let the arm policy see the dog's gait phase,
+    # foot contact state, and (v_actual - v_cmd) tracking residual.
+    "env.arm_observe_dog_state": True,
 
     # Dog policy/controller layout.
     "dog.num_actions_loco": 12,
@@ -124,7 +132,7 @@ ROBODUET_OVERRIDES = {
 
     # Arm commands, trajectory curriculum and controller.
     "arm.num_actions_arm": 6,
-    "arm.arm_num_observation_history": 30,
+    "arm.arm_num_observation_history": 60,
     "arm.arm_num_commands": 6,
     "arm.num_actions_arm_cd": 8,
     "arm.use_adaptation_module": False,
@@ -258,6 +266,15 @@ ROBODUET_OVERRIDES = {
     "domain_rand.stage1_arm.link_mass_range": [0.1, 2.0],
     "domain_rand.stage1_arm.randomize_link_com": True,
     "domain_rand.stage1_arm.link_com_range": 0.1,
+    # Simulated payload: a per-episode random mass held at the EE, applied
+    # as a sustained gravity-aligned force at the EE rigid body (not a
+    # rigid-body mass edit, which IsaacGym only allows at actor creation).
+    # Scaled by the same stage1 curriculum intensity as the rest of the arm
+    # disturbance (see _get_stage1_arm_curriculum_intensity).
+    "domain_rand.stage1_arm.randomize_ee_payload": True,
+    "domain_rand.stage1_arm.ee_payload_mass_range": [0.0, 1.5],  # kg
+    "env.priv_observe_stage1_ee_payload_mass": True,
+    "normalization.stage1_ee_payload_mass_range": [0.0, 1.5],
     "domain_rand.stage2_arm.randomize_Kp_factor": True,
     "domain_rand.stage2_arm.Kp_factor_range": [0.9, 1.1],
     "domain_rand.stage2_arm.randomize_Kd_factor": True,

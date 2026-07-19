@@ -253,6 +253,9 @@ def arm_obs_dim_parts(cfg):
         if cfg.commands.use_dynamic_gait:
             parts["dog_body_pose_commands"] = 3
             parts["dynamic_gait_commands"] = cfg.dog.dog_num_commands - 6
+        if getattr(cfg.env, "arm_observe_dog_state", False):
+            parts["dog_contact_states"] = 4
+            parts["dog_vel_residual"] = 3
         return parts
 
     parts = {
@@ -267,6 +270,9 @@ def arm_obs_dim_parts(cfg):
         parts["dynamic_gait_commands"] = cfg.dog.dog_num_commands - 6
     if cfg.env.observe_two_prev_actions:
         parts["two_prev_actions"] = cfg.env.num_actions
+    if getattr(cfg.env, "arm_observe_dog_state", False):
+        parts["dog_contact_states"] = 4
+        parts["dog_vel_residual"] = 3
     return parts
 
 
@@ -315,6 +321,8 @@ def privileged_obs_dim_parts(cfg, dof_dim, policy=None):
         parts["base_mass"] = 1
     if cfg.env.priv_observe_com_displacement:
         parts["com_displacement"] = 3
+    if getattr(cfg.env, "priv_observe_stage1_ee_payload_mass", False):
+        parts["stage1_ee_payload_mass"] = 1
     if cfg.env.priv_observe_motor_strength:
         parts["motor_strength"] = dof_dim
     if cfg.env.priv_observe_motor_offset:

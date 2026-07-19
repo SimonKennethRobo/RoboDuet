@@ -369,6 +369,7 @@ class LeggedRobot(BaseTask):
         # compute observations, rewards, resets, ...
         self.check_termination()
         self._update_performance_metrics()
+        self._update_dog_vel_ref()
         self.compute_reward()
         env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
         self.reset_idx(env_ids)
@@ -433,6 +434,7 @@ class LeggedRobot(BaseTask):
         self.last_actions[env_ids] = 0.0
         self.last_last_actions[env_ids] = 0.0
         self.last_dof_vel[env_ids] = 0.0
+        self.dog_vel_ref[env_ids] = 0.0
         self.feet_air_time[env_ids] = 0.0
         self.episode_length_buf[env_ids] = 0
         self.reset_buf[env_ids] = 1
@@ -743,6 +745,14 @@ class LeggedRobot(BaseTask):
             "vis_manip_commands_tracking_lpy",
             "vis_manip_commands_tracking_rpy",
         }
+
+    def _update_dog_vel_ref(self):
+        """Advance the first-order reference model tracked by the
+        response_consistency reward: v_ref += (v_cmd - v_ref) * dt / T.
+        Runs unconditionally (cheap) so the buffer stays valid even when the
+        reward scale is zero."""
+        T = max(float(self.cfg.rewards.response_consistency_T), 1e-3)
+        self.dog_vel_ref += (self.commands_dog[:, :2] - self.dog_vel_ref) * (self.dt / T)
 
     def compute_reward(self):
         """Compute rewards
@@ -1880,6 +1890,10 @@ class LeggedRobot(BaseTask):
             device=self.device,
             requires_grad=False,
         )[: self.cfg.dog.dog_num_commands]
+        # First-order reference model of commands_dog[:, :2], used by the
+        # response_consistency reward (see rewards.py) and updated every
+        # step in _update_dog_vel_ref().
+        self.dog_vel_ref = torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device, requires_grad=False)
         self.rew_buf_dog = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
         self.rew_buf_pos_dog = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
         self.rew_buf_neg_dog = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)

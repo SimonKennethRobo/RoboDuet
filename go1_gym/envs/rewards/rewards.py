@@ -132,6 +132,16 @@ class Rewards:
         ang_vel_error = torch.square(self.env.commands_dog[:, 2] - self.env.base_ang_vel[:, 2])
         return torch.exp(-ang_vel_error / self.env.cfg.rewards.tracking_sigma_yaw)
 
+    def _reward_response_consistency(self):
+        # Penalizes deviation from a first-order reference model of the xy
+        # velocity command (self.env.dog_vel_ref, updated every step in
+        # LeggedRobot._update_dog_vel_ref). Unlike tracking_lin_vel, which
+        # rewards matching the raw (discontinuous) command, this keeps the
+        # realised response close to a predictable linear plant regardless
+        # of payload/posture disturbance, so an upstream planner can rely on
+        # a fixed time constant when computing feedforward base motion.
+        return torch.sum(torch.square(self.env.base_lin_vel[:, :2] - self.env.dog_vel_ref), dim=-1)
+
     def _reward_lin_vel_z(self):
         # Penalize z axis base linear velocity
         return torch.square(self.env.base_lin_vel[:, 2])

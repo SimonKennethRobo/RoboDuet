@@ -685,6 +685,47 @@ class WBCEnv(LeggedRobot):
 
         self.actions[:, arm_slice] = (target - arm_default) / self.cfg.control.action_scale
 
+    def _resample_stage1_ee_payload(self, env_ids):
+        """Sample a per-env EE payload mass for the episode. Scaled by the
+        same stage1 curriculum intensity as the rest of the arm disturbance
+        (see _get_stage1_arm_curriculum_intensity), so payload weight ramps
+        in alongside arm motion/DR rather than jumping in at full strength."""
+        stage1_arm_cfg = self.cfg.domain_rand.stage1_arm
+        if not (
+            self._stage1_arm_curriculum_active()
+            and getattr(stage1_arm_cfg, "randomize_ee_payload", False)
+        ):
+            self.stage1_ee_payload_mass[env_ids] = 0.0
+            return
+        intensity = self._get_stage1_arm_curriculum_intensity()
+        lo, hi = getattr(stage1_arm_cfg, "ee_payload_mass_range", [0.0, 0.0])
+        hi = lo + (hi - lo) * intensity
+        self.stage1_ee_payload_mass[env_ids] = torch_rand_float(
+            lo, hi, (len(env_ids), 1), device=self.device
+        ).squeeze(-1)
+
+    def _apply_stage1_ee_payload_force(self):
+        """Applies the sampled EE payload as a sustained downward force at
+        the EE rigid body's current position, every physics substep (forces
+        set via apply_rigid_body_force_at_pos_tensors only last one
+        substep). A force at the moving EE reproduces the lever-arm-varying
+        base disturbance a real carried payload would cause; IsaacGym only
+        allows rigid-body *mass* edits at actor creation, so mass isn't a
+        practical way to re-randomize this every episode."""
+        stage1_arm_cfg = self.cfg.domain_rand.stage1_arm
+        if not (
+            self._stage1_arm_curriculum_active()
+            and getattr(stage1_arm_cfg, "randomize_ee_payload", False)
+        ):
+            return
+        self.stage1_payload_forces[:, self.ee_idx, 2] = -self.stage1_ee_payload_mass * 9.81
+        self.stage1_payload_force_positions[:] = self.rigid_body_state[..., :3].clone().reshape(self.num_envs, -1, 3)
+        assert self.gym.apply_rigid_body_force_at_pos_tensors(
+            self.sim,
+            gymtorch.unwrap_tensor(self.stage1_payload_forces.reshape(-1, 3)),
+            gymtorch.unwrap_tensor(self.stage1_payload_force_positions.reshape(-1, 3)),
+        ), "Failed to apply stage1 EE payload force."
+
     def _keep_arm_fixed(self):
         arm_slice = slice(self.num_actions_loco, self.num_actions_loco + self.num_actions_arm)
 
@@ -769,6 +810,13 @@ class WBCEnv(LeggedRobot):
         self.add_force_flag = torch.rand(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
         self.ee_forces = torch.zeros_like(self.rigid_body_state[:, :3]).reshape(self.num_envs, -1, 3)
         self.force_positions = torch.zeros_like(self.rigid_body_state[:, :3]).reshape(self.num_envs, -1, 3)
+
+        # Stage-1 simulated EE payload: per-env mass (kg) resampled every
+        # episode in _resample_stage1_ee_payload, applied as a sustained
+        # downward force at the EE body in _apply_stage1_ee_payload_force.
+        self.stage1_ee_payload_mass = torch.zeros(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
+        self.stage1_payload_forces = torch.zeros_like(self.rigid_body_state[:, :3]).reshape(self.num_envs, -1, 3)
+        self.stage1_payload_force_positions = torch.zeros_like(self.rigid_body_state[:, :3]).reshape(self.num_envs, -1, 3)
 
         self.num_plan_actions = self.cfg.arm.num_actions_arm_cd - self.num_actions_arm
         self.last_plan_actions = torch.zeros(
@@ -868,6 +916,7 @@ class WBCEnv(LeggedRobot):
 
     def _arm_decimation_hook(self):
         self.add_continue_force()
+        self._apply_stage1_ee_payload_force()
 
     def _arm_post_sim_hook(self):
         if self.cfg.env.keep_arm_fixed:
@@ -919,6 +968,7 @@ class WBCEnv(LeggedRobot):
             self._resample_arm_commands(env_ids)
         # stage1_arm_target_offset / vel / accel are re-initialised in
         # _arm_post_reset_refresh_hook (after the randomised dof_pos is known).
+        self._resample_stage1_ee_payload(env_ids)
         self.prev_ee_twist_body[env_ids] = 0.0
 
     def _update_traj_curriculum(self, env_ids):
@@ -1132,6 +1182,13 @@ class WBCEnv(LeggedRobot):
             scale, shift = get_scale_shift(self.cfg.normalization.com_displacement_range)
             privileged_obs_buf = torch.cat(
                 (privileged_obs_buf, (self.com_displacements - shift) * scale),
+                dim=1,
+            )
+
+        if getattr(self.cfg.env, "priv_observe_stage1_ee_payload_mass", False):
+            scale, shift = get_scale_shift(self.cfg.normalization.stage1_ee_payload_mass_range)
+            privileged_obs_buf = torch.cat(
+                (privileged_obs_buf, (self.stage1_ee_payload_mass.unsqueeze(1) - shift) * scale),
                 dim=1,
             )
 
@@ -1841,6 +1898,24 @@ class WBCEnv(LeggedRobot):
         obs, _, _, _ = self.step(torch.zeros(self.num_envs, self.num_actions, device=self.device, requires_grad=False))
         return obs
 
+    def _arm_dog_state_obs_terms(self):
+        """Cross-policy channel gated by cfg.env.arm_observe_dog_state: foot
+        contact state and the leg policy's (v_actual - v_cmd) tracking
+        residual, so the arm/upper policy has some sense of how well the
+        legs are keeping up. Dims must match core.arm_obs_dim_parts'
+        dog_contact_states / dog_vel_residual entries."""
+        if not getattr(self.cfg.env, "arm_observe_dog_state", False):
+            return None, None
+        contact_states = (self.contact_forces[:, self.feet_indices, 2] > 1.0).float()
+        vel_residual = torch.cat(
+            (
+                self.base_lin_vel[:, :2] - self.commands_dog[:, :2],
+                self.base_ang_vel[:, 2:3] - self.commands_dog[:, 2:3],
+            ),
+            dim=-1,
+        )
+        return contact_states, vel_residual
+
     def get_arm_observations(self):
 
         rpy = quaternion_to_rpy(self.base_quat)
@@ -1882,7 +1957,7 @@ class WBCEnv(LeggedRobot):
                 dim=-1,
             )
             obs_builder = ObservationBuilder(self, "arm", self.cfg.arm.arm_num_observations)
-            obs_builder.add(obs_buf)
+            obs_builder.add(obs_buf, *self._arm_dog_state_obs_terms())
             obs_buf = obs_builder.build()
             privileged_obs_buf = self._get_physics_privileged_observations("arm")
             assert privileged_obs_buf.shape[1] == self.cfg.arm.arm_num_privileged_obs, (
@@ -1950,7 +2025,7 @@ class WBCEnv(LeggedRobot):
 
         # return clipped obs, clipped states (None), rewards, dones and infos
         obs_builder = ObservationBuilder(self, "arm", self.cfg.arm.arm_num_observations)
-        obs_builder.add(obs_buf)
+        obs_builder.add(obs_buf, *self._arm_dog_state_obs_terms())
         obs_buf = obs_builder.build()
         if privileged_obs_buf is not None:
             privileged_obs_buf = clip_observation(self, privileged_obs_buf)

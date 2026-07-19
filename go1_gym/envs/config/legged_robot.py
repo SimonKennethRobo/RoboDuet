@@ -301,11 +301,15 @@ class LeggedRobotDefaults:
         gait_force_sigma = 50.
         gait_vel_sigma = 0.5
         footswing_height = 0.09
+        # Time constant (s) of the first-order low-pass reference model that
+        # response_consistency tracks: v_ref += (v_cmd - v_ref) * dt / T.
+        response_consistency_T = 0.4
 
     class reward_scales:
         termination = -0.0
         tracking_lin_vel = 1.0
         tracking_ang_vel = 0.5
+        response_consistency = 0.0
         lin_vel_z = -2.0
         ang_vel_xy = -0.05
         orientation = -0.
