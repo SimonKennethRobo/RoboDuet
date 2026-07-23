@@ -4,6 +4,7 @@ All task builds return independent ``ConfigNode`` trees. Profiles are applied
 in an explicit order and never mutate module-level classes or previous builds.
 """
 
+import warnings
 from copy import deepcopy
 from dataclasses import dataclass, fields, is_dataclass
 from typing import Any, Mapping
@@ -92,17 +93,29 @@ def apply_cfg_overrides(cfg, overrides, *, allow_new=False):
         set_cfg_value(cfg, path, value, allow_new=allow_new)
 
 
-def apply_config_snapshot(cfg, snapshot, *, strict=True):
-    """Restore a nested config snapshot onto an existing schema."""
+def apply_config_snapshot(cfg, snapshot, *, strict=True, drop_unknown=False):
+    """Restore a nested config snapshot onto an existing schema.
+
+    ``drop_unknown`` skips snapshot fields absent from the current schema
+    instead of raising or creating them. Use it when restoring an old
+    checkpoint after a field was deleted from the config (e.g. a since-removed
+    dead param): the field cannot apply to the current code and must not be
+    resurrected into the live cfg, so it is dropped with a warning.
+    """
 
     for key, value in snapshot.items():
         if not hasattr(cfg, key):
+            if drop_unknown:
+                warnings.warn(
+                    "Dropping config field absent from current schema: {}".format(key)
+                )
+                continue
             if strict:
                 raise KeyError("Unknown config field in snapshot: {}".format(key))
             setattr(cfg, key, ConfigNode() if isinstance(value, dict) else deepcopy(value))
         current = getattr(cfg, key)
         if isinstance(current, ConfigNode) and isinstance(value, dict):
-            apply_config_snapshot(current, value, strict=strict)
+            apply_config_snapshot(current, value, strict=strict, drop_unknown=drop_unknown)
         else:
             setattr(cfg, key, deepcopy(value))
 

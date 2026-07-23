@@ -105,7 +105,7 @@ def load_env(logdir, wrapper, headless=False, device='cuda:0', robot=None):
         pkl_cfg = pkl.load(file)
         snapshot = pkl_cfg["Cfg"]
         checkpoint_asset_file = snapshot.get("asset", {}).get("file")
-        apply_config_snapshot(cfg, snapshot)
+        apply_config_snapshot(cfg, snapshot, drop_unknown=True)
 
     _ensure_asset_file(cfg, robot=robot, checkpoint_asset_file=checkpoint_asset_file)
     recompute_observation_dims(cfg)

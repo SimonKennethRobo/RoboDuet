@@ -44,10 +44,12 @@ def get_play_command_limits(cfg):
         pair = as_limit_pair(getattr(cfg.commands, attr_name, None))
         if pair is not None:
             limits["dog"][command_key] = pair
-    for command_key, attr_name in ARM_PLAY_COMMAND_LIMIT_ATTRS.items():
-        pair = as_limit_pair(getattr(cfg.arm.commands, attr_name, None))
-        if pair is not None:
-            limits["arm"][command_key] = pair
+    arm_commands = getattr(cfg.arm, "commands", None)
+    if arm_commands is not None:
+        for command_key, attr_name in ARM_PLAY_COMMAND_LIMIT_ATTRS.items():
+            pair = as_limit_pair(getattr(arm_commands, attr_name, None))
+            if pair is not None:
+                limits["arm"][command_key] = pair
     return limits
 
 

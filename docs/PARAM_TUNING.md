@@ -19,6 +19,7 @@
 9. [stage-2 DLS-IK 控制器（arm.ik.\*）](#9-stage-2-dls-ik-控制器)
 10. [WBC 奖励与终止（wbc.*）](#10-wbc-奖励与终止)
 11. [域随机化（domain_rand.*）](#11-域随机化)
+12. [Reset 高度与姿态课程（terrain.* / init_state.pos）](#12-reset-高度与姿态课程)
 
 ---
 
@@ -279,3 +280,48 @@ energy/dof_vel/dof_acc/action_rate/smoothness 的基础因子。
 **stage2_arm.\***（臂动力学随机化，stage-2 用；范围较窄，因为 stage-2 要 cm 级精度，DR 过猛会向 EE 误差
 注入不可消除的噪声——见 project-design-v3.md §1.2）：`Kp/Kd_factor` `[0.9,1.1]`、`motor_strength`
 `[0.85,1.15]`、`motor_offset` `0.025`、`link_mass`/`link_com` 随机化**关闭**。
+
+---
+
+## 12. Reset 高度与姿态课程
+
+> 注意：这些参数**不在 `wbc.py`**，而在 `go1.py`（基准高度）与 `wtw.py`（reset 课程），
+> 消费位置 `LeggedRobot._reset_root_states` / `_get_reset_curriculum_range`。此处一并说明。
+
+每次 episode reset 时基座位姿：
+```
+reset_z   = init_state.pos[2] + env_origin_z + Uniform(0, z_init_range · intensity)
+reset_rpy = ±(yaw/pitch/roll_init_range · intensity)          # 各轴独立均匀采样
+```
+- **高度只往上抬**（从 `[0, range]` 采样再相加），所以 reset z 恒 ≥ `init_state.pos[2]`（平地 `env_origin_z=0`）。
+- 配合姿态随机化 = **随机高度 + 随机朝向摔落后自恢复**的鲁棒性训练。
+- `intensity` 由 reset 课程门控 + 线性爬升，同时缩放高度和姿态三个范围。
+
+| 参数 | 位置 | 含义 | 当前值 |
+|---|---|---|---|
+| `init_state.pos[2]` | `go1.py` | 站立基准高度（m） | `0.34` |
+| `terrain.z_init_range` | `wtw.py` | 最大下落高度（m） | `0.5` |
+| `terrain.yaw_init_range` / `pitch_init_range` / `roll_init_range` | `wtw.py` | 各轴最大姿态扰动（rad） | `3.14`（±π，可完全翻转） |
+| `terrain.reset_curriculum` | `wtw.py` | 是否启用 reset 课程（False = 直接满难度） | `True` |
+| `terrain.reset_curriculum_initial_fraction` | `wtw.py` | 起步强度 | `0.1` |
+| `terrain.reset_curriculum_growth_iterations` | `wtw.py` | 达标启动后爬到满强度的迭代数 | `5000` |
+| `terrain.reset_curriculum_stability_iterations` | `wtw.py` | 启动前需连续达标的迭代数 | `100` |
+| `terrain.reset_curriculum_tracking_threshold` | `wtw.py` | 启动门槛（速度跟踪分 EMA） | `0.7` |
+| `terrain.reset_curriculum_tracking_ema_alpha` | `wtw.py` | 跟踪分 EMA 系数 α | `0.05` |
+
+**课程机制**（`_update_reset_curriculum_intensity`）
+1. `intensity` 起步 = `initial_fraction`（0.1）→ 有效 z 范围 = 0.5×0.1 = 0.05 m → reset z ∈ [0.34, 0.39]。
+2. 每迭代累积 lin/ang 速度跟踪分，算 EMA；EMA ≥ `tracking_threshold`（0.7）**连续** `stability_iterations`（100）次 → `started`。
+3. started 后 `intensity = 0.1 + 0.9·min(1, elapsed / growth_iterations)`，5000 迭代内爬到 1.0。
+4. 满强度 → z 范围 0.5 m → reset z ∈ [0.34, 0.84]，姿态 ±π。
+
+**调参方向**
+- 想让早期更稳/更慢加压：调大 `stability_iterations`、`tracking_threshold`，或拉长 `growth_iterations`。
+- 想更激进的自恢复能力：调大 `z_init_range` / 姿态范围，或减小 `initial_fraction` 让它从更低难度起步但最终更高。
+- 想完全关掉 reset 扰动课程（直接满难度）：`reset_curriculum=False`（此时直接用 max_range）。
+
+**wandb 日志**（`train/episode/` 下，仅当 `reset_curriculum=True`）
+- `reset_curriculum_intensity` —— 当前课程强度 [initial_fraction, 1.0]
+- `reset_curriculum_lin_tracking_score` / `_ang_tracking_score` / `_tracking_score` / `_tracking_score_ema` —— 门控用的速度跟踪分
+- `reset_curriculum_stable_iterations` / `_started` —— 距启动的进度
+- `reset_curriculum_{z,yaw,pitch,roll}_init_range_eff` —— **本次新增**：当前实际生效的 reset 高度/姿态包络（= max_range × intensity），直接读出「现在从多高、多歪的姿态摔下来」

@@ -434,7 +434,7 @@ def _load_cfg_from_pkl(logdir: str, robot: Optional[str] = None) -> ConfigNode:
         pkl_cfg = pkl.load(f)
         cfg_snapshot = pkl_cfg["Cfg"]
         checkpoint_asset_file = cfg_snapshot.get("asset", {}).get("file")
-        apply_config_snapshot(cfg, cfg_snapshot)
+        apply_config_snapshot(cfg, cfg_snapshot, drop_unknown=True)
     _ensure_asset_file(cfg, robot=robot, checkpoint_asset_file=checkpoint_asset_file)
     recompute_observation_dims(cfg)
     return cfg
@@ -480,7 +480,6 @@ def _apply_benchmark_env_overrides(cfg, total_envs: int, envs_per_policy: int):
     cfg.wbc.rewards.use_terminal_body_height = True
     cfg.wbc.rewards.use_terminal_roll = True
     cfg.wbc.rewards.use_terminal_pitch = True
-    cfg.arm.commands.T_traj = [20000, 30000]
     cfg.env.stage1_arm_curriculum = True
 
 

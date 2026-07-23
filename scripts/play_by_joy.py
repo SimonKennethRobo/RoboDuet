@@ -239,15 +239,28 @@ def trigger_magnitude(value):
 # ---------------------------------------------------------------------------
 
 
+def _has_arm_commands(env):
+    # The legacy l/p/y arm-command buffer was removed when the arm switched to
+    # internal SE(3) box-target sampling; joystick arm control is a no-op now
+    # (and always absent in stage1_only). Guard every arm-command entry point.
+    return hasattr(env, "commands_arm")
+
+
+def _sync_arm_commands_to_obs(env):
+    fn = getattr(env.env, "sync_arm_commands_to_obs", None)
+    if fn is not None:
+        fn(env_ids=slice(0, 1))
+
+
 def set_command(env, target, index, value):
     if target == "dog" and index < env.commands_dog.shape[1]:
         env.commands_dog[:, index] = value
-    elif target == "arm" and index < env.commands_arm.shape[1]:
+    elif target == "arm" and _has_arm_commands(env) and index < env.commands_arm.shape[1]:
         env.commands_arm[:, index] = value
 
 
 def add_arm_command(env, index, delta, limits):
-    if index >= env.commands_arm.shape[1]:
+    if not _has_arm_commands(env) or index >= env.commands_arm.shape[1]:
         return
     value = float(env.commands_arm[0, index]) + delta
     env.commands_arm[:, index] = clamp(value, limits)
@@ -297,10 +310,12 @@ def apply_all_dog_commands(env, cfg, cmd: DogInitCmd):
 
 
 def apply_all_arm_commands(env, cmd: ArmInitCmd):
+    if not _has_arm_commands(env):
+        return
     values = [cmd.l, cmd.p, cmd.y, cmd.roll, cmd.pitch, cmd.yaw]
     for index, value in enumerate(values[: env.commands_arm.shape[1]]):
         env.commands_arm[:, index] = value
-    env.env.sync_arm_commands_to_obs(env_ids=slice(0, 1))
+    _sync_arm_commands_to_obs(env)
 
 
 def format_robot_state(env):
@@ -479,7 +494,7 @@ class JoystickController:
             for m in JOYSTICK_COMMAND_MAP.values()
             if m["source"] == "axis_combo"
         }
-        env.env.sync_arm_commands_to_obs(env_ids=slice(0, 1))
+        _sync_arm_commands_to_obs(env)
 
 
 def command_key(target, key):
