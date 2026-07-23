@@ -82,6 +82,18 @@ VEL_GRID: List[tuple] = [(xv, 0.0, yaw) for xv in [-0.5, 0.0, 0.5, 1.0, 1.5] for
 
 ARM_INTENSITY_SWEEP = [0.0, 0.25, 0.5, 0.75, 1.0]
 FORWARD_CMD = (1.0, 0.0, 0.0)
+# Step-response targets (vx, vy, yaw): each point resets (which zeroes both the
+# base velocity and the first-order reference model dog_vel_ref) then holds the
+# target, so it is a step from rest. response_consistency_rmse then measures how
+# closely the realised velocity follows the fixed-time-constant reference model.
+STEP_TARGETS: List[tuple] = [
+    (0.5, 0.0, 0.0),
+    (1.0, 0.0, 0.0),
+    (1.5, 0.0, 0.0),
+    (0.0, 0.5, 0.0),
+    (0.0, 0.0, 1.0),
+    (1.0, 0.0, 1.0),
+]
 VELOCITY_GROUPS = {
     "stand": (0.0, 0.0, 0.0),
     "forward": (0.5, 0.0, 0.0),
@@ -224,6 +236,8 @@ def _run_points(
     header: str,
     fmt_fn: Callable,
     indent: str = "  ",
+    settle_steps: int = 0,
+    settle_cmd_fn: Optional[Callable] = None,
 ) -> ResultsMap:
     out = _empty_results(handles)
     print(header)
@@ -233,7 +247,10 @@ def _run_points(
         if arm_intensity is None:
             raise ValueError(f"{scenario}/{label}: arm_intensity was not provided")
         print(f"{indent}[{i + 1:2d}/{total}] {label}", end="  ", flush=True)
-        accs = _eval_loop_parallel(env, handles, layout, n_steps, arm_intensity, device, cmd_fn)
+        accs = _eval_loop_parallel(
+            env, handles, layout, n_steps, arm_intensity, device, cmd_fn,
+            settle_steps=settle_steps, settle_cmd_fn=settle_cmd_fn,
+        )
         point_results = []
         for h, acc in zip(handles, accs):
             result = _acc_to_result(acc, layout, h.name, scenario, label, n_steps, **extra_kw)
@@ -391,6 +408,88 @@ def run_scenario_b(
             ],
         ),
     )
+
+
+def run_scenario_e(
+    env: HistoryWrapper,
+    handles: List[PolicyHandle],
+    layout: CommandLayout,
+    n_steps: int,
+    arm_intensity: float,
+    device: str,
+    scenario_config: Optional[dict] = None,
+) -> ResultsMap:
+    cfg = _scenario_cfg(scenario_config, "vel_step")
+    fixed_gait = _fixed_gait_cfg(cfg)
+    fixed_pose = _fixed_pose_cfg(cfg)
+    settle_steps = int(cfg.get("settle_steps", 40))
+    targets = cfg.get("targets")
+    if targets:
+        targets = [tuple(float(v) for v in t) for t in targets]
+    else:
+        targets = STEP_TARGETS
+    points = [
+        (
+            f"step vx={xv:+.1f} vy={yv:+.1f} yaw={yaw:+.1f}",
+            _command_fn((xv, yv, yaw), fixed_gait, fixed_pose),
+            dict(
+                cmd_x=xv,
+                cmd_y=yv,
+                cmd_yaw=yaw,
+                cmd_pitch=float(fixed_pose["pitch"]),
+                cmd_roll=float(fixed_pose["roll"]),
+                cmd_height_delta=float(fixed_pose["height_delta"]),
+                cmd_gait_freq=float(fixed_gait["gait_freq"]),
+                cmd_footswing_height=float(fixed_gait["footswing_height"]),
+                cmd_stance_width=float(fixed_gait["stance_width"]),
+                cmd_stance_length=float(fixed_gait["stance_length"]),
+                cmd_gait_duration=float(fixed_gait["gait_duration"]),
+                arm_intensity=arm_intensity,
+            ),
+        )
+        for xv, yv, yaw in targets
+    ]
+    # Settle at zero velocity (same gait/pose) before each step.
+    settle_cmd_fn = _command_fn((0.0, 0.0, 0.0), fixed_gait, fixed_pose)
+
+    # Disable reset perturbation for this scenario only: a step-response
+    # measurement must start from a nominal, settled pose, not a random
+    # drop/tilt. Zero the reset position/orientation spreads on the shared env
+    # cfg for the duration and restore them afterwards. (The reset's hardcoded
+    # +-0.5 m/s initial base velocity is not config-gated; the settle phase
+    # damps it out.)
+    terrain = env.env.cfg.terrain
+    reset_range_keys = ("z_init_range", "yaw_init_range", "pitch_init_range", "roll_init_range")
+    saved_ranges = {k: getattr(terrain, k) for k in reset_range_keys}
+    for k in reset_range_keys:
+        setattr(terrain, k, 0.0)
+    try:
+        return _run_points(
+            env,
+            handles,
+            layout,
+            n_steps,
+            arm_intensity,
+            device,
+            points,
+            "vel_step",
+            f"\n[E] Velocity step response  arm_intensity={arm_intensity:.2f}  "
+            f"reset disabled + {settle_steps}-step settle  "
+            f"{len(points)} steps x {n_steps} steps  {len(handles)} policies in parallel",
+            lambda rs: _fmt_metric(
+                rs,
+                [
+                    ("resp", "response_consistency_rmse", 1.0, ".4f"),
+                    ("xy", "lin_vel_xy_rmse", 1.0, ".4f"),
+                    ("fall_h", "fall_rate_height", 100.0, ".1f%"),
+                ],
+            ),
+            settle_steps=settle_steps,
+            settle_cmd_fn=settle_cmd_fn,
+        )
+    finally:
+        for k, v in saved_ranges.items():
+            setattr(terrain, k, v)
 
 
 def run_scenario_c(
@@ -619,6 +718,7 @@ SCENARIO_FLAGS = {
     "arm_sweep": "skip_b",
     "body_pose": "skip_c",
     "gait": "skip_d",
+    "vel_step": "skip_e",
 }
 
 def _load_json_config(path: str) -> dict:
@@ -750,6 +850,7 @@ def parse_args(argv: Optional[List[str]] = None):
     p.add_argument("--skip_b", action="store_true")
     p.add_argument("--skip_c", action="store_true")
     p.add_argument("--skip_d", action="store_true")
+    p.add_argument("--skip_e", action="store_true")
     p.add_argument("--stage2", action="store_true", help="[Reserved] Stage-2 WBC evaluation (not yet implemented)")
     args = p.parse_args(argv)
     args.scenario_config = {}
@@ -907,6 +1008,20 @@ def main(argv: Optional[List[str]] = None):
 
     if not args.skip_d:
         _merge("gait", run_scenario_d(env, handles, layout, args.num_eval_steps, args.arm_intensity, args.sim_device, args.scenario_config))
+
+    if not args.skip_e:
+        _merge(
+            "vel_step",
+            run_scenario_e(
+                env,
+                handles,
+                layout,
+                args.num_eval_steps,
+                args.arm_intensity,
+                args.sim_device,
+                args.scenario_config,
+            ),
+        )
 
     print_comparison_table(all_results)
 

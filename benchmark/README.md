@@ -163,8 +163,15 @@ profile 会把 `benchmark_protocol` 记录为 `dog_only`，并在 `metadata.json
 - B Arm Disturbance Sweep：固定 `vx=1.0, vy=0.0, yaw=0.0`，扫描 `arm_intensity = [0, 0.25, 0.5, 0.75, 1.0]`，并记录 disturbance seed metadata。
 - C Body Pose Tracking：对 `stand/forward/lateral/turn` 四个 velocity group 分别扫描 pitch、roll、height delta，standard 共 56 点。
 - D Gait Command Tracking：固定 `vx=0.5`，分别扫描 gait frequency、stance width、stance length，standard 共 18 点。
+- E Velocity Step Response（predictable-plant）：从静止对若干速度目标（默认前向 `0.5/1.0/1.5`、侧向 `0.5`、yaw `1.0`、前向+yaw 组合，共 6 点）施加阶跃，度量腿部速度响应对一阶参考模型的贴合度。可用 `scenario_config.vel_step` 覆盖 `targets` 和 `settle_steps`。
 
-新增和强化的主要字段包括 `lin_vel_xy_rmse`、`fall_rate_height`、`cmd_stance_length`、`cmd_gait_duration` 和 `stance_length_rmse_m`。legacy/no-profile 结果仍可被 HTML report 打开，缺失字段会显示为 `-`。
+### 响应一致性指标（response_consistency_rmse，列名 `resp_cons`）
+
+`response_consistency_rmse` = 实测 base 速度 `base_lin_vel[:2]` 与命令的一阶参考模型 `dog_vel_ref`（`v_ref += (v_cmd - v_ref) * dt / T`）之间的 RMSE（m/s）。它累积与训练 `response_consistency` reward 逐字相同的量，**越低表示腿越接近一个固定时间常数的可预测线性 plant** —— 这是上层解析 base 前馈（`v_ff`）所依赖的性质（见 `project-design-v3.md` §2.3）。该列出现在 A（vel_grid）、B（arm_sweep）、E（vel_step）三个场景中；A/B 在保持命令下反映稳态+瞬态混合，**E 才是纯净的阶跃响应度量**。
+
+**场景 E 的非显然行为**：为得到干净的阶跃，`run_scenario_e` 会**仅对 E** 临时把 `terrain.{z,yaw,pitch,roll}_init_range` 置 0（关闭 reset 的随机落体/翻转，try/finally 恢复，不影响其它场景），并在每个测试点先跑 `settle_steps`（默认 40）步零速命令、不累积，用来阻尼 reset 硬编码的 ±0.5 m/s 初速度、让 `dog_vel_ref` 归零，之后才施加被测阶跃。E 默认仍在 `--arm_intensity`（默认 1.0）下运行，即测"臂扰动下 plant 是否仍可预测"；要测无扰动基线跑 `--arm_intensity 0`。
+
+新增和强化的主要字段包括 `response_consistency_rmse`、`lin_vel_xy_rmse`、`fall_rate_height`、`cmd_stance_length`、`cmd_gait_duration` 和 `stance_length_rmse_m`。legacy/no-profile 结果仍可被 HTML report 打开，缺失字段会显示为 `-`。
 
 包含 stance-length / gait-duration 的 profile gait scenario 要求 runtime `dog_num_commands >= 11`，因为会使用 `stance_length` index 9 和 `gait_duration` index 10。不满足时 benchmark 会 fail fast，而不是静默跳过 gait 子项。`fall_rate_height` 表示由 height terminal 条件触发的 event rate，分母与 `fall_rate` 一样是该测试点累计 env step 数。
 

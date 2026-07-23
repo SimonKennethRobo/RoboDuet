@@ -8,12 +8,30 @@
   "seed": 1,
   "arm_intensity": 1.0,
   "output_dir": "benchmark/results",
-  "scenarios": ["vel_grid", "arm_sweep", "body_pose", "gait"],
+  "scenarios": [
+    "vel_grid",
+    "arm_sweep",
+    "body_pose",
+    "gait",
+    "vel_step"
+  ],
   "scenario_config": {
     "vel_grid": {
-      "vx": [-1.0, 0.0, 1.0],
-      "vy": [-1.0, 0.0, 1.0],
-      "yaw": [-1.0, 0.0, 1.0],
+      "vx": [
+        -1.0,
+        0.0,
+        1.0
+      ],
+      "vy": [
+        -1.0,
+        0.0,
+        1.0
+      ],
+      "yaw": [
+        -1.0,
+        0.0,
+        1.0
+      ],
       "fixed_gait": {
         "gait_freq": 4.0,
         "stance_width": 0.3,
@@ -28,8 +46,18 @@
       }
     },
     "arm_sweep": {
-      "fixed_velocity": [1.0, 0.0, 0.0],
-      "arm_intensity": [0.0, 0.25, 0.5, 0.75, 1.0],
+      "fixed_velocity": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "arm_intensity": [
+        0.0,
+        0.25,
+        0.5,
+        0.75,
+        1.0
+      ],
       "disturbance_seed": 1,
       "fixed_gait": {
         "gait_freq": 4.0,
@@ -46,14 +74,47 @@
     },
     "body_pose": {
       "velocity_groups": {
-        "stand": [0.0, 0.0, 0.0],
-        "forward": [0.5, 0.0, 0.0],
-        "lateral": [0.0, 0.5, 0.0],
-        "turn": [0.0, 0.0, 0.5]
+        "stand": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "forward": [
+          0.5,
+          0.0,
+          0.0
+        ],
+        "lateral": [
+          0.0,
+          0.5,
+          0.0
+        ],
+        "turn": [
+          0.0,
+          0.0,
+          0.5
+        ]
       },
-      "pitch": [-0.4, -0.2, 0.0, 0.2, 0.4],
-      "roll": [-0.4, -0.2, 0.0, 0.2, 0.4],
-      "height_delta": [-0.1, 0.0, 0.1, 0.2],
+      "pitch": [
+        -0.4,
+        -0.2,
+        0.0,
+        0.2,
+        0.4
+      ],
+      "roll": [
+        -0.4,
+        -0.2,
+        0.0,
+        0.2,
+        0.4
+      ],
+      "height_delta": [
+        -0.1,
+        0.0,
+        0.1,
+        0.2
+      ],
       "fixed_gait": {
         "gait_freq": 4.0,
         "stance_width": 0.3,
@@ -63,7 +124,11 @@
       }
     },
     "gait": {
-      "fixed_velocity": [0.5, 0.0, 0.0],
+      "fixed_velocity": [
+        0.5,
+        0.0,
+        0.0
+      ],
       "fixed_pose": {
         "pitch": 0.0,
         "roll": 0.0,
@@ -76,9 +141,30 @@
         "footswing_height": 0.06,
         "gait_duration": 0.5
       },
-      "gait_freq": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
-      "stance_width": [0.2, 0.25, 0.3, 0.35, 0.4, 0.45],
-      "stance_length": [0.2, 0.25, 0.3, 0.35, 0.4, 0.45]
+      "gait_freq": [
+        1.0,
+        2.0,
+        3.0,
+        4.0,
+        5.0,
+        6.0
+      ],
+      "stance_width": [
+        0.2,
+        0.25,
+        0.3,
+        0.35,
+        0.4,
+        0.45
+      ],
+      "stance_length": [
+        0.2,
+        0.25,
+        0.3,
+        0.35,
+        0.4,
+        0.45
+      ]
     }
   }
 }

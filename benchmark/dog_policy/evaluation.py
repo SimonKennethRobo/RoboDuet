@@ -35,6 +35,7 @@ SCENARIO_META = {
             ("vx_rmse", "lin_vel_x_rmse"),
             ("vy_rmse", "lin_vel_y_rmse"),
             ("yaw_rmse", "ang_vel_yaw_rmse"),
+            ("resp_cons", "response_consistency_rmse"),
             ("lin_rew", "tracking_lin_vel_reward"),
             ("yaw_rew", "tracking_ang_vel_reward"),
             ("h_m", "base_height_mean"),
@@ -48,6 +49,7 @@ SCENARIO_META = {
             ("vx_rmse", "lin_vel_x_rmse"),
             ("vy_rmse", "lin_vel_y_rmse"),
             ("yaw_rmse", "ang_vel_yaw_rmse"),
+            ("resp_cons", "response_consistency_rmse"),
             ("lin_rew", "tracking_lin_vel_reward"),
             ("yaw_rew", "tracking_ang_vel_reward"),
             ("fall_h_pct", "fall_rate_height"),
@@ -72,6 +74,17 @@ SCENARIO_META = {
             ("stance_l_m", "stance_length_rmse_m"),
             ("clearance_m", "foot_clearance_rmse_m"),
             ("raibert_m", "raibert_rmse_m"),
+            ("fall_h_pct", "fall_rate_height"),
+        ],
+    ),
+    "vel_step": (
+        "E - Velocity Step Response (predictable-plant)",
+        [
+            ("resp_cons", "response_consistency_rmse"),
+            ("xy_rmse", "lin_vel_xy_rmse"),
+            ("vx_rmse", "lin_vel_x_rmse"),
+            ("yaw_rmse", "ang_vel_yaw_rmse"),
+            ("lin_rew", "tracking_lin_vel_reward"),
             ("fall_h_pct", "fall_rate_height"),
         ],
     ),
@@ -259,6 +272,7 @@ class ScenarioResult:
     lin_vel_y_rmse: Optional[float] = None
     lin_vel_xy_rmse: Optional[float] = None
     ang_vel_yaw_rmse: Optional[float] = None
+    response_consistency_rmse: Optional[float] = None
     pitch_rmse_deg: Optional[float] = None
     roll_rmse_deg: Optional[float] = None
     height_rmse_m: Optional[float] = None
@@ -730,11 +744,19 @@ def _eval_loop_parallel(
     arm_intensity: float,
     device: str,
     cmd_fn: Optional[Callable] = None,
+    settle_steps: int = 0,
+    settle_cmd_fn: Optional[Callable] = None,
 ) -> List[Accumulator]:
     """Step all env groups in one call; accumulate metrics per-policy group.
 
     Simulator tensors stay on device inside the metric loop.
     Returns one Accumulator per handle, in the same order.
+
+    ``settle_steps`` runs that many un-accumulated steps first, holding
+    ``settle_cmd_fn`` (falling back to ``cmd_fn``). Used by the step-response
+    scenario to damp the reset's hardcoded +-0.5 m/s initial base velocity to
+    rest -- and bring the first-order reference model dog_vel_ref to 0 -- so the
+    subsequently-held command is a clean step from rest.
     """
     configure_stage1(arm_intensity)
     env.reset()
@@ -744,6 +766,23 @@ def _eval_loop_parallel(
     base = env.env
     gpu = base.device
     n_per = handles[0].n_envs
+
+    def _step_policies():
+        with torch.no_grad():
+            obs = env.get_dog_observations()
+            actions = torch.zeros(base.num_envs, base.num_actions_loco, device=gpu)
+            for h in handles:
+                actions[h.env_start:h.env_end] = h.policy(
+                    {k: v[h.env_start:h.env_end] for k, v in obs.items()}
+                ).to(gpu)
+        env.step(actions, env.arm_fake_actions)
+
+    # Settle: reach steady stance at settle_cmd_fn (e.g. zero velocity) before
+    # measurement, so what follows is a genuine step response, not the reset
+    # transient. No accumulation here.
+    for _ in range(settle_steps):
+        (settle_cmd_fn or cmd_fn or (lambda _e: None))(env)
+        _step_policies()
 
     accs = [Accumulator(n_per, device=gpu) for _ in handles]
     prev_contact = (base.contact_forces[:, base.feet_indices, 2] > 1.0).clone()
@@ -770,6 +809,7 @@ def _eval_loop_parallel(
         vel = base.base_lin_vel  # [total_envs, 3]
         ang = base.base_ang_vel  # [total_envs, 3]
         cmd = base.commands_dog  # [total_envs, D]
+        vel_ref = getattr(base, "dog_vel_ref", None)  # [total_envs, 2] first-order ref, or None
         pitch = base.pitch  # [total_envs]
         roll = base.roll  # [total_envs]
         height = _actual_height(env)  # [total_envs]
@@ -798,6 +838,14 @@ def _eval_loop_parallel(
             acc.add_sq_err("yaw", ang_g[:, 2], cmd_g[:, 2])
             lin_vel_err = torch.sum(torch.square(cmd_g[:, :2] - vel_g[:, :2]), dim=1)
             acc.add_sq("lin_vel_xy", lin_vel_err)
+            if vel_ref is not None:
+                # Predictable-plant metric: deviation of the realised base
+                # velocity from the first-order reference model of the command
+                # (v_ref += (v_cmd - v_ref) * dt / T). Same quantity as the
+                # response_consistency reward -- low = leg response tracks a
+                # fixed-time-constant linear plant, which upstream v_ff needs.
+                resp_cons_err = torch.sum(torch.square(vel_g[:, :2] - vel_ref[s:e]), dim=1)
+                acc.add_sq("response_consistency", resp_cons_err)
             yaw_err = torch.square(cmd_g[:, 2] - ang_g[:, 2])
             acc.add_val("tracking_lin_vel_reward", torch.exp(-lin_vel_err / base.cfg.rewards.tracking_sigma))
             acc.add_val("tracking_ang_vel_reward", torch.exp(-yaw_err / base.cfg.rewards.tracking_sigma_yaw))
@@ -895,6 +943,8 @@ def _acc_to_result(
         base_height_std=acc.std("height"),
         max_torque_mean=acc.mean("max_torque"),
     )
+    if "response_consistency_sq" in acc._stats:
+        r.response_consistency_rmse = acc.rmse("response_consistency")
     # Stability RMS: always computed from raw values
     r.pitch_deg_rms = acc.rmse("pitch_deg_raw")
     r.roll_deg_rms = acc.rmse("roll_deg_raw")
