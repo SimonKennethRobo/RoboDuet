@@ -16,23 +16,23 @@ set -euo pipefail
 
 cd /home/svu/e1192548/Projects/WBC/RoboDuet
 
-PYTHONCMD_1="python scripts/auto_train.py --headless --sim_device cuda:0 --dyna_gait --traj_track --num_envs 4096 --num_steps_per_env 24 --num_mini_batches 4 --num_learning_iterations 30000 --train_stage stage1 --run_name "stage1_larger_cmd_range_no_arm_contact"
+PYTHONCMD_1="python scripts/auto_train.py --headless --sim_device cuda:0 --dyna_gait --num_envs 4096 --num_steps_per_env 24 --num_mini_batches 4 --num_learning_iterations 30000 --train_stage stage1 --run_name "stage1_larger_cmd_range_no_arm_contact"
 
-PYTHONCMD_2="python scripts/auto_train.py --headless --sim_device cuda:0 --dyna_gait --traj_track --num_envs 4096 --num_steps_per_env 32 --num_mini_batches 4 --num_learning_iterations 22500 --train_stage stage1 --run_name "stage1_larger_cmd_range_no_arm_contact"
+PYTHONCMD_2="python scripts/auto_train.py --headless --sim_device cuda:0 --dyna_gait --num_envs 4096 --num_steps_per_env 32 --num_mini_batches 4 --num_learning_iterations 22500 --train_stage stage1 --run_name "stage1_larger_cmd_range_no_arm_contact"
 
-PYTHONCMD_3="python scripts/auto_train.py --headless --sim_device cuda:0 --dyna_gait --traj_track --num_envs 4096 --num_steps_per_env 48 --num_mini_batches 8 --num_learning_iterations 15000 --train_stage stage1 --run_name "stage1_larger_cmd_range_no_arm_contact"
+PYTHONCMD_3="python scripts/auto_train.py --headless --sim_device cuda:0 --dyna_gait --num_envs 4096 --num_steps_per_env 48 --num_mini_batches 8 --num_learning_iterations 15000 --train_stage stage1 --run_name "stage1_larger_cmd_range_no_arm_contact"
 
-PYTHONCMD_4="python scripts/auto_train.py --headless --sim_device cuda:0 --dyna_gait --traj_track --num_envs 8192 --num_steps_per_env 24 --num_mini_batches 4 --num_learning_iterations 15000 --train_stage stage1 --run_name "stage1_larger_cmd_range_no_arm_contact"
+PYTHONCMD_4="python scripts/auto_train.py --headless --sim_device cuda:0 --dyna_gait --num_envs 8192 --num_steps_per_env 24 --num_mini_batches 4 --num_learning_iterations 15000 --train_stage stage1 --run_name "stage1_larger_cmd_range_no_arm_contact"
 
-PYTHONCMD_5="python scripts/auto_train.py --headless --sim_device cuda:0 --dyna_gait --traj_track --num_envs 8192 --num_steps_per_env 32 --num_mini_batches 8 --num_learning_iterations 11250 --train_stage stage1 --run_name "stage1_larger_cmd_range_no_arm_contact"
+PYTHONCMD_5="python scripts/auto_train.py --headless --sim_device cuda:0 --dyna_gait --num_envs 8192 --num_steps_per_env 32 --num_mini_batches 8 --num_learning_iterations 11250 --train_stage stage1 --run_name "stage1_larger_cmd_range_no_arm_contact"
 
-PYTHONCMD_6="python scripts/auto_train.py --headless --sim_device cuda:0 --dyna_gait --traj_track --num_envs 16384 --num_steps_per_env 24 --num_mini_batches 6 --num_learning_iterations 11250 --train_stage stage1 --run_name "stage1_larger_cmd_range_no_arm_contact"
+PYTHONCMD_6="python scripts/auto_train.py --headless --sim_device cuda:0 --dyna_gait --num_envs 16384 --num_steps_per_env 24 --num_mini_batches 6 --num_learning_iterations 11250 --train_stage stage1 --run_name "stage1_larger_cmd_range_no_arm_contact"
 
-PYTHONCMD_7="python scripts/auto_train.py --headless --sim_device cuda:0 --dyna_gait --traj_track --num_envs 20480 --num_steps_per_env 24 --num_mini_batches 6 --num_learning_iterations 11250 --train_stage stage1 --run_name "stage1_larger_cmd_range_no_arm_contact"
+PYTHONCMD_7="python scripts/auto_train.py --headless --sim_device cuda:0 --dyna_gait --num_envs 20480 --num_steps_per_env 24 --num_mini_batches 6 --num_learning_iterations 11250 --train_stage stage1 --run_name "stage1_larger_cmd_range_no_arm_contact"
 
-PYTHONCMD_8="python scripts/auto_train.py --headless --sim_device cuda:0 --dyna_gait --traj_track --num_envs 32768 --num_steps_per_env 24 --num_mini_batches 8 --num_learning_iterations 11250 --train_stage stage1 --run_name "stage1_larger_cmd_range_no_arm_contact"
+PYTHONCMD_8="python scripts/auto_train.py --headless --sim_device cuda:0 --dyna_gait --num_envs 32768 --num_steps_per_env 24 --num_mini_batches 8 --num_learning_iterations 11250 --train_stage stage1 --run_name "stage1_larger_cmd_range_no_arm_contact"
 
-# PYTHONCMD_9="python scripts/auto_train.py --headless --sim_device cuda:0 --dyna_gait --traj_track --num_envs 40960 --num_steps_per_env 24 --num_mini_batches 10 --num_learning_iterations 11250 --train_stage stage1 --run_name "stage1_larger_cmd_range_no_arm_contact"
+# PYTHONCMD_9="python scripts/auto_train.py --headless --sim_device cuda:0 --dyna_gait --num_envs 40960 --num_steps_per_env 24 --num_mini_batches 10 --num_learning_iterations 11250 --train_stage stage1 --run_name "stage1_larger_cmd_range_no_arm_contact"
 
 preprocess() {
 	LOG_FILE="tmp/logs/${job_name}.${PBS_JOBID}.log"

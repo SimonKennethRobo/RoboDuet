@@ -73,6 +73,22 @@ def pose_world_to_body_9d(pos_world, quat_world, base_pos, base_quat):
     return torch.cat((pos_body, quat_xyzw_to_rot6d(quat_body)), dim=-1)
 
 
+def quat_error_axis_angle(quat_target, quat_current):
+    """Orientation error between quat_target and quat_current (xyzw quats,
+    both expressed in the same frame): the vector part of
+    q_target * q_current^-1, sign-corrected for the shortest-path rotation.
+
+    This is the bounded small-angle proxy for the true axis-angle log map
+    (magnitude saturates at 1 instead of growing to pi as the true log map
+    does), matching IsaacGymEnvs' franka_reach.py orientation_error. Using
+    the unbounded true log map here was an earlier bug: for a large initial
+    rotation error its magnitude (up to ~pi) dwarfs the position-error rows
+    in the DLS dpose vector, so the solve overcorrects rotation at position's
+    expense. Continuous and zero exactly at zero error either way."""
+    q_err = quat_mul(quat_target, quat_conjugate(quat_current))
+    return q_err[:, :3] * torch.sign(q_err[:, 3:4])
+
+
 def ee_twist_body_6d(end_effector_state, root_states, base_quat, num_envs):
     ee_lin_vel_world = end_effector_state[:, 7:10]
     ee_ang_vel_world = end_effector_state[:, 10:13]

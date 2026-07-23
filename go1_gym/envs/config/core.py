@@ -152,7 +152,6 @@ class RoboDuetRuntimeOptions:
     num_envs: int
     robot: str
     use_rot6d: bool = True
-    traj_track: bool = False
     dyna_gait: bool = False
     dyna_gait_min_frequency: float = 0.0
     stage1_arm_curriculum: bool = True
@@ -163,7 +162,6 @@ class RoboDuetRuntimeOptions:
             num_envs=args.num_envs,
             robot=args.robot,
             use_rot6d=getattr(args, "use_rot6d", True),
-            traj_track=getattr(args, "traj_track", False),
             dyna_gait=getattr(args, "dyna_gait", False),
             dyna_gait_min_frequency=getattr(args, "dyna_gait_min_frequency", 0.0),
             stage1_arm_curriculum=not getattr(args, "no_stage1_arm_curriculum", False),
@@ -221,53 +219,23 @@ def env_obs_dim_parts(cfg):
         parts["heading"] = 1
     if cfg.env.observe_contact_states:
         parts["contact_states"] = 4
-    if cfg.wbc.trajectory.enabled:
-        parts.update(
-            {
-                "arm_dof_vel": cfg.arm.num_actions_arm,
-                "base_height": 1,
-                "ee_pose_body": 9,
-                "ee_twist_body": 6,
-                "trajectory_window": len(cfg.wbc.trajectory.window_offsets) * 9,
-                "trajectory_progress_index": 1,
-            }
-        )
     return parts
 
 
 def arm_obs_dim_parts(cfg):
-    if cfg.wbc.trajectory.enabled:
-        parts = {
-            "arm_dof_pos": cfg.arm.num_actions_arm,
-            "arm_dof_vel": cfg.arm.num_actions_arm,
-            "arm_actions": cfg.arm.num_actions_arm_cd,
-            "base_height": 1,
-            "base_ang_vel": 3,
-            "dog_velocity_commands": 3,
-            "trajectory_completion_time_command": 1,
-            "ee_pose_body": 9,
-            "ee_twist_body": 6,
-            "trajectory_window": len(cfg.wbc.trajectory.window_offsets) * 9,
-            "trajectory_progress_index": 1,
-        }
-        if cfg.commands.use_dynamic_gait:
-            parts["dog_body_pose_commands"] = 3
-            parts["dynamic_gait_commands"] = cfg.dog.dog_num_commands - 6
-        if getattr(cfg.env, "arm_observe_dog_state", False):
-            parts["dog_contact_states"] = 4
-            parts["dog_vel_residual"] = 3
-        return parts
-
+    """Task-space arm observations (DLS-IK MVP, project-design-v3.md §8.1
+    trimmed to what this round implements): current task-space error, the
+    target's absolute pose (base frame), and the arm's own joint state.
+    Base is not moving this round, so there is no v_ff/ρ/preview block yet."""
     parts = {
+        "ee_pos_err": 3,
+        "ee_rot_err_axis_angle": 3,
+        "ee_target_pos_body": 3,
+        "ee_target_rot6d_body": 6,
         "arm_dof_pos": cfg.arm.num_actions_arm,
         "arm_dof_vel": cfg.arm.num_actions_arm,
         "arm_actions": cfg.arm.num_actions_arm_cd,
-        "arm_commands": cfg.arm.arm_num_commands,
-        "base_roll_pitch": 2,
     }
-    if cfg.commands.use_dynamic_gait:
-        parts["dog_body_pose_commands"] = 3
-        parts["dynamic_gait_commands"] = cfg.dog.dog_num_commands - 6
     if cfg.env.observe_two_prev_actions:
         parts["two_prev_actions"] = cfg.env.num_actions
     if getattr(cfg.env, "arm_observe_dog_state", False):
@@ -308,8 +276,6 @@ def dog_obs_dim_parts(cfg):
         parts["heading"] = 1
     if cfg.env.observe_contact_states:
         parts["contact_states"] = 4
-    if cfg.wbc.trajectory.enabled:
-        parts["ee_pose_body"] = 9
     return parts
 
 
@@ -395,9 +361,6 @@ def configure_privileged_obs_dims(cfg):
     dog_parts = privileged_obs_dim_parts(cfg, cfg.dog.num_actions_loco, policy="dog")
     base_arm_action_dim = ROBODUET_OVERRIDES["arm.num_actions_arm_cd"]
     arm_parts = privileged_obs_dim_parts(cfg, base_arm_action_dim, policy="arm")
-    if cfg.wbc.trajectory.enabled:
-        arm_parts["foot_contact_states"] = 4
-        arm_parts["full_trajectory"] = cfg.wbc.trajectory.num_waypoints * 9
 
     dog_dim = sum_dim_parts(dog_parts)
     arm_dim = sum_dim_parts(arm_parts)
@@ -486,20 +449,6 @@ def enable_rot6d(cfg, layout):
     layout.arm_cmd += FEATURE_LAYOUT["rot6d_command_dims"]
 
 
-def enable_traj_track(cfg, layout, traj_track_reward_scale=5.0):
-    from .wbc import FEATURE_LAYOUT, TRAJECTORY_REWARD_CONFIG
-
-    cfg.wbc.trajectory.enabled = True
-    layout.arm_action_cd = cfg.arm.num_actions_arm + FEATURE_LAYOUT["trajectory_plan_action_dims"]
-
-    cfg.wbc.reward_scales.arm_manip_commands_tracking_combine = 0.0
-    cfg.wbc.reward_scales.vis_manip_commands_tracking_lpy = 0.0
-    cfg.wbc.reward_scales.vis_manip_commands_tracking_rpy = 0.0
-    cfg.wbc.reward_scales.traj_track = traj_track_reward_scale
-    for name, value in TRAJECTORY_REWARD_CONFIG.items():
-        setattr(cfg.wbc.reward_scales, name, value)
-
-
 def enable_dyna_gait(cfg, layout, min_frequency=0.0):
     from .wbc import DYNAMIC_GAIT_BIN_CONFIG, FEATURE_LAYOUT
 
@@ -512,20 +461,22 @@ def enable_dyna_gait(cfg, layout, min_frequency=0.0):
     cfg.commands.limit_stance_length = deepcopy(cfg.commands.stance_length_range)
 
     layout.dog_cmd += FEATURE_LAYOUT["dynamic_gait_command_dims"]
-    layout.arm_action_cd = cfg.arm.num_actions_arm + FEATURE_LAYOUT["dynamic_gait_plan_action_dims"]
-    if cfg.wbc.trajectory.enabled:
-        layout.arm_action_cd += FEATURE_LAYOUT["trajectory_plan_action_dims"]
     cfg.env.observe_gait_commands = True
     apply_cfg_overrides(cfg, DYNAMIC_GAIT_BIN_CONFIG)
 
 
 def configure_robot_asset(cfg, robot):
-    from .wbc import ROBOT_ASSET_FILES
+    from .wbc import ROBOT_ASSET_FILES, ROBOT_ARM_SPEC
 
     try:
         cfg.asset.file = ROBOT_ASSET_FILES[robot]
     except KeyError as exc:
         raise ValueError("Unknown robot {!r}; expected one of {}".format(robot, sorted(ROBOT_ASSET_FILES))) from exc
+
+    spec = ROBOT_ARM_SPEC[robot]
+    cfg.asset.ee_body_name = spec["ee_body_name"]
+    cfg.arm.ik.ee_local_pos = list(spec["ee_local_pos"])
+    cfg.domain_rand.mount_joint_name = spec["mount_joint_name"]
 
 
 def validate_roboduet_cfg(cfg):
@@ -543,7 +494,7 @@ def validate_roboduet_cfg(cfg):
         raise ValueError("RoboDuet config has unset required fields: {}".format(", ".join(missing)))
 
 
-def build_roboduet_config(args=None, *, options=None, traj_track_reward_scale=5.0, debug=False):
+def build_roboduet_config(args=None, *, options=None, debug=False):
     """Build one finalized RoboDuet config without mutating another build."""
 
     from .go1 import GO1_PROFILE
@@ -563,9 +514,6 @@ def build_roboduet_config(args=None, *, options=None, traj_track_reward_scale=5.
         enable_rot6d(cfg, layout)
     else:
         cfg.use_rot6d = False
-
-    if options.traj_track:
-        enable_traj_track(cfg, layout, traj_track_reward_scale=traj_track_reward_scale)
 
     if options.dyna_gait:
         enable_dyna_gait(cfg, layout, min_frequency=options.dyna_gait_min_frequency)

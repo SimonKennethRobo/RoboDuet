@@ -179,10 +179,7 @@ class Runner:
 
                     actions_dog = actions_train[..., :self.env.cfg.dog.dog_actions]
                     if global_switch.switch_open:
-                        actions_arm = actions_train[..., self.env.cfg.dog.dog_actions:]
-                        if actions_arm.shape[-1] > self.env.num_actions_arm:
-                            self.env.plan(actions_arm[..., -self.env.num_plan_actions:])
-                            actions_arm = actions_arm[..., :self.env.num_actions_arm]
+                        actions_arm = actions_train[..., self.env.cfg.dog.dog_actions:][..., :self.env.num_actions_arm]
                     else:
                         actions_arm = fake_actions_arm
 

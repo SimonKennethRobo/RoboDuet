@@ -305,7 +305,6 @@ class Runner:
                             privileged_obs_arm[:num_train_envs],
                             obs_history_arm[:num_train_envs],
                         )
-                        self.env.plan(actions_arm[..., -self.env.num_plan_actions :])
 
                     dog_obs_dict = self.env.get_dog_observations()
 
@@ -331,11 +330,7 @@ class Runner:
                         deterministic=not self._dog_policy_trainable_this_iteration(),
                     )
 
-                    if global_switch.switch_open and self.env.num_plan_actions > 0:
-                        actions_arm_step = actions_arm[..., : -self.env.num_plan_actions]
-                    else:
-                        actions_arm_step = actions_arm
-                    ret = self.env.step(actions_dog, actions_arm_step)
+                    ret = self.env.step(actions_dog, actions_arm)
                     rewards_dog, rewards_arm, dones, infos = ret
 
                     if global_switch.switch_open:

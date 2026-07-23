@@ -182,8 +182,16 @@ class LeggedRobot(BaseTask):
             torques = torques * self.motor_strengths
             torques = torch.clip(torques, -self.torque_limits, self.torque_limits)
 
+            # Only the arm slice of pos_target is used (legs use torques above).
+            # motor_strengths models actuator TORQUE scaling; multiplying it into
+            # a POSITION target distorts the commanded joint angle by ~+-15%
+            # (~0.2 rad on a ~1.5 rad joint), which the DLS-IK loop cannot
+            # compensate and was the dominant EE-tracking error floor -- so it is
+            # deliberately NOT applied to the arm position command. motor_offsets
+            # (a small +-0.025 rad zero-point error) is kept as a mild, realistic
+            # position disturbance. Arm actuator-strength domain randomization,
+            # if wanted, belongs on the DOF drive stiffness, not the target.
             pos_target = self.joint_pos_target + self.motor_offsets
-            pos_target = pos_target * self.motor_strengths
             pos_target = torch.clip(pos_target, -10, 10)  # max rads
             return torch.concat(
                 (torques[..., : self.num_actions_loco], pos_target[..., self.num_actions_loco :]), dim=-1
@@ -738,12 +746,9 @@ class LeggedRobot(BaseTask):
         if name.startswith("arm_"):
             return True
         return name in {
-            "traj_track",
-            "trajectory_current_tracking",
-            "trajectory_completion_time",
+            "ee_pos_tracking",
+            "ee_rot_tracking",
             "ee_smoothness",
-            "vis_manip_commands_tracking_lpy",
-            "vis_manip_commands_tracking_rpy",
         }
 
     def _update_dog_vel_ref(self):
@@ -920,11 +925,14 @@ class LeggedRobot(BaseTask):
                 self.dof_pos_limits[i, 1] = m + 0.5 * r * self.cfg.rewards.soft_dof_pos_limit
 
             if self.cfg.control.control_type == "M":
-                for i in range(8):
-                    joint_name = f"zarx_j{i + 1}"
-                    joint_idx = self.num_actions_loco + i
-                    props[joint_idx]["stiffness"] = self.cfg.arm.control.stiffness_arm[joint_name]
-                    props[joint_idx]["damping"] = self.cfg.arm.control.damping_arm[joint_name]
+                # Position-drive gains for every arm/gripper DOF, looked up by
+                # the joint's actual name (URDF-specific -- see stiffness_arm in
+                # wbc.py). Covers all DOFs past the 12 leg DOFs.
+                for joint_idx in range(self.num_actions_loco, self.num_dof):
+                    joint_name = self.dof_names[joint_idx]
+                    if joint_name in self.cfg.arm.control.stiffness_arm:
+                        props[joint_idx]["stiffness"] = self.cfg.arm.control.stiffness_arm[joint_name]
+                        props[joint_idx]["damping"] = self.cfg.arm.control.damping_arm[joint_name]
 
             if env_id == 0:
                 dof_frictions = props["friction"] if "friction" in props.dtype.names else np.zeros(len(props))
@@ -1286,20 +1294,13 @@ class LeggedRobot(BaseTask):
         self.env_command_bins[env_ids.cpu().numpy()] = new_bin_inds
         self.env_command_categories[env_ids.cpu().numpy()] = 0
 
-        if not self.cfg.wbc.plan_vel and not self.cfg.wbc.trajectory.enabled:
-            self.commands_dog[env_ids, 0] = new_commands[:, 0]
-            self.commands_dog[env_ids, 1] = new_commands[:, 1]
-            self.commands_dog[env_ids, 2] = new_commands[:, 2]
-            # self.commands_dog[env_ids, :2] *= (torch.norm(self.commands_dog[env_ids, :2], dim=1) > 0.1).unsqueeze(1)
+        self.commands_dog[env_ids, 0] = new_commands[:, 0]
+        self.commands_dog[env_ids, 1] = new_commands[:, 1]
+        self.commands_dog[env_ids, 2] = new_commands[:, 2]
 
-            # # Randomly select 10% of the environment to remain stationary
-            # num_zero_envs = int(0.1 * len(env_ids))
-            # zero_env_ids = torch.randperm(len(env_ids))[:num_zero_envs]
-            # self.commands_dog[env_ids[zero_env_ids], :3] = 0
-
-            zero_mask = torch.rand(len(env_ids), device=self.device) < 0.1
-            if len(zero_mask.nonzero()) > 0:
-                self.commands_dog[env_ids[zero_mask], :3] = 0
+        zero_mask = torch.rand(len(env_ids), device=self.device) < 0.1
+        if len(zero_mask.nonzero()) > 0:
+            self.commands_dog[env_ids[zero_mask], :3] = 0
 
             self.commands_dog[env_ids, 0] *= torch.abs(self.commands_dog[env_ids, 0]) > 0.07
             self.commands_dog[env_ids, 1] *= torch.abs(self.commands_dog[env_ids, 1]) > 0.07
@@ -1847,18 +1848,24 @@ class LeggedRobot(BaseTask):
                 self.d_gains[i] = 0.0
                 continue
 
-            for dof_name in self.cfg.control.stiffness.keys():
-                if dof_name in name:
-                    self.p_gains[i] = (
-                        self.cfg.dog.control.stiffness_leg[dof_name]
-                        if i < self.num_actions_loco
-                        else self.cfg.arm.control.stiffness_arm[dof_name]
-                    )  # [N*m/rad]
-                    self.d_gains[i] = (
-                        self.cfg.dog.control.damping_leg[dof_name]
-                        if i < self.num_actions_loco
-                        else self.cfg.arm.control.damping_arm[dof_name]
-                    )  # [N*m*s/rad]
+            if i < self.num_actions_loco:
+                # Legs: select a gain group by substring (leg DOF names all
+                # contain the group key, e.g. "joint").
+                for dof_name in self.cfg.control.stiffness.keys():
+                    if dof_name in name:
+                        self.p_gains[i] = self.cfg.dog.control.stiffness_leg[dof_name]  # [N*m/rad]
+                        self.d_gains[i] = self.cfg.dog.control.damping_leg[dof_name]  # [N*m*s/rad]
+                        found = True
+            else:
+                # Arm: look up by the joint's exact name. Substring matching is
+                # unsafe here because x5_joint* names contain the leg key
+                # "joint". (In control_type "M" the arm slice is position-driven
+                # via _process_dof_props, so these p/d gains only feed the
+                # torque path for the leg slice; the arm entries stay correct
+                # for any consumer that reads them.)
+                if name in self.cfg.arm.control.stiffness_arm:
+                    self.p_gains[i] = self.cfg.arm.control.stiffness_arm[name]  # [N*m/rad]
+                    self.d_gains[i] = self.cfg.arm.control.damping_arm[name]  # [N*m*s/rad]
                     found = True
 
             if not found:
@@ -2266,6 +2273,14 @@ class LeggedRobot(BaseTask):
         self.dof_names = self.gym.get_asset_dof_names(self.robot_asset)
         self.num_bodies = len(body_names)
         self.num_dofs = len(self.dof_names)
+        # Resolve the EE body index by name (body ordering is URDF-specific, so
+        # the __init__ default of 23 is only a placeholder). end_effector_state
+        # tracks this body plus the fixed gripper offset (see WBCEnv).
+        ee_body_name = getattr(self.cfg.asset, "ee_body_name", None)
+        if ee_body_name is not None:
+            if ee_body_name not in body_names:
+                raise ValueError(f"asset.ee_body_name '{ee_body_name}' not in body_names: {body_names}")
+            self.ee_idx = body_names.index(ee_body_name)
         feet_names = [s for s in body_names if self.cfg.asset.foot_name in s]
         penalized_contact_names = []
         for name in self.cfg.asset.penalize_contacts_on:

@@ -125,7 +125,7 @@ def main(args):
     args.seed = set_seed(args.seed)
     args.tags.append(f"seed{args.seed}")
 
-    cfg = build_roboduet_config(args, traj_track_reward_scale=5.0, debug=args.debug)
+    cfg = build_roboduet_config(args, debug=args.debug)
     cfg.env.arm_policy_enabled = args.train_stage != "stage1"
     cfg.env.record_video = args.video
     if not cfg.env.record_video:
@@ -230,8 +230,6 @@ def main(args):
             f"{MINI_GYM_ROOT_DIR}/go1_gym_learn/ppo_cse_automatic/dog_ac.py", f"{args.log_dir}/scripts/dog_ac.py"
         )
 
-        wandb.run.log_code(f"{args.log_dir}/scripts")
-
         temp_dict = {
             "Cfg": _cfg_snapshot_with_command_limits(cfg),
             "RunnerArgs": vars(RunnerArgs),
@@ -287,7 +285,7 @@ if __name__ == "__main__":
     parser.add_argument("--tags", nargs="+", default=[])
     parser.add_argument("--notes", type=str, default=None)
     parser.add_argument("--seed", type=int, default=-1)
-    parser.add_argument("--robot", type=str, default="go2", choices=["go1", "go2"])
+    parser.add_argument("--robot", type=str, default="go2_x5", choices=["go1", "go2", "go2_x5"])
     parser.add_argument("--video", action="store_true", default=False)
 
     parser.add_argument("--num_envs", type=int, default=4096)
@@ -302,7 +300,6 @@ if __name__ == "__main__":
     parser.add_argument("--stage2_ckpt_path", type=str, default=None)
 
     parser.add_argument("--dyna_gait", action="store_true", default=False)
-    parser.add_argument("--traj_track", action="store_true", default=False)
 
     args = parser.parse_args()
 

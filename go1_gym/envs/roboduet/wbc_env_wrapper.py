@@ -245,9 +245,6 @@ class HistoryWrapper(gym.Wrapper):
             self.env.num_envs, self.env.num_actions_arm, dtype=torch.float, device=self.env.device, requires_grad=False
         )
 
-    def plan(self, obs):
-        return self.env.plan(obs)
-
     def step(self, action_dog, action_arm):
 
         if not global_switch.switch_open:

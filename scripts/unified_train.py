@@ -68,7 +68,7 @@ def train_go1(headless=True):
     args.seed = set_seed(args.seed)
     args.tags.append(f"seed{args.seed}")
 
-    cfg = build_roboduet_config(args, traj_track_reward_scale=1.0)
+    cfg = build_roboduet_config(args)
     Unified2AC_Args.num_actions_arm = cfg.arm.num_actions_arm_cd
     configure_train_stage(args, cfg)
     UnifiedRunnerArgs.num_steps_per_env = args.num_steps_per_env
@@ -123,8 +123,6 @@ def train_go1(headless=True):
             f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet/wbc_env.py",
             f"{args.log_dir}/scripts/wbc_env.py",
         )
-        shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet/observation_builder.py", f"{args.log_dir}/scripts/observation_builder.py")
-        shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet/trajectory_geometry.py", f"{args.log_dir}/scripts/trajectory_geometry.py")
         shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet/utils.py", f"{args.log_dir}/scripts/utils.py")
         shutil.copytree(
             f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/config",
@@ -137,9 +135,6 @@ def train_go1(headless=True):
         shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/go1_gym_learn/ppo_cse_unified/unified2head_ac.py", f"{args.log_dir}/scripts/unified2head_ac.py")
         shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/go1_gym_learn/ppo_cse_unified/ppo.py", f"{args.log_dir}/scripts/ppo.py")
         shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/go1_gym_learn/ppo_cse_unified/rollout_storage.py", f"{args.log_dir}/scripts/rollout_storage.py")
-
-
-        wandb.run.log_code(f"{args.log_dir}/scripts")
 
         temp_dict = {"Cfg": cfg_to_dict(cfg), "RunnerArgs": vars(UnifiedRunnerArgs), "Unified2AC_Args": vars(Unified2AC_Args), "PPO_Args": vars(UnifiedPPO_Args),}
 
@@ -186,11 +181,10 @@ if __name__ == '__main__':
     parser.add_argument('--tags', nargs='+', default=[])
     parser.add_argument('--notes', type=str, default=None)
     parser.add_argument('--seed', type=int, default=-1)
-    parser.add_argument('--robot', type=str, default="go1", choices=["go1", "go2"])
+    parser.add_argument('--robot', type=str, default="go2_x5", choices=["go1", "go2", "go2_x5"])
     parser.add_argument('--train_stage', type=str, default="two_stage", choices=["stage1", "stage2", "two_stage"])
     parser.add_argument('--use_rot6d', action='store_true', default=False)
     parser.add_argument('--dyna_gait', action='store_true', default=False)
-    parser.add_argument('--traj_track', action='store_true', default=False)
 
     args = parser.parse_args()
 
