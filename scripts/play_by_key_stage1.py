@@ -109,12 +109,13 @@ def main(args):
     if n_cmd > 10:
         env.commands_dog[:, 10] = gait_duration_cmd
 
-    env.commands_arm[:, 0] = l_cmd
-    env.commands_arm[:, 1] = p_cmd
-    env.commands_arm[:, 2] = y_cmd
-    env.commands_arm[:, 3] = roll_cmd
-    env.commands_arm[:, 4] = pitch_cmd
-    env.commands_arm[:, 5] = yaw_cmd
+    if hasattr(env, "commands_arm"):
+        env.commands_arm[:, 0] = l_cmd
+        env.commands_arm[:, 1] = p_cmd
+        env.commands_arm[:, 2] = y_cmd
+        env.commands_arm[:, 3] = roll_cmd
+        env.commands_arm[:, 4] = pitch_cmd
+        env.commands_arm[:, 5] = yaw_cmd
 
     if lock_arm:
         print("[arm] LOCKED — zero actions sent every step", flush=True)

@@ -1254,6 +1254,19 @@ class WBCEnv(LeggedRobot):
         J = J.clone()
         J[:, 0:3, :] = J[:, 0:3, :] + torch.cross(J_w, d_world.unsqueeze(-1).expand_as(J_w), dim=1)
         err = torch.cat((self.ee_pos_err, self.ee_rot_err_axis_angle), dim=-1).unsqueeze(-1)  # (N, 6, 1)
+        # Task-space weighting: trade off position vs orientation tracking by
+        # scaling both the Jacobian rows and the error by sqrt(weight). This
+        # solves the weighted damped least squares min ||W^.5 (J dq - err)||^2
+        # + lam^2 ||dq||^2, so a larger pos_weight makes the solver spend the
+        # arm's (coupled, 6-DoF) joint budget reducing position error first,
+        # and vice versa. Equal weights reproduce the unweighted solve exactly.
+        # See arm.ik.pos_weight / rot_weight in docs/PARAM_TUNING.md.
+        sqrt_w = torch.tensor(
+            [self.cfg.arm.ik.pos_weight] * 3 + [self.cfg.arm.ik.rot_weight] * 3,
+            dtype=torch.float, device=self.device,
+        ).sqrt().view(1, 6, 1)
+        J = J * sqrt_w
+        err = err * sqrt_w
         lam2 = self.cfg.arm.ik.damping ** 2
         JJt = torch.bmm(J, J.transpose(1, 2)) + lam2 * torch.eye(6, device=self.device).unsqueeze(0)
         delta_q = torch.bmm(J.transpose(1, 2), torch.linalg.solve(JJt, err)).squeeze(-1)  # (N, num_actions_arm)

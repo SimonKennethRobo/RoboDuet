@@ -23,8 +23,6 @@ GO1_PROFILE = ConfigProfile(
             "RR_calf_joint": -1.5,
         },
         "control.control_type": "P",
-        "control.stiffness": {"joint": 35.0},
-        "control.damping": {"joint": 1.0},
         "control.action_scale": 0.25,
         "control.hip_scale_reduction": 0.5,
         "control.decimation": 4,

@@ -213,9 +213,7 @@ class LeggedRobotDefaults:
 
     class control:
         control_type = 'actuator_net' #'P'  # P: position, V: velocity, T: torques
-        # PD Drive parameters:
-        stiffness = {'joint_a': 10.0, 'joint_b': 15.}  # [N*m/rad]
-        damping = {'joint_a': 1.0, 'joint_b': 1.5}  # [N*m*s/rad]
+        # PD gains live in dog.control.stiffness_leg / arm.control.stiffness_arm.
         # action scale: target angle = actionScale * action + defaultAngle
         action_scale = 0.5
         hip_scale_reduction = 1.0

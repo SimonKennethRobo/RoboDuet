@@ -1851,7 +1851,7 @@ class LeggedRobot(BaseTask):
             if i < self.num_actions_loco:
                 # Legs: select a gain group by substring (leg DOF names all
                 # contain the group key, e.g. "joint").
-                for dof_name in self.cfg.control.stiffness.keys():
+                for dof_name in self.cfg.dog.control.stiffness_leg.keys():
                     if dof_name in name:
                         self.p_gains[i] = self.cfg.dog.control.stiffness_leg[dof_name]  # [N*m/rad]
                         self.d_gains[i] = self.cfg.dog.control.damping_leg[dof_name]  # [N*m*s/rad]

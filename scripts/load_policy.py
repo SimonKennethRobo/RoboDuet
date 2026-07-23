@@ -151,7 +151,6 @@ def load_env(logdir, wrapper, headless=False, device='cuda:0', robot=None):
     cfg.wbc.rewards.use_terminal_body_height = False
     cfg.wbc.rewards.use_terminal_roll = False
     cfg.wbc.rewards.use_terminal_pitch = False
-    cfg.arm.commands.T_traj = [20000, 30000]
     # Cfg.sim.physx["num_position_iterations"] = 8
     # Cfg.sim.physx["num_velocity_iterations"] = 8
 
