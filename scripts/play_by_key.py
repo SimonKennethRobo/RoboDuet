@@ -59,11 +59,12 @@ def play_go1(args):
 
             obs = env.get_arm_observations()
             actions_arm = arm_policy(obs)
-            env.plan(actions_arm[..., -2:])
+            if env.num_plan_actions > 0:
+                env.plan(actions_arm)
 
             dog_obs = env.get_dog_observations()
             actions_dog = dog_policy(dog_obs)
-        ret = env.step(actions_dog, actions_arm[...,:-2], )
+        ret = env.step(actions_dog, actions_arm[..., : env.env.num_actions_arm])
 
 
 
@@ -77,4 +78,3 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
     play_go1(args)
-

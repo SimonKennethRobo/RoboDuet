@@ -168,6 +168,7 @@ class RoboDuetRuntimeOptions:
     dyna_gait: bool = False
     dyna_gait_min_frequency: float = 0.0
     stage1_arm_curriculum: bool = True
+    goal_reaching: bool = False
 
     @classmethod
     def from_args(cls, args):
@@ -178,6 +179,7 @@ class RoboDuetRuntimeOptions:
             dyna_gait=getattr(args, "dyna_gait", False),
             dyna_gait_min_frequency=getattr(args, "dyna_gait_min_frequency", 0.0),
             stage1_arm_curriculum=not getattr(args, "no_stage1_arm_curriculum", False),
+            goal_reaching=getattr(args, "goal_reaching", False),
         )
 
 
@@ -236,10 +238,34 @@ def env_obs_dim_parts(cfg):
 
 
 def arm_obs_dim_parts(cfg):
-    """Task-space arm observations (DLS-IK MVP, project-design-v3.md §8.1
-    trimmed to what this round implements): current task-space error, the
-    target's absolute pose (base frame), and the arm's own joint state.
-    Base is not moving this round, so there is no v_ff/ρ/preview block yet."""
+    """Single source of truth for actor-facing arm observations.
+
+    Goal-reaching mode adds whole-body state and coordination diagnostics for
+    the 12D upper actor. The default layout stays compatible with the legacy
+    6D DLS-residual policy.
+    """
+    if getattr(getattr(cfg.wbc, "goal_reaching", None), "enabled", False):
+        return {
+            "ee_pos_err_body": 3,
+            "ee_rot_err_body": 3,
+            "ee_twist_body": 6,
+            "ee_target_pos_body": 3,
+            "ee_target_rot6d_body": 6,
+            "arm_dof_pos": cfg.arm.num_actions_arm,
+            "arm_dof_vel": cfg.arm.num_actions_arm,
+            "base_roll_pitch_height": 3,
+            "base_twist": 6,
+            "dog_vel_residual": 3,
+            "gait_phase": 2,
+            "dog_contact_states": 4,
+            "manipulability": 1,
+            "joint_limit_distance": cfg.arm.num_actions_arm,
+            "rho": 1,
+            "arm_ema_motion": cfg.arm.num_actions_arm,
+            "base_feedforward": 3,
+            "arm_actions": cfg.arm.num_actions_arm_cd,
+        }
+
     parts = {
         "ee_pos_err": 3,
         "ee_rot_err_axis_angle": 3,
@@ -478,6 +504,17 @@ def enable_dyna_gait(cfg, layout, min_frequency=0.0):
     apply_cfg_overrides(cfg, DYNAMIC_GAIT_BIN_CONFIG)
 
 
+def enable_goal_reaching(cfg, layout):
+    from .wbc import FEATURE_LAYOUT, GOAL_REACHING_REWARD_CONFIG
+
+    if not cfg.commands.use_dynamic_gait:
+        raise ValueError("goal_reaching requires dynamic gait commands")
+    cfg.wbc.goal_reaching.enabled = True
+    layout.arm_action_cd = cfg.arm.num_actions_arm + FEATURE_LAYOUT["goal_reaching_plan_action_dims"]
+    for name, scale in GOAL_REACHING_REWARD_CONFIG.items():
+        setattr(cfg.wbc.reward_scales, name, scale)
+
+
 def configure_robot_asset(cfg, robot):
     from .wbc import ROBOT_ASSET_FILES, ROBOT_ARM_SPEC
 
@@ -528,8 +565,10 @@ def build_roboduet_config(args=None, *, options=None, debug=False):
     else:
         cfg.use_rot6d = False
 
-    if options.dyna_gait:
+    if options.dyna_gait or options.goal_reaching:
         enable_dyna_gait(cfg, layout, min_frequency=options.dyna_gait_min_frequency)
+    if options.goal_reaching:
+        enable_goal_reaching(cfg, layout)
 
     layout.finalize(cfg)
     configure_privileged_obs_dims(cfg)

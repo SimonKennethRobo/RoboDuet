@@ -297,7 +297,7 @@ class LeggedRobot(BaseTask):
 
     def _arm_resample_commands_train_hook(self, env_ids):
         """Per-episode arm command resampling alongside _resample_commands."""
-        pass
+        return False
 
     def _arm_post_dof_randomization_hook(self, env_ids):
         """Let arm tasks override generic DOF randomization for selected envs."""
@@ -749,6 +749,14 @@ class LeggedRobot(BaseTask):
             "ee_pos_tracking",
             "ee_rot_tracking",
             "ee_smoothness",
+            "goal_pos_l2",
+            "reachability_barrier",
+            "manipulability",
+            "joint_limit_barrier",
+            "rho_rate",
+            "upper_action_rate",
+            "delta_vel_magnitude",
+            "posture_command_rate",
         }
 
     def _update_dog_vel_ref(self):
@@ -1251,7 +1259,7 @@ class LeggedRobot(BaseTask):
     def _resample_commands(self, env_ids):
         if len(env_ids) == 0:
             return
-        self._arm_resample_commands_train_hook(env_ids)
+        arm_controls_commands = bool(self._arm_resample_commands_train_hook(env_ids))
 
         timesteps = int(self.cfg.commands.resampling_time / self.dt)
         ep_len = min(self.cfg.env.max_episode_length, timesteps)
@@ -1294,19 +1302,20 @@ class LeggedRobot(BaseTask):
         self.env_command_bins[env_ids.cpu().numpy()] = new_bin_inds
         self.env_command_categories[env_ids.cpu().numpy()] = 0
 
-        self.commands_dog[env_ids, 0] = new_commands[:, 0]
-        self.commands_dog[env_ids, 1] = new_commands[:, 1]
-        self.commands_dog[env_ids, 2] = new_commands[:, 2]
+        if not arm_controls_commands:
+            self.commands_dog[env_ids, 0] = new_commands[:, 0]
+            self.commands_dog[env_ids, 1] = new_commands[:, 1]
+            self.commands_dog[env_ids, 2] = new_commands[:, 2]
 
         zero_mask = torch.rand(len(env_ids), device=self.device) < 0.1
-        if len(zero_mask.nonzero()) > 0:
+        if not arm_controls_commands and len(zero_mask.nonzero()) > 0:
             self.commands_dog[env_ids[zero_mask], :3] = 0
 
             self.commands_dog[env_ids, 0] *= torch.abs(self.commands_dog[env_ids, 0]) > 0.07
             self.commands_dog[env_ids, 1] *= torch.abs(self.commands_dog[env_ids, 1]) > 0.07
             self.commands_dog[env_ids, 2] *= torch.abs(self.commands_dog[env_ids, 2]) > 0.1
 
-        else:
+        elif not arm_controls_commands:
             if not global_switch.switch_open:
                 self.commands_dog[env_ids, 0] = new_commands[:, 0]
                 self.commands_dog[env_ids, 1] = new_commands[:, 1]
@@ -1325,12 +1334,12 @@ class LeggedRobot(BaseTask):
                 self.commands_dog[env_ids, 1] *= torch.abs(self.commands_dog[env_ids, 1]) > 0.07
                 self.commands_dog[env_ids, 2] *= torch.abs(self.commands_dog[env_ids, 2]) > 0.1
 
-        if not global_switch.switch_open:
+        if not global_switch.switch_open and not arm_controls_commands:
             self.commands_dog[env_ids, 3] = new_commands[:, 3]
             self.commands_dog[env_ids, 4] = new_commands[:, 4]
             self.commands_dog[env_ids, 5] = new_commands[:, 5]  # body_height_cmd
 
-        if self.cfg.commands.use_dynamic_gait and not global_switch.switch_open:
+        if self.cfg.commands.use_dynamic_gait and not global_switch.switch_open and not arm_controls_commands:
             self.commands_dog[env_ids, 6] = new_commands[:, 6]
             self.commands_dog[env_ids, 7] = new_commands[:, 7]
             self.commands_dog[env_ids, 8] = new_commands[:, 8]

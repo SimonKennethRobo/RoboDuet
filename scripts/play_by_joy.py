@@ -590,7 +590,8 @@ def main(args):
             else:
                 obs = env.get_arm_observations()
                 actions_arm = arm_policy(obs).to(env.env.device)
-                env.plan(actions_arm[..., -2:])
+                if env.num_plan_actions > 0:
+                    env.plan(actions_arm)
 
             dog_obs = env.get_dog_observations()
             actions_dog = dog_policy(dog_obs).to(env.env.device)
@@ -598,7 +599,7 @@ def main(args):
         if lock_arm or arm_policy is None:
             env.step(actions_dog, actions_arm)
         else:
-            env.step(actions_dog, actions_arm[..., :-2])
+            env.step(actions_dog, actions_arm[..., : env.env.num_actions_arm])
 
         rerun_logger.log(env)
 

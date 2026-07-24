@@ -40,6 +40,8 @@ dog_cmd_idx = {
     "gait_params": slice(6, 11),
 }
 
+goal_plan_channel_names = ("vx", "vy", "yaw", "height", "pitch", "roll")
+
 
 class WBCEnv(LeggedRobot):
     def __init__(
@@ -99,17 +101,32 @@ class WBCEnv(LeggedRobot):
         return ee_twist_body_6d(self.end_effector_state, self.root_states, self.base_quat, self.num_envs)
 
     def _arm_target_pos_world(self, env_ids=None):
-        """World-frame position of the current arm target (arm_target_pos_body
-        re-expressed each call from the current base pose, so it never drifts
-        with world localization -- see _resample_arm_target / _solve_arm_dls_ik)."""
+        """World-frame position of the current target.
+
+        Legacy 6D reaching keeps a base-relative target. Whole-body goal
+        reaching locks the sampled target in world coordinates so moving the
+        base changes reachability instead of dragging the goal along.
+        """
+        if self._goal_reaching_enabled():
+            return self.arm_goal_pos_world if env_ids is None else self.arm_goal_pos_world[env_ids]
         if env_ids is None:
             return self.base_pos + quat_apply(self.base_quat, self.arm_target_pos_body)
         return self.base_pos[env_ids] + quat_apply(self.base_quat[env_ids], self.arm_target_pos_body[env_ids])
 
     def _arm_target_quat_world(self, env_ids=None):
+        if self._goal_reaching_enabled():
+            return self.arm_goal_quat_world if env_ids is None else self.arm_goal_quat_world[env_ids]
         if env_ids is None:
             return quat_mul(self.base_quat, self.arm_target_quat_body)
         return quat_mul(self.base_quat[env_ids], self.arm_target_quat_body[env_ids])
+
+    def _goal_reaching_enabled(self):
+        goal_cfg = getattr(self.cfg.wbc, "goal_reaching", None)
+        return bool(
+            goal_cfg is not None
+            and getattr(goal_cfg, "enabled", False)
+            and getattr(self, "num_plan_actions", 0) == 6
+        )
 
     def _get_object_pose_in_ee(self):
         env_ids = torch.arange(self.num_envs, device=self.device)
@@ -129,27 +146,38 @@ class WBCEnv(LeggedRobot):
     # ============================================================
 
     def _resample_arm_target(self, env_ids):
-        """Sample a static per-episode SE(3) target as an absolute box in the
-        base frame: position uniform in arm.target.pos_range, orientation an
-        absolute XYZ-Euler box (arm.target.roll/pitch/yaw_ee) about base-frame
-        identity. No reachability gating -- targets may fall outside the 6-DoF
-        arm's workspace, and the IK/policy learn to track them as closely as
-        the arm allows. See PARAM_TUNING.md."""
+        """Sample a static SE(3) target from the active task's independent box.
+
+        Legacy arm reaching reads ``arm.target``. Whole-body goal reaching
+        reads ``wbc.goal_reaching`` and then locks the sampled pose in world
+        coordinates. No reachability gating is applied.
+        """
         if len(env_ids) == 0:
             return
         target_cfg = self.cfg.arm.target
-        pos_range = torch.tensor(target_cfg.pos_range, dtype=torch.float, device=self.device)
+        goal_cfg = getattr(self.cfg.wbc, "goal_reaching", None)
+        active_target_cfg = goal_cfg if self._goal_reaching_enabled() else target_cfg
+        pos_range = torch.tensor(active_target_cfg.pos_range, dtype=torch.float, device=self.device)
         rand_pos = torch.rand((len(env_ids), 3), device=self.device)
         self.arm_target_pos_body[env_ids] = pos_range[:, 0] + (pos_range[:, 1] - pos_range[:, 0]) * rand_pos
 
         roll = torch_rand_float(
-            target_cfg.roll_ee[0], target_cfg.roll_ee[1], (len(env_ids), 1), device=self.device
+            active_target_cfg.roll_ee[0],
+            active_target_cfg.roll_ee[1],
+            (len(env_ids), 1),
+            device=self.device,
         ).squeeze(-1)
         pitch = torch_rand_float(
-            target_cfg.pitch_ee[0], target_cfg.pitch_ee[1], (len(env_ids), 1), device=self.device
+            active_target_cfg.pitch_ee[0],
+            active_target_cfg.pitch_ee[1],
+            (len(env_ids), 1),
+            device=self.device,
         ).squeeze(-1)
         yaw = torch_rand_float(
-            target_cfg.yaw_ee[0], target_cfg.yaw_ee[1], (len(env_ids), 1), device=self.device
+            active_target_cfg.yaw_ee[0],
+            active_target_cfg.yaw_ee[1],
+            (len(env_ids), 1),
+            device=self.device,
         ).squeeze(-1)
         zero_vec = torch.zeros_like(roll)
         q1 = quat_from_euler_xyz(zero_vec, zero_vec, yaw)
@@ -157,7 +185,18 @@ class WBCEnv(LeggedRobot):
         q3 = quat_from_euler_xyz(roll, zero_vec, zero_vec)
         self.arm_target_quat_body[env_ids] = quat_mul(q1, quat_mul(q2, q3)).reshape(-1, 4)
 
-        resample_lo, resample_hi = self.cfg.arm.target.resample_time_s
+        if self._goal_reaching_enabled():
+            self.arm_goal_pos_world[env_ids] = self.base_pos[env_ids] + quat_apply(
+                self.base_quat[env_ids], self.arm_target_pos_body[env_ids]
+            )
+            self.arm_goal_quat_world[env_ids] = quat_mul(
+                self.base_quat[env_ids], self.arm_target_quat_body[env_ids]
+            )
+            # The new goal is a discontinuity, not physical rho motion.
+            # Re-initialize rho_rate on the next diagnostic update.
+            self.goal_rho_valid[env_ids] = False
+
+        resample_lo, resample_hi = active_target_cfg.resample_time_s
         self.arm_target_resample_steps[env_ids] = torch.randint(
             int(resample_lo / self.dt), int(resample_hi / self.dt) + 1, (len(env_ids),), device=self.device
         )
@@ -192,6 +231,148 @@ class WBCEnv(LeggedRobot):
                 f"dur={float(c[10]):.2f}",
             ]
         return "  ".join(parts)
+
+    @staticmethod
+    def _map_unit_action(action, limits):
+        lo, hi = float(limits[0]), float(limits[1])
+        return 0.5 * (lo + hi) + 0.5 * (hi - lo) * torch.clamp(action, -1.0, 1.0)
+
+    def _rate_limit_command(self, target, previous, max_delta):
+        return previous + torch.clamp(target - previous, -float(max_delta), float(max_delta))
+
+    def _smooth_goal_commands(self, indices, values):
+        alpha = float(self.cfg.wbc.goal_reaching.command_smoothing_alpha)
+        self.goal_command_targets[:, indices] = values
+        smoothed = alpha * values + (1.0 - alpha) * self.goal_command_smoothed[:, indices]
+        self.goal_command_smoothed[:, indices] = smoothed
+        self.commands_dog[:, indices] = smoothed
+
+    def _reset_goal_commands(self, env_ids):
+        if not self._goal_reaching_enabled() or len(env_ids) == 0:
+            return
+        neutral = {
+            dog_cmd_idx["x_vel"]: 0.0,
+            dog_cmd_idx["y_vel"]: 0.0,
+            dog_cmd_idx["yaw_vel"]: 0.0,
+            dog_cmd_idx["body_pitch"]: 0.0,
+            dog_cmd_idx["body_roll"]: 0.0,
+            dog_cmd_idx["body_height"]: 0.0,
+            dog_cmd_idx["gait_frequency"]: self.cfg.wbc.goal_reaching.fixed_gait_frequency,
+            dog_cmd_idx["footswing_height"]: self.cfg.wbc.goal_reaching.fixed_footswing_height,
+            dog_cmd_idx["stance_width"]: self.cfg.wbc.goal_reaching.fixed_stance_width,
+            dog_cmd_idx["stance_length"]: 0.5 * sum(self.cfg.commands.limit_stance_length),
+            dog_cmd_idx["gait_duration"]: 0.49,
+        }
+        for index, value in neutral.items():
+            if index < self.commands_dog.shape[1]:
+                self.commands_dog[env_ids, index] = value
+        self.goal_command_targets[env_ids] = self.commands_dog[env_ids]
+        self.goal_command_smoothed[env_ids] = self.commands_dog[env_ids]
+        self.base_feedforward_cmd[env_ids] = 0.0
+        self.delta_velocity_cmd[env_ids] = 0.0
+        self.upper_plan_actions_raw[env_ids] = 0.0
+
+    def _compute_point_goal_base_nom(self):
+        cfg = self.cfg.wbc.goal_reaching
+        mount_offset_body = self.arm_mount_tfs[:, :3]
+        shoulder_world = self.base_pos + quat_apply(self.base_quat, mount_offset_body)
+        displacement_world = self.arm_goal_pos_world - shoulder_world
+        distance = displacement_world.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+        direction_world = displacement_world / distance
+        desired_reach = float(cfg.rho_star) * float(cfg.reach_radius)
+        shoulder_target_world = self.arm_goal_pos_world - direction_world * desired_reach
+        base_target_world = shoulder_target_world - quat_apply(self.base_quat, mount_offset_body)
+        velocity_world = (base_target_world - self.base_pos) / max(float(cfg.response_time_s), 1e-3)
+        velocity_world[:, 2] = 0.0
+
+        rc = 1.0 / (2.0 * np.pi * max(float(cfg.base_nom_filter_hz), 1e-3))
+        alpha = self.dt / (rc + self.dt)
+        velocity_body = quat_apply(quat_conjugate(self.base_quat), velocity_world)
+        target_body = quat_apply(quat_conjugate(self.base_quat), displacement_world)
+        yaw_rate = torch.atan2(target_body[:, 1], target_body[:, 0]) / max(float(cfg.response_time_s), 1e-3)
+        raw = torch.stack((velocity_body[:, 0], velocity_body[:, 1], yaw_rate), dim=-1)
+        self.base_feedforward_cmd[:] = alpha * raw + (1.0 - alpha) * self.base_feedforward_cmd
+
+    def plan(self, upper_action):
+        """Apply the document-aligned upper-policy coordination channels.
+
+        ``upper_action`` is either the full 12D actor output or its final 6D
+        plan slice: dv(3), posture(h/pitch/roll). Gait frequency, swing height
+        and stance width are fixed configurable commands.
+        This must run before dog observations/inference for the current step.
+        """
+        if not self._goal_reaching_enabled():
+            return
+        if upper_action.shape[-1] == self.cfg.arm.num_actions_arm_cd:
+            self.arm_policy_actions[:] = upper_action
+            plan = upper_action[:, self.num_actions_arm :]
+        elif upper_action.shape[-1] == self.num_plan_actions:
+            plan = upper_action
+            self.arm_policy_actions[:, self.num_actions_arm :] = plan
+        else:
+            raise ValueError(
+                f"Expected {self.cfg.arm.num_actions_arm_cd} full or {self.num_plan_actions} plan actions, "
+                f"got {upper_action.shape[-1]}"
+            )
+
+        plan = plan * self.goal_command_channel_mask
+        self.arm_policy_actions[:, self.num_actions_arm :] = plan
+        self.upper_plan_actions_raw[:] = plan
+        bounded = torch.clamp(plan, -1.0, 1.0)
+        self._compute_point_goal_base_nom()
+
+        dv_limit = torch.tensor(
+            self.cfg.wbc.goal_reaching.delta_vel_limit,
+            dtype=self.commands_dog.dtype,
+            device=self.device,
+        ).view(1, 3)
+        velocity_mask = self.goal_command_channel_mask[:, :3]
+        self.delta_velocity_cmd[:] = bounded[:, :3] * dv_limit
+        velocity_target = (self.base_feedforward_cmd + self.delta_velocity_cmd) * velocity_mask
+        velocity_limits = (
+            self.cfg.commands.limit_vel_x,
+            self.cfg.commands.limit_vel_y,
+            self.cfg.commands.limit_vel_yaw,
+        )
+        for column, limits in enumerate(velocity_limits):
+            velocity_target[:, column].clamp_(float(limits[0]), float(limits[1]))
+        self._smooth_goal_commands([0, 1, 2], velocity_target)
+
+        posture_specs = (
+            (dog_cmd_idx["body_height"], self.cfg.commands.limit_body_height),
+            (dog_cmd_idx["body_pitch"], self.cfg.commands.limit_body_pitch),
+            (dog_cmd_idx["body_roll"], self.cfg.commands.limit_body_roll),
+        )
+        speed = torch.linalg.vector_norm(self.commands_dog[:, :2], dim=-1)
+        high_speed = torch.clamp(
+            speed / max(float(self.cfg.wbc.goal_reaching.high_speed_threshold), 1e-3), 0.0, 1.0
+        )
+        posture_scale = 1.0 - high_speed * (1.0 - float(self.cfg.wbc.goal_reaching.high_speed_posture_scale))
+        posture_values = []
+        for column, (index, limits) in enumerate(posture_specs):
+            if self.goal_command_channel_enabled[3 + column]:
+                target = self._map_unit_action(bounded[:, 3 + column] * posture_scale, limits)
+                target = self._rate_limit_command(
+                    target,
+                    self.goal_command_smoothed[:, index],
+                    self.cfg.wbc.goal_reaching.posture_rate_limit[column],
+                )
+            else:
+                target = torch.zeros_like(bounded[:, 3 + column])
+            posture_values.append(target)
+        self._smooth_goal_commands(
+            [spec[0] for spec in posture_specs], torch.stack(posture_values, dim=-1)
+        )
+
+        fixed_commands = {
+            dog_cmd_idx["gait_frequency"]: self.cfg.wbc.goal_reaching.fixed_gait_frequency,
+            dog_cmd_idx["footswing_height"]: self.cfg.wbc.goal_reaching.fixed_footswing_height,
+            dog_cmd_idx["stance_width"]: self.cfg.wbc.goal_reaching.fixed_stance_width,
+        }
+        for index, value in fixed_commands.items():
+            self.goal_command_targets[:, index] = value
+            self.goal_command_smoothed[:, index] = value
+            self.commands_dog[:, index] = value
 
     # ============================================================
     # EE force / arm action curriculum
@@ -390,6 +571,25 @@ class WBCEnv(LeggedRobot):
     def _arm_init_buffers_hook(self):
         self.arm_time_buf = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
         self.force_time_buf = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
+        self.num_plan_actions = self.cfg.arm.num_actions_arm_cd - self.num_actions_arm
+        if self.num_plan_actions not in (0, 6):
+            raise ValueError(
+                "Upper policy must use either the legacy 6D arm layout or the "
+                f"12D goal-reaching layout; got {self.cfg.arm.num_actions_arm_cd} actions"
+            )
+        if self.num_plan_actions:
+            channel_cfg = getattr(self.cfg.wbc.goal_reaching, "command_channels", None)
+            self.goal_command_channel_enabled = tuple(
+                bool(getattr(channel_cfg, name, True)) for name in goal_plan_channel_names
+            )
+            self.goal_command_channel_mask = torch.tensor(
+                self.goal_command_channel_enabled,
+                dtype=torch.float,
+                device=self.device,
+            ).view(1, -1)
+        else:
+            self.goal_command_channel_enabled = ()
+            self.goal_command_channel_mask = torch.zeros(1, 0, dtype=torch.float, device=self.device)
 
         self.stage1_arm_target_offset = torch.zeros(
             self.num_envs, self.num_actions_arm, dtype=torch.float, device=self.device, requires_grad=False
@@ -406,6 +606,9 @@ class WBCEnv(LeggedRobot):
         self.arm_target_pos_body = torch.zeros(self.num_envs, 3, dtype=torch.float, device=self.device, requires_grad=False)
         self.arm_target_quat_body = torch.zeros(self.num_envs, 4, dtype=torch.float, device=self.device, requires_grad=False)
         self.arm_target_quat_body[:, 3] = 1.0
+        self.arm_goal_pos_world = torch.zeros_like(self.arm_target_pos_body)
+        self.arm_goal_quat_world = torch.zeros_like(self.arm_target_quat_body)
+        self.arm_goal_quat_world[:, 3] = 1.0
         self.arm_target_resample_steps = torch.full(
             (self.num_envs,), 10**9, dtype=torch.long, device=self.device, requires_grad=False
         )
@@ -426,6 +629,31 @@ class WBCEnv(LeggedRobot):
         # Raw (pre-IK-combine) policy action for the arm, kept only for the
         # arm_control_limits saturation reward -- see _apply_stage2_arm_ik_action.
         self.arm_residual_raw = torch.zeros(self.num_envs, self.num_actions_arm, dtype=torch.float, device=self.device, requires_grad=False)
+        self.arm_policy_actions = torch.zeros(
+            self.num_envs,
+            self.cfg.arm.num_actions_arm_cd,
+            dtype=torch.float,
+            device=self.device,
+            requires_grad=False,
+        )
+        self.last_arm_policy_actions = torch.zeros_like(self.arm_policy_actions)
+        self.upper_plan_actions_raw = torch.zeros(
+            self.num_envs, self.num_plan_actions, dtype=torch.float, device=self.device, requires_grad=False
+        )
+        self.base_feedforward_cmd = torch.zeros(self.num_envs, 3, dtype=torch.float, device=self.device)
+        self.delta_velocity_cmd = torch.zeros_like(self.base_feedforward_cmd)
+        self.goal_command_targets = self.commands_dog.clone()
+        self.goal_command_smoothed = self.commands_dog.clone()
+        self.arm_ema_motion = torch.zeros(
+            self.num_envs, self.num_actions_arm, dtype=torch.float, device=self.device
+        )
+        self.goal_rho = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.goal_rho_prev = torch.zeros_like(self.goal_rho)
+        self.goal_rho_valid = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.goal_manipulability = torch.zeros_like(self.goal_rho)
+        self.goal_joint_limit_distance = torch.zeros(
+            self.num_envs, self.num_actions_arm, dtype=torch.float, device=self.device
+        )
 
         # Jacobian MUST be acquired before the first gym.simulate() call --
         # acquiring it lazily later silently returns an all-zero tensor
@@ -529,8 +757,20 @@ class WBCEnv(LeggedRobot):
         if global_switch.switch_open:
             self.gym.refresh_jacobian_tensors(self.sim)
             self._update_ee_task_space_error()
+            if self._goal_reaching_enabled():
+                self._update_goal_reaching_diagnostics()
             self.prev_ee_twist_body[:] = self.get_ee_twist_body()
             due = self.arm_time_buf >= self.arm_target_resample_steps
+            if self._goal_reaching_enabled():
+                goal_cfg = self.cfg.wbc.goal_reaching
+                reached = (
+                    torch.linalg.vector_norm(self.ee_pos_err, dim=-1)
+                    < float(goal_cfg.success_pos_threshold)
+                ) & (
+                    torch.linalg.vector_norm(self.ee_rot_err_axis_angle, dim=-1)
+                    < float(goal_cfg.success_rot_threshold)
+                )
+                due |= reached
             if torch.any(due):
                 self._resample_arm_target(due.nonzero(as_tuple=False).flatten())
 
@@ -540,7 +780,8 @@ class WBCEnv(LeggedRobot):
     def _arm_reset_hook(self, env_ids):
         # Absolute box target: independent of the post-reset arm pose, so sample
         # it right here rather than deferring to the first post-physics step.
-        self._resample_arm_target(env_ids)
+        if not self._goal_reaching_enabled():
+            self._resample_arm_target(env_ids)
         # stage1_arm_target_offset / vel / accel are re-initialised in
         # _arm_post_reset_refresh_hook (after the randomised dof_pos is known).
         self._resample_stage1_ee_payload(env_ids)
@@ -626,6 +867,15 @@ class WBCEnv(LeggedRobot):
         self.stage1_arm_target_offset[env_ids] = self.stage1_arm_fixed_dof_pos[env_ids] - arm_default
         self.stage1_arm_target_vel[env_ids] = 0.0
         self.stage1_arm_target_accel[env_ids] = 0.0
+        if self._goal_reaching_enabled():
+            self._resample_arm_target(env_ids)
+            self._reset_goal_commands(env_ids)
+            self.arm_policy_actions[env_ids] = 0.0
+            self.last_arm_policy_actions[env_ids] = 0.0
+            self.arm_ema_motion[env_ids] = 0.0
+            self.goal_rho[env_ids] = 0.0
+            self.goal_rho_prev[env_ids] = 0.0
+            self.goal_rho_valid[env_ids] = False
 
     def _randomize_arm_dof_props(self, env_ids):
         """Override arm DOF slice in Kp/Kd/strength/offset buffers with stage-specific ranges."""
@@ -664,15 +914,19 @@ class WBCEnv(LeggedRobot):
         return
 
     def _arm_resample_commands_train_hook(self, env_ids):
-        # No-op this round: base does not move (no v_ff/posture output from
-        # the arm policy yet -- see project-design-v3.md §5, deferred).
-        pass
+        if self._goal_reaching_enabled() and global_switch.switch_open:
+            self._reset_goal_commands(env_ids)
+            return True
+        return False
 
     def _get_privileged_dof_slice(self, policy):
         if policy == "dog":
             return slice(0, self.num_actions_loco)
         if policy == "arm":
-            return slice(self.num_actions_loco, self.num_actions_loco + self.cfg.arm.num_actions_arm_cd)
+            # Privileged physics terms index robot DOFs, not actor outputs.
+            # Coordination channels after the first six actions have no
+            # corresponding joints and must never widen this slice.
+            return slice(self.num_actions_loco, self.num_actions_loco + self.num_actions_arm)
         raise ValueError(f"Unknown privileged observation policy: {policy}")
 
     def _get_physics_privileged_observations(self, policy):
@@ -955,7 +1209,9 @@ class WBCEnv(LeggedRobot):
         return obs_buf
 
     def _arm_step_end_hook(self):
-        pass
+        if self._goal_reaching_enabled():
+            self.last_arm_policy_actions[:] = self.arm_policy_actions
+            self.goal_rho_prev[:] = self.goal_rho
 
     def _arm_init_performance_metrics_hook(self):
         for name in ("ee_position_sq_error", "ee_orientation_sq_error", "ee_tracking_samples"):
@@ -1218,6 +1474,11 @@ class WBCEnv(LeggedRobot):
         self.ee_pos_err[:] = target_pos_world - self.end_effector_state[:, :3]
         self.ee_rot_err_axis_angle[:] = quat_error_axis_angle(target_quat_world, self.end_effector_state[:, 3:7])
 
+        if self._goal_reaching_enabled():
+            base_inv = quat_conjugate(self.base_quat)
+            self.arm_target_pos_body[:] = quat_apply(base_inv, target_pos_world - self.base_pos)
+            self.arm_target_quat_body[:] = quat_mul(base_inv, target_quat_world)
+
         if self.cfg.use_rot6d:
             target_ori_body = quat_xyzw_to_rot6d(self.arm_target_quat_body)
         else:
@@ -1225,6 +1486,28 @@ class WBCEnv(LeggedRobot):
             identity_quat[:, 3] = 1.0
             target_ori_body = quat_error_axis_angle(self.arm_target_quat_body, identity_quat)
         self.commands_arm_obs[:] = torch.cat((self.arm_target_pos_body, target_ori_body), dim=-1)
+
+    def _update_goal_reaching_diagnostics(self):
+        mount_offset_body = self.arm_mount_tfs[:, :3]
+        shoulder_world = self.base_pos + quat_apply(self.base_quat, mount_offset_body)
+        reach = max(float(self.cfg.wbc.goal_reaching.reach_radius), 1e-3)
+        self.goal_rho[:] = torch.linalg.vector_norm(self.arm_goal_pos_world - shoulder_world, dim=-1) / reach
+        first_sample = ~self.goal_rho_valid
+        self.goal_rho_prev[first_sample] = self.goal_rho[first_sample]
+        self.goal_rho_valid[:] = True
+
+        J, arm_slice = self._arm_jacobian()
+        singular_values = torch.linalg.svdvals(J)
+        self.goal_manipulability[:] = torch.prod(singular_values, dim=-1)
+
+        q = self.dof_pos[:, arm_slice]
+        lo = self.dof_pos_limits[arm_slice, 0].unsqueeze(0)
+        hi = self.dof_pos_limits[arm_slice, 1].unsqueeze(0)
+        span = (hi - lo).clamp_min(1e-6)
+        self.goal_joint_limit_distance[:] = torch.minimum(q - lo, hi - q).clamp_min(0.0) / span
+        self.arm_ema_motion[:] = 0.95 * self.arm_ema_motion + 0.05 * (
+            self.dof_vel[:, arm_slice] * self.dt
+        )
 
     def _solve_arm_dls_ik_step(self):
         """One damped-least-squares differential correction toward the
@@ -1285,6 +1568,7 @@ class WBCEnv(LeggedRobot):
         _, arm_slice = self._arm_jacobian()
         delta_q_ik = self._solve_arm_dls_ik_step()
         self.arm_residual_raw[:] = self.actions[:, arm_slice]
+        self.arm_policy_actions[:, : self.num_actions_arm] = self.arm_residual_raw
         delta_q_residual = torch.tanh(self.arm_residual_raw) * self.cfg.arm.ik.residual_scale
         q_target = self.dof_pos[:, arm_slice] + delta_q_ik + delta_q_residual
         arm_default = self.default_dof_pos[:, arm_slice]
@@ -1319,18 +1603,53 @@ class WBCEnv(LeggedRobot):
         arm_slice = slice(self.num_actions_loco, self.num_actions_loco + self.num_actions_arm)
         target_rot6d_body = quat_xyzw_to_rot6d(self.arm_target_quat_body)
 
-        obs_buf = torch.cat(
-            (
-                self.ee_pos_err,
-                self.ee_rot_err_axis_angle,
-                self.arm_target_pos_body,
-                target_rot6d_body,
-                (self.dof_pos[:, arm_slice] - self.default_dof_pos[:, arm_slice]) * self.obs_scales.dof_pos,
-                self.dof_vel[:, arm_slice] * self.obs_scales.dof_vel,
-                self.actions[:, arm_slice],
-            ),
-            dim=-1,
-        )
+        if self._goal_reaching_enabled():
+            base_inv = quat_conjugate(self.base_quat)
+            ee_pos_err_body = quat_apply(base_inv, self.ee_pos_err)
+            ee_rot_err_body = quat_apply(base_inv, self.ee_rot_err_axis_angle)
+            ee_twist_body = self.get_ee_twist_body()
+            contact_states, vel_residual = self._arm_dog_state_obs_terms()
+            phase = 2.0 * np.pi * self.gait_indices
+            gait_phase = torch.stack((torch.sin(phase), torch.cos(phase)), dim=-1)
+            obs_buf = torch.cat(
+                (
+                    ee_pos_err_body,
+                    ee_rot_err_body,
+                    ee_twist_body,
+                    self.arm_target_pos_body,
+                    target_rot6d_body,
+                    (self.dof_pos[:, arm_slice] - self.default_dof_pos[:, arm_slice])
+                    * self.obs_scales.dof_pos,
+                    self.dof_vel[:, arm_slice] * self.obs_scales.dof_vel,
+                    torch.stack((self.roll, self.pitch, self.base_pos[:, 2]), dim=-1),
+                    self.base_lin_vel,
+                    self.base_ang_vel,
+                    vel_residual,
+                    gait_phase,
+                    contact_states,
+                    self.goal_manipulability.unsqueeze(-1),
+                    self.goal_joint_limit_distance,
+                    self.goal_rho.unsqueeze(-1),
+                    self.arm_ema_motion,
+                    self.base_feedforward_cmd,
+                    self.arm_policy_actions,
+                ),
+                dim=-1,
+            )
+        else:
+            obs_buf = torch.cat(
+                (
+                    self.ee_pos_err,
+                    self.ee_rot_err_axis_angle,
+                    self.arm_target_pos_body,
+                    target_rot6d_body,
+                    (self.dof_pos[:, arm_slice] - self.default_dof_pos[:, arm_slice])
+                    * self.obs_scales.dof_pos,
+                    self.dof_vel[:, arm_slice] * self.obs_scales.dof_vel,
+                    self.actions[:, arm_slice],
+                ),
+                dim=-1,
+            )
 
         if self.cfg.env.observe_two_prev_actions:
             obs_buf = torch.cat((obs_buf, self.last_actions), dim=-1)
@@ -1354,7 +1673,10 @@ class WBCEnv(LeggedRobot):
 
         # return clipped obs, clipped states (None), rewards, dones and infos
         obs_builder = ObservationBuilder(self, "arm", self.cfg.arm.arm_num_observations)
-        obs_builder.add(obs_buf, *self._arm_dog_state_obs_terms())
+        if self._goal_reaching_enabled():
+            obs_builder.add(obs_buf)
+        else:
+            obs_builder.add(obs_buf, *self._arm_dog_state_obs_terms())
         obs_buf = obs_builder.build()
         if privileged_obs_buf is not None:
             privileged_obs_buf = clip_observation(self, privileged_obs_buf)
@@ -1460,7 +1782,7 @@ class WBCEnv(LeggedRobot):
                 (
                     obs_buf,
                     (self.commands_dog * self.commands_scale_dog)[:, : self.cfg.dog.dog_num_commands],
-                    (self.commands_arm_obs[:, :idx])  # l,p,y,rot6d
+                    (self.commands_arm_obs[:, :idx])
                     if global_switch.switch_open
                     else torch.zeros_like(self.commands_arm_obs[:, :idx]),
                 ),
@@ -1612,4 +1934,3 @@ class WBCEnv(LeggedRobot):
             privileged_obs_buf = clip_observation(self, privileged_obs_buf)
 
         return obs_buf, privileged_obs_buf
-

@@ -245,10 +245,22 @@ class HistoryWrapper(gym.Wrapper):
             self.env.num_envs, self.env.num_actions_arm, dtype=torch.float, device=self.env.device, requires_grad=False
         )
 
+    @property
+    def num_plan_actions(self):
+        return getattr(self.env, "num_plan_actions", 0)
+
+    def plan(self, upper_action):
+        return self.env.plan(upper_action)
+
     def step(self, action_dog, action_arm):
 
         if not global_switch.switch_open:
             action_arm = self.arm_fake_actions
+        elif action_arm.shape[-1] != self.env.num_actions_arm:
+            raise ValueError(
+                f"HistoryWrapper.step expects {self.env.num_actions_arm} physical arm actions after plan(), "
+                f"got {action_arm.shape[-1]}"
+            )
 
         action = torch.concat([action_dog, action_arm], dim=-1)
 

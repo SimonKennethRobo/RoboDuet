@@ -144,13 +144,14 @@ stage-1 训练腿部 policy 时，臂不是简单固定，而是按课程逐步�
 | 参数                                | 含义                                                                                                                                                                                                                                                                                                                                                                                                 | 当前值    |
 | ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------- |
 | `arm.num_actions_arm`             | 臂**执行**的关节残差维数 = env 在 arm slice 上实际施加的 Δq 维度（6 轴 → 6）                                                                                                                                                                                                                                                                                                                 | `6`     |
-| `arm.num_actions_arm_cd`          | 臂**policy actor 的输出宽度**（"cd" = 含协调/plan 通道版本）。actor 输出前 `num_actions_arm` 维当关节残差、其余当 plan 通道（历史上 `v_ff`/posture，取末 2 维经 `env.plan(a[...,-2:])`）。**当前 DLS-IK 架构无 plan 通道**，故 `num_actions_arm_cd == num_actions_arm == 6`。消费：`Unified2AC_Args.num_actions_arm`、actor/loader、privileged arm slice（`wbc_env.py:675`） | `6`     |
+| `arm.num_actions_arm_cd`          | 上层 actor 输出宽度。默认兼容模式为 6；`--goal_reaching` 下为 12：`Δq_arm(6) + Δv_base(3) + posture(height,pitch,roll)(3)`。只有前 6 维进入机械臂执行 slice，其余 6 维由 `WBCEnv.plan()` 在狗 policy 推理前写入四足命令。 | `6` / `12` |
 | `arm.num_privileged_links`        | 进入**臂 critic 特权观测**的臂连杆数（其随机化 link-mass-scale / com-offset 打包进 priv obs）。运行时会与实际臂刚体数断言相等（`wbc_env.py:866`），改臂/改 URDF 连杆数时需同步                                                                                                                                                                                                               | `8`     |
 | `arm.arm_num_observation_history` | 臂观测历史长度                                                                                                                                                                                                                                                                                                                                                                                       | `60`    |
 | `arm.arm_num_commands`            | 暴露给狗 policy 观测的臂命令槽位数                                                                                                                                                                                                                                                                                                                                                                   | `6`     |
 | `arm.use_adaptation_module`       | 是否用 adaptation module（当前关）                                                                                                                                                                                                                                                                                                                                                                   | `False` |
 
-> `num_actions_arm` vs `num_actions_arm_cd`：前者是**环境真正施加**的臂关节残差数，后者是**策略网络输出**的总维数。二者相等仅因当前没有额外协调通道；一旦加回 `v_ff`/posture 输出，`_cd` 会大于 `num_actions_arm`。
+> `num_actions_arm` vs `num_actions_arm_cd`：前者始终是环境真正施加的 6 维臂关节残差；后者是上层
+> actor 总输出宽度。默认模式二者相等，`--goal_reaching` 下 `_cd=12`。
 
 ### 8.1 目标采样（绝对 box SE(3)）
 
@@ -163,9 +164,9 @@ stage-1 训练腿部 policy 时，臂不是简单固定，而是按课程逐步�
 | 参数                           | 含义                                                          | 当前值                                 | 备注                                                                                     |
 | ------------------------------ | ------------------------------------------------------------- | -------------------------------------- | ---------------------------------------------------------------------------------------- |
 | `arm.target.pos_range`       | 位置 box`[[x_lo,x_hi],[y_lo,y_hi],[z_lo,z_hi]]`，m，基座系  | `[[0.0,0.55],[-0.4,0.4],[0.25,0.9]]` | 均匀采样。参考：默认位姿 nominal EE ≈ (0.26,0,0.71)；臂挂载点 (0.1,0,0.1)，臂展约 0.6 m |
-| `arm.target.roll_ee`         | 姿态 roll 范围（rad），绕基座系 identity 的绝对 XYZ-Euler box | `±60°`                             | 绝对姿态，非 delta                                                                       |
-| `arm.target.pitch_ee`        | 姿态 pitch 范围（rad）                                        | `±75°`                             | pitch=0 → 夹爪指向基座 +x（水平向前）                                                   |
-| `arm.target.yaw_ee`          | 姿态 yaw 范围（rad）                                          | `±90°`                             |                                                                                          |
+| `arm.target.roll_ee`         | 普通 arm reaching 的姿态 roll 范围（rad）                     | `±20°`                             | 绝对姿态，非 delta                                                                       |
+| `arm.target.pitch_ee`        | 普通 arm reaching 的姿态 pitch 范围（rad）                    | `±20°`                             | pitch=0 → 夹爪指向基座 +x（水平向前）                                                   |
+| `arm.target.yaw_ee`          | 普通 arm reaching 的姿态 yaw 范围（rad）                      | `±20°`                             |                                                                                          |
 | `arm.target.resample_time_s` | episode 内目标重采样周期`[lo,hi]` 秒                        | `[2.0, 3.0]`                         | 每次在`[lo/dt, hi/dt]` 内随机                                                          |
 
 **采样公式**（`_resample_arm_target`）：
@@ -174,6 +175,52 @@ stage-1 训练腿部 policy 时，臂不是简单固定，而是按课程逐步�
 pos  = pos_range[:,0] + (pos_range[:,1]-pos_range[:,0]) * U(0,1)^3
 quat = Rz(yaw) · Ry(pitch) · Rx(roll)          # 绝对姿态，基座系
 ```
+
+### 8.2 全身 6D goal reaching 中间目标
+
+`--goal_reaching` 不生成轨迹，也没有 `γ(s)`、preview 或 time law。每次从
+`wbc.goal_reaching.pos_range` 采样目标时，将当时的基座系 SE(3) 目标转换并锁定到世界系；之后底座运动
+不会拖着目标移动。达到位置/姿态阈值时立即换目标，否则默认每 4–6 s 重采样。
+
+Goal-reaching 的完整 SE(3) 采样范围独立配置在：
+
+```python
+wbc.goal_reaching.pos_range
+wbc.goal_reaching.roll_ee
+wbc.goal_reaching.pitch_ee
+wbc.goal_reaching.yaw_ee
+```
+
+当前 goal 姿态范围均为 `±20°`。这些字段不再复用或影响普通
+`arm.target.roll_ee/pitch_ee/yaw_ee`。
+
+上层仍使用单 critic，动作固定为 12D：
+
+```
+[0:6]   Δq_arm
+[6:9]   Δv_base = (Δvx, Δvy, Δwz)
+[9:12]  posture = (height, pitch, roll)
+```
+
+环境根据当前目标和肩部位置计算低通的 `v_ff`，再把 `v_ff + Δv_base` 写入四足速度命令。posture
+经过范围映射、逐步限速和平滑后写入四足命令。`gait_frequency`、`footswing_height` 和
+`stance_width` 暂不由 actor 输出，分别使用
+`fixed_gait_frequency=4.0`、`fixed_footswing_height=0.06` 和
+`fixed_stance_width=0.35`；`stance_length` 和 `gait_duration` 保持默认中值。
+
+上层到四足的6个可学习辅助命令可以独立消融，且不会改变12D actor 或 dog observation 的宽度：
+
+```python
+wbc.goal_reaching.command_channels.vx
+wbc.goal_reaching.command_channels.vy
+wbc.goal_reaching.command_channels.yaw
+wbc.goal_reaching.command_channels.height
+wbc.goal_reaching.command_channels.pitch
+wbc.goal_reaching.command_channels.roll
+```
+
+关闭某项后，对应 actor 输出槽位仍存在，但环境将其 mask 为0；对应四足 command 也固定为中性值0。
+其中关闭 `vx/vy/yaw` 也会屏蔽该轴的自动 `v_ff`，而不只是屏蔽 policy 的 `Δv`。
 
 **调参方向**
 
@@ -213,8 +260,8 @@ q_target = dof_pos + dq + tanh(policy_raw) * residual_scale
 | `arm.ik.rot_weight`     | 姿态误差任务权重                                 | `3.0`                  | 同上，越大越优先姿态。两者只看**相对比例**（等值 = 未加权，与原行为完全一致）。当前 `3.0` = 姿态优先于位置                    |
 | `arm.ik.ee_local_pos`   | 抓取点在`ee_body_name` 系下的固定偏移（m）     | `[0.1424,0,0.0001057]` | URDF`gripper_center`（fixed joint 被 collapse），EE 状态每步按此平移。与 `ROBOT_ARM_SPEC` 保持一致，由 core 按机器人覆盖 |
 
-**架构说明**：DLS-IK 架构下臂 policy **只输出 Δq 残差**，没有 plan-action 通道（`v_ff`/posture 输出
-延后，见 project-design-v3.md §5），故 `arm.num_actions_arm_cd == arm.num_actions_arm == 6`。
+**架构说明**：DLS-IK 始终只消费 actor 前 6 维作为 `Δq` 残差；`--goal_reaching` 额外提供 7 个
+plan-action 通道，由 `WBCEnv.plan()` 转成四足速度/posture 命令，不进入 DLS。
 
 **已知精度**（`scripts/debug_ik_reach.py`，纯 IK、策略残差置零）
 
@@ -232,8 +279,9 @@ q_target = dof_pos + dq + tanh(policy_raw) * residual_scale
 
 ## 10. WBC 奖励与终止
 
-stage-2 MVP（project-design-v3.md 的 DLS-IK-only 切片）：base 不动，臂 policy 在静态 SE(3) 目标上
-叠加 Δq 残差。`v_ff/ρ`、`γ(s)/s_ref(t)`、multi-critic、安全滤波器本轮**刻意不在范围内**。
+默认 stage-2 仍保留 DLS-IK-only 兼容路径。加 `--goal_reaching` 后训练静态世界系 SE(3) goal
+reaching：上层同时输出臂残差、底座速度修正和 posture，使用单 critic。`γ(s)/s_ref(t)`、轨迹
+preview、multi-critic 和安全滤波器本轮不在范围内。
 
 | 参数                                                        | 含义 / 备注                                                                   |
 | ----------------------------------------------------------- | ----------------------------------------------------------------------------- |

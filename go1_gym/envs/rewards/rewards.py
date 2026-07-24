@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 import numpy as np
 from go1_gym.utils.math_utils import quat_apply_yaw, wrap_to_pi, get_scale_shift
 from isaacgym.torch_utils import *
@@ -142,6 +143,41 @@ class Rewards:
     def _reward_arm_contact(self):
         return self._count_contacts(self.env.arm_contact_indices)
 
+    def _reward_goal_pos_l2(self):
+        return torch.linalg.vector_norm(self.env.ee_pos_err, dim=-1)
+
+    def _reward_reachability_barrier(self):
+        cfg = self.env.cfg.wbc.goal_reaching
+        beta = 0.05
+        return F.softplus((self.env.goal_rho - float(cfg.rho_hi)) / beta) + F.softplus(
+            (float(cfg.rho_lo) - self.env.goal_rho) / beta
+        )
+
+    def _reward_manipulability(self):
+        return torch.log1p(self.env.goal_manipulability)
+
+    def _reward_joint_limit_barrier(self):
+        margin = torch.clamp(0.10 - self.env.goal_joint_limit_distance, min=0.0)
+        return torch.sum(torch.square(margin), dim=-1)
+
+    def _reward_arm_ema_motion(self):
+        return torch.linalg.vector_norm(self.env.arm_ema_motion, dim=-1)
+
+    def _reward_rho_rate(self):
+        return torch.abs(self.env.goal_rho - self.env.goal_rho_prev) / self.env.dt
+
+    def _reward_upper_action_rate(self):
+        return torch.sum(torch.square(self.env.arm_policy_actions - self.env.last_arm_policy_actions), dim=-1)
+
+    def _reward_delta_vel_magnitude(self):
+        return torch.sum(torch.square(self.env.delta_velocity_cmd), dim=-1)
+
+    def _reward_posture_command_rate(self):
+        start = self.env.num_actions_arm + 3
+        current = self.env.arm_policy_actions[:, start : start + 3]
+        previous = self.env.last_arm_policy_actions[:, start : start + 3]
+        return torch.sum(torch.square(current - previous), dim=-1)
+
     def _reward_dof_pos_limits(self):
         # Penalize dof positions too close to the limit
         out_of_limits = -(self.env.dof_pos - self.env.dof_pos_limits[:, 0]).clip(max=0.)  # lower limit
@@ -282,4 +318,3 @@ class Rewards:
         reward = torch.sum(torch.square(err_raibert_heuristic), dim=(1, 2))
 
         return reward
-

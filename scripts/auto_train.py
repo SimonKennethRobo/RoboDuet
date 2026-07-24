@@ -300,6 +300,12 @@ if __name__ == "__main__":
     parser.add_argument("--stage2_ckpt_path", type=str, default=None)
 
     parser.add_argument("--dyna_gait", action="store_true", default=False)
+    parser.add_argument(
+        "--goal_reaching",
+        action="store_true",
+        default=False,
+        help="Train the 12D whole-body upper policy on static world-frame 6D goals.",
+    )
 
     args = parser.parse_args()
 

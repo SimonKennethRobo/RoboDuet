@@ -142,7 +142,6 @@ ROBODUET_OVERRIDES = {
     "dog.priv_observe_dof_damping": False,
     "dog.control.stiffness_leg": {"joint": 35.0},
     "dog.control.damping_leg": {"joint": 1.0},
-    # arm PD gains (union of every registered arm's DOF names)
     "arm.control.stiffness_arm": {
         "zarx_j1": 40.0,
         "zarx_j2": 70.0,
@@ -152,14 +151,14 @@ ROBODUET_OVERRIDES = {
         "zarx_j6": 25.0,
         "zarx_j7": 50.0,
         "zarx_j8": 50.0,
-        "x5_joint1": 40.0,
-        "x5_joint2": 70.0,
-        "x5_joint3": 70.0,
-        "x5_joint4": 25.0,
-        "x5_joint5": 25.0,
-        "x5_joint6": 25.0,
-        "x5_joint8": 50.0,
-        "x5_gripper_joint": 50.0,
+        "x5_joint1": 50.0,
+        "x5_joint2": 50.0,
+        "x5_joint3": 80.0,
+        "x5_joint4": 30.0,
+        "x5_joint5": 20.0,
+        "x5_joint6": 20.0,
+        "x5_joint8": 1000.0,
+        "x5_gripper_joint": 1000.0,
     },
     "arm.control.damping_arm": {
         "zarx_j1": 3.0,
@@ -170,14 +169,14 @@ ROBODUET_OVERRIDES = {
         "zarx_j6": 2.0,
         "zarx_j7": 20.0,
         "zarx_j8": 20.0,
-        "x5_joint1": 3.0,
-        "x5_joint2": 15.0,
-        "x5_joint3": 15.0,
-        "x5_joint4": 2.0,
+        "x5_joint1": 5.0,
+        "x5_joint2": 10.0,
+        "x5_joint3": 10.0,
+        "x5_joint4": 2.5,
         "x5_joint5": 2.0,
-        "x5_joint6": 2.0,
-        "x5_joint8": 20.0,
-        "x5_gripper_joint": 20.0,
+        "x5_joint6": 1.0,
+        "x5_joint8": 100.0,
+        "x5_gripper_joint": 100.0,
     },
     # arm policy layout
     "arm.num_actions_arm": 6,
@@ -188,9 +187,9 @@ ROBODUET_OVERRIDES = {
     "arm.use_adaptation_module": False,
     # arm target sampling (absolute box SE(3))
     "arm.target.pos_range": [[0.0, 0.55], [-0.4, 0.4], [0.25, 0.9]],
-    "arm.target.roll_ee": [-math.radians(60.0), math.radians(60.0)],
-    "arm.target.pitch_ee": [-math.radians(75.0), math.radians(75.0)],
-    "arm.target.yaw_ee": [-math.radians(90.0), math.radians(90.0)],
+    "arm.target.roll_ee": [-math.radians(20.0), math.radians(20.0)],
+    "arm.target.pitch_ee": [-math.radians(20.0), math.radians(20.0)],
+    "arm.target.yaw_ee": [-math.radians(20.0), math.radians(20.0)],
     "arm.target.resample_time_s": [2.0, 3.0],
     # arm DLS-IK controller
     "arm.ik.damping": 0.1,
@@ -223,6 +222,15 @@ ROBODUET_OVERRIDES = {
     "wbc.reward_scales.arm_control_limits": -0.0001,
     "wbc.reward_scales.ee_smoothness": -1e-4,
     "wbc.reward_scales.arm_contact": -1.0,
+    "wbc.reward_scales.goal_pos_l2": 0.0,
+    "wbc.reward_scales.reachability_barrier": 0.0,
+    "wbc.reward_scales.manipulability": 0.0,
+    "wbc.reward_scales.joint_limit_barrier": 0.0,
+    "wbc.reward_scales.arm_ema_motion": 0.0,
+    "wbc.reward_scales.rho_rate": 0.0,
+    "wbc.reward_scales.upper_action_rate": 0.0,
+    "wbc.reward_scales.delta_vel_magnitude": 0.0,
+    "wbc.reward_scales.posture_command_rate": 0.0,
     "wbc.reward_scales.jump": 5.0,
     "wbc.reward_scales.hip_action_l2": -0.05,
     "wbc.reward_scales.raibert_heuristic": -0.0,
@@ -232,6 +240,38 @@ ROBODUET_OVERRIDES = {
     "wbc.rewards.use_terminal_pitch": False,
     "wbc.rewards.terminal_body_roll": 0.10,
     "wbc.rewards.terminal_body_pitch": 0.2,
+    # Intermediate whole-body milestone: static world-frame SE(3) goal.
+    # The upper actor layout follows project-design-v3 §8.2 without trajectory
+    # preview/time-law inputs: dq(6), dv(3), posture(3). Gait frequency,
+    # swing height and stance width remain fixed configurable dog commands.
+    "wbc.goal_reaching.enabled": False,
+    "wbc.goal_reaching.pos_range": [[-0.3, 0.3], [-0.1, 0.1], [0.25, 0.90]],
+    "wbc.goal_reaching.roll_ee": [-math.radians(20.0), math.radians(20.0)],
+    "wbc.goal_reaching.pitch_ee": [-math.radians(20.0), math.radians(20.0)],
+    "wbc.goal_reaching.yaw_ee": [-math.radians(20.0), math.radians(20.0)],
+    "wbc.goal_reaching.resample_time_s": [4.0, 6.0],
+    "wbc.goal_reaching.delta_vel_limit": [0.30, 0.30, 0.60],
+    "wbc.goal_reaching.rho_star": 0.60,
+    "wbc.goal_reaching.rho_lo": 0.35,
+    "wbc.goal_reaching.rho_hi": 0.85,
+    "wbc.goal_reaching.reach_radius": 0.60,
+    "wbc.goal_reaching.response_time_s": 0.50,
+    "wbc.goal_reaching.base_nom_filter_hz": 1.50,
+    "wbc.goal_reaching.command_smoothing_alpha": 0.20,
+    "wbc.goal_reaching.command_channels.vx": False,
+    "wbc.goal_reaching.command_channels.vy": False,
+    "wbc.goal_reaching.command_channels.yaw": True,
+    "wbc.goal_reaching.command_channels.height": True,
+    "wbc.goal_reaching.command_channels.pitch": True,
+    "wbc.goal_reaching.command_channels.roll": True,
+    "wbc.goal_reaching.posture_rate_limit": [0.05, 0.10, 0.10],
+    "wbc.goal_reaching.high_speed_posture_scale": 0.50,
+    "wbc.goal_reaching.high_speed_threshold": 0.80,
+    "wbc.goal_reaching.fixed_gait_frequency": 4.0,
+    "wbc.goal_reaching.fixed_footswing_height": 0.06,
+    "wbc.goal_reaching.fixed_stance_width": 0.35,
+    "wbc.goal_reaching.success_pos_threshold": 0.05,
+    "wbc.goal_reaching.success_rot_threshold": 0.25,
     # domain randomization: base & mount
     "domain_rand.dog_obs_frame_drop_prob": 0.02,
     "domain_rand.added_mass_range": [-2.0, 2.0],
@@ -295,6 +335,7 @@ WBC_REWARD_FACTORS = {
 FEATURE_LAYOUT = {
     "rot6d_command_dims": 3,
     "dynamic_gait_command_dims": 5,
+    "goal_reaching_plan_action_dims": 6,
 }
 
 
@@ -304,6 +345,19 @@ DYNAMIC_GAIT_BIN_CONFIG = {
     "commands.num_bins_gait_duration": 3,
     "commands.num_bins_stance_width": 3,
     "commands.num_bins_stance_length": 3,
+}
+
+
+GOAL_REACHING_REWARD_CONFIG = {
+    "goal_pos_l2": -2.0,
+    "reachability_barrier": -0.2,
+    "manipulability": 0.05,
+    "joint_limit_barrier": -0.02,
+    "arm_ema_motion": -0.05,
+    "rho_rate": -0.02,
+    "upper_action_rate": -0.02,
+    "delta_vel_magnitude": -0.05,
+    "posture_command_rate": -0.02,
 }
 
 
