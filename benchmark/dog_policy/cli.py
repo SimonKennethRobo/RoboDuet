@@ -1,10 +1,9 @@
-"""Dog-only policy benchmark with GPU-parallel multi-policy evaluation.
+"""Dog-only policy benchmark with layout-aware GPU-parallel evaluation.
 
-All policies under comparison share **one** IsaacGym simulation.
-``total_envs = num_envs_per_policy × N_policies``.
-Each policy owns a contiguous slice of envs; ``env.step()`` advances every
-slice simultaneously, so the expensive GPU step is paid only once per
-scenario point regardless of how many policies are compared.
+Policies with the same observation/control layout share one IsaacGym
+simulation and own contiguous environment slices. Policies with incompatible
+layouts are partitioned into separate groups, evaluated sequentially, and
+merged into the same report.
 
 Scenarios
 ---------
@@ -28,7 +27,7 @@ Usage::
     python -m benchmark.dog_policy.cli \\
         --logdirs runs/my_run --ckptids last --headless
 
-    # multi-run GPU-parallel comparison (N policies, one shared sim)
+    # multi-run comparison (compatible policies share a sim automatically)
     python -m benchmark.dog_policy.cli \\
         --logdirs runs/run_A runs/run_B runs/run_C \\
         --names v1 v2 v3 --ckptids last last 040000 \\
@@ -60,17 +59,17 @@ from benchmark.dog_policy.evaluation import (
     ScenarioResult,
     _acc_to_result,
     _eval_loop_parallel,
+    describe_shared_env_group,
     detect_command_layout,
+    group_shared_env_compatible_runs,
     load_dog_policy_for_benchmark,
     load_env_benchmark,
     print_comparison_table,
-    read_dog_num_commands,
     save_metadata,
     save_results,
     set_gait_cmd,
     set_pose_cmd,
     set_vel_cmd,
-    validate_shared_env_compatibility,
 )
 from benchmark.metadata import build_benchmark_metadata
 
@@ -868,47 +867,64 @@ def set_benchmark_seed(seed: int, device: str):
         torch.cuda.manual_seed_all(seed)
 
 
-def _profile_requires_full_gait_layout(args) -> bool:
-    scenario_config = args.scenario_config or {}
-    for scenario, skip_attr in SCENARIO_FLAGS.items():
-        if getattr(args, skip_attr):
-            continue
-        cfg = scenario_config.get(scenario, {})
-        if not isinstance(cfg, dict):
-            continue
-        if "stance_length" in cfg or "gait_duration" in cfg:
-            return True
-        fixed_gait = cfg.get("fixed_gait")
-        if isinstance(fixed_gait, dict) and (
-            "stance_length" in fixed_gait or "gait_duration" in fixed_gait
-        ):
-            return True
-    return False
-
-
-def _validate_layout_for_profile(args, layout: CommandLayout):
-    if not _profile_requires_full_gait_layout(args):
-        return
-    if not layout.has_gait_duration:
-        raise ValueError(
-            "Profile gait scenario requires dog_num_commands >= 11 "
-            "(indices 9=stance_length and 10=gait_duration). "
-            f"Current runtime layout has dog_num_commands={layout.n_dims}. "
-            "Use the smoke profile or a checkpoint trained with the full dog command layout."
+def _run_enabled_scenarios(
+    args,
+    env: HistoryWrapper,
+    handles: List[PolicyHandle],
+    layout: CommandLayout,
+) -> Dict[str, ResultsMap]:
+    """Run every enabled scenario for one shared-env-compatible group."""
+    scenarios: Dict[str, ResultsMap] = {}
+    if not args.skip_a:
+        scenarios["vel_grid"] = run_scenario_a(
+            env,
+            handles,
+            layout,
+            args.num_eval_steps,
+            args.arm_intensity,
+            args.sim_device,
+            args.scenario_config,
         )
-
-
-def _validate_checkpoint_layout_for_profile(args, base_logdir: str):
-    if not _profile_requires_full_gait_layout(args):
-        return
-    n_dims = read_dog_num_commands(base_logdir)
-    if n_dims < 11:
-        raise ValueError(
-            "Profile gait scenario requires dog_num_commands >= 11 "
-            "(indices 9=stance_length and 10=gait_duration). "
-            f"Base checkpoint parameters.pkl has dog_num_commands={n_dims}. "
-            "Use the smoke profile or a checkpoint trained with the full dog command layout."
+    if not args.skip_b:
+        scenarios["arm_sweep"] = run_scenario_b(
+            env,
+            handles,
+            layout,
+            args.num_eval_steps,
+            args.sim_device,
+            args.scenario_config,
         )
+    if not args.skip_c:
+        scenarios["body_pose"] = run_scenario_c(
+            env,
+            handles,
+            layout,
+            args.num_eval_steps,
+            args.arm_intensity,
+            args.sim_device,
+            args.scenario_config,
+        )
+    if not args.skip_d:
+        scenarios["gait"] = run_scenario_d(
+            env,
+            handles,
+            layout,
+            args.num_eval_steps,
+            args.arm_intensity,
+            args.sim_device,
+            args.scenario_config,
+        )
+    if not args.skip_e:
+        scenarios["vel_step"] = run_scenario_e(
+            env,
+            handles,
+            layout,
+            args.num_eval_steps,
+            args.arm_intensity,
+            args.sim_device,
+            args.scenario_config,
+        )
+    return scenarios
 
 
 def main(argv: Optional[List[str]] = None):
@@ -930,98 +946,104 @@ def main(argv: Optional[List[str]] = None):
 
     num_envs_per_policy = args.num_envs_per_policy
     total_envs = num_envs_per_policy * n_runs
+    env_groups = group_shared_env_compatible_runs(args.logdirs)
+    peak_sim_envs = num_envs_per_policy * max(len(group) for group in env_groups)
 
-    print(f"[Benchmark] {n_runs} policies × {num_envs_per_policy} envs = {total_envs} total envs")
-    print(f"[Benchmark] Seed = {args.seed}")
-    set_benchmark_seed(args.seed, args.sim_device)
-    validate_shared_env_compatibility(args.logdirs[0], args.logdirs[1:])
-    _validate_checkpoint_layout_for_profile(args, args.logdirs[0])
-    print(f"[Benchmark] Creating shared env from {args.logdirs[0]}")
-
-    env, cfg = load_env_benchmark(
-        logdir=args.logdirs[0],
-        total_envs=total_envs,
-        envs_per_policy=num_envs_per_policy,
-        headless=args.headless,
-        device=args.sim_device,
-        robot=args.robot,
-    )
-    layout = detect_command_layout(cfg)
-    _validate_layout_for_profile(args, layout)
-
+    print(f"[Benchmark] {n_runs} policies × {num_envs_per_policy} envs = {total_envs} evaluated envs")
     print(
-        f"[Benchmark] Layout: {layout.n_dims} cmd dims  "
-        f"pose={'on' if layout.has_body_pitch else 'off'}  "
-        f"gait_metrics={'on' if layout.has_dynamic_gait else 'off'}  "
-        f"stance_length={'on' if layout.has_stance_length else 'off'}  "
-        f"base_h={layout.base_height_target:.3f}m"
+        f"[Benchmark] {len(env_groups)} layout group(s); "
+        f"peak simultaneous envs = {peak_sim_envs}"
     )
+    print(f"[Benchmark] Seed = {args.seed}")
+    all_results: Dict[str, Dict[str, List[ScenarioResult]]] = {name: {} for name in names}
+    group_metadata = []
+    layouts: List[CommandLayout] = []
+    control_dts: List[object] = []
 
-    # Build one PolicyHandle per run; each owns a contiguous env slice.
-    # The shared-sim benchmark intentionally requires identical obs/control
-    # semantics across all compared checkpoints.
-    print("[Benchmark] Loading policies...")
-    handles: List[PolicyHandle] = []
-    for i, (name, logdir, ckpt_id) in enumerate(zip(names, args.logdirs, ckptids)):
-        s = i * num_envs_per_policy
-        e = s + num_envs_per_policy
-        print(f"  [{i + 1}/{n_runs}] {name:24s}  envs [{s}:{e})  ckpt={ckpt_id}")
-        policy = load_dog_policy_for_benchmark(logdir, ckpt_id, cfg)
-        handles.append(PolicyHandle(name=name, policy=policy, env_start=s, env_end=e))
+    for group_number, run_indices in enumerate(env_groups, start=1):
+        group_total_envs = num_envs_per_policy * len(run_indices)
+        base_index = run_indices[0]
+        group_names = [names[i] for i in run_indices]
+        print(
+            f"\n[Benchmark] Layout group {group_number}/{len(env_groups)}: "
+            f"{', '.join(group_names)}"
+        )
+        print(f"[Benchmark] Creating shared env from {args.logdirs[base_index]}")
 
-    all_results: Dict[str, Dict[str, List[ScenarioResult]]] = {h.name: {} for h in handles}
+        # Reset all RNGs for every layout group so sequential execution does
+        # not make later layouts inherit earlier groups' random stream.
+        set_benchmark_seed(args.seed, args.sim_device)
+        env, cfg = load_env_benchmark(
+            logdir=args.logdirs[base_index],
+            total_envs=group_total_envs,
+            envs_per_policy=num_envs_per_policy,
+            headless=args.headless,
+            device=args.sim_device,
+            robot=args.robot,
+        )
+        layout = detect_command_layout(cfg)
+        layouts.append(layout)
+        control_dts.append(getattr(env.env, "dt", "unknown"))
 
-    def _merge(scenario_key: str, per_policy: ResultsMap):
-        for name, results in per_policy.items():
-            all_results[name][scenario_key] = results
-
-    if not args.skip_a:
-        _merge(
-            "vel_grid",
-            run_scenario_a(
-                env,
-                handles,
-                layout,
-                args.num_eval_steps,
-                args.arm_intensity,
-                args.sim_device,
-                args.scenario_config,
-            ),
+        print(
+            f"[Benchmark] Layout: {layout.n_dims} cmd dims  "
+            f"policy_obs={env.benchmark_dog_dims['dog_num_observations']}  "
+            f"policy_priv={env.benchmark_dog_dims['dog_num_privileged_obs']}  "
+            f"adapter={env.benchmark_observation_mode}  "
+            f"pose={'on' if layout.has_body_pitch else 'off'}  "
+            f"gait_metrics={'on' if layout.has_dynamic_gait else 'off'}  "
+            f"stance_length={'on' if layout.has_stance_length else 'off'}  "
+            f"base_h={layout.base_height_target:.3f}m"
         )
 
-    if not args.skip_b:
-        _merge("arm_sweep", run_scenario_b(env, handles, layout, args.num_eval_steps, args.sim_device, args.scenario_config))
+        try:
+            handles: List[PolicyHandle] = []
+            print("[Benchmark] Loading policies...")
+            for local_index, run_index in enumerate(run_indices):
+                s = local_index * num_envs_per_policy
+                e = s + num_envs_per_policy
+                print(
+                    f"  [{local_index + 1}/{len(run_indices)}] "
+                    f"{names[run_index]:24s}  envs [{s}:{e})  ckpt={ckptids[run_index]}"
+                )
+                policy = load_dog_policy_for_benchmark(
+                    args.logdirs[run_index],
+                    ckptids[run_index],
+                    cfg,
+                    expected_dims=env.benchmark_dog_dims,
+                )
+                handles.append(
+                    PolicyHandle(
+                        name=names[run_index],
+                        policy=policy,
+                        env_start=s,
+                        env_end=e,
+                    )
+                )
 
-    if not args.skip_c:
-        _merge(
-            "body_pose",
-            run_scenario_c(
-                env,
-                handles,
-                layout,
-                args.num_eval_steps,
-                args.arm_intensity,
-                args.sim_device,
-                args.scenario_config,
-            ),
-        )
+            for scenario_key, per_policy in _run_enabled_scenarios(
+                args, env, handles, layout
+            ).items():
+                for name, results in per_policy.items():
+                    all_results[name][scenario_key] = results
 
-    if not args.skip_d:
-        _merge("gait", run_scenario_d(env, handles, layout, args.num_eval_steps, args.arm_intensity, args.sim_device, args.scenario_config))
-
-    if not args.skip_e:
-        _merge(
-            "vel_step",
-            run_scenario_e(
-                env,
-                handles,
-                layout,
-                args.num_eval_steps,
-                args.arm_intensity,
-                args.sim_device,
-                args.scenario_config,
-            ),
-        )
+            group_metadata.append(
+                {
+                    "group": group_number,
+                    "runs": group_names,
+                    "num_policies": len(run_indices),
+                    "total_envs": group_total_envs,
+                    "observation_adapter": env.benchmark_observation_mode,
+                    "layout": describe_shared_env_group(args.logdirs[base_index]),
+                }
+            )
+        finally:
+            # Isaac Gym simulations are evaluated one layout group at a time
+            # so layouts with different tensor widths never share an env.
+            env.env.close()
+            del env
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     print_comparison_table(all_results)
 
@@ -1031,6 +1053,10 @@ def main(argv: Optional[List[str]] = None):
 
     json_path = os.path.join(run_dir, "results.json")
     metadata_path = os.path.join(run_dir, "metadata.json")
+    representative_layout = layouts[0]
+    control_dt_s: object = control_dts[0]
+    if any(dt != control_dt_s for dt in control_dts[1:]):
+        control_dt_s = control_dts
     metadata = build_benchmark_metadata(
         mode="dog_only",
         protocol=args.benchmark_protocol,
@@ -1041,10 +1067,28 @@ def main(argv: Optional[List[str]] = None):
         ckptids=ckptids,
         args=args,
         total_envs=total_envs,
-        control_dt_s=getattr(env.env, "dt", "unknown"),
-        layout=layout,
+        control_dt_s=control_dt_s,
+        layout=representative_layout,
         command_argv=sys.argv,
     )
+    command_layouts = sorted({layout.n_dims for layout in layouts})
+    metadata.update(
+        {
+            "execution_mode": (
+                "shared_env" if len(env_groups) == 1 else "layout_grouped_shared_env"
+            ),
+            "num_layout_groups": len(env_groups),
+            "peak_simultaneous_envs": peak_sim_envs,
+            "layout_groups": group_metadata,
+            "dog_num_commands": (
+                command_layouts[0] if len(command_layouts) == 1 else command_layouts
+            ),
+            "use_dynamic_gait": any(layout.has_dynamic_gait for layout in layouts),
+            "scenario_d_enabled": any(layout.has_dynamic_gait for layout in layouts)
+            and not args.skip_d,
+        }
+    )
+    metadata["scenarios"]["gait"] = metadata["scenario_d_enabled"]
     save_results(all_results, json_path)
     save_metadata(metadata, metadata_path)
     try:

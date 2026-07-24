@@ -64,7 +64,8 @@ python -m benchmark.cli \
   --skip_b
 ```
 
-完整 dog-only 对比可以直接扫描 candidate pool，并把多个 policy 放进同一个 IsaacGym simulation 中并行评估：
+完整 dog-only 对比可以直接扫描 candidate pool。layout 兼容的 policy 会放进同一个
+IsaacGym simulation 并行评估，不兼容的 layout 会自动拆组、依次运行并汇总到同一报告：
 
 ```bash
 conda run -n roboduet python -m benchmark.cli \
@@ -97,11 +98,21 @@ conda run -n roboduet python -m benchmark.cli \
 
 ## Compatibility
 
-当前 dog-only benchmark 会把所有 candidate 放进同一个 IsaacGym simulation 里并行运行。因此，所有被扫描到的 active candidates 必须共享相同的 observation/action/command layout。
+dog-only benchmark 会根据关键 observation/action/command 配置自动计算兼容签名：
 
-如果两个 checkpoint 在关键配置上不同，例如 dog observation 维度、arm command 维度或 `use_rot6d`，它们就不能同时参与同一个 shared benchmark run。短期做法是把不兼容 candidate 放到不同 candidate root，分别运行；长期可以实现自动兼容性分组。
+- 签名相同的 candidate 共用一个 simulation，并在各自连续的 env slice 上并行推理。
+- 签名不同的 candidate 使用独立 simulation，layout group 之间依次创建、运行和释放。
+- 所有 group 的结果最终仍写入同一个 `results.json`、`metadata.json` 和 HTML report。
 
-例如历史 `runs/...` 里的 dog policy 可能是 `adapt=on`、`obs=83`，而当前 `benchmark/candidates/...` 中的新结构是 `adapt=off`、`obs=86`。这两类 checkpoint 都可以单独 benchmark，但不能混在同一次多 policy shared simulation 中比较。
+例如 `obs=86`、`obs=90` 和 `obs=99` 的 dog policy 可以放在同一个 candidate
+root 中启动；benchmark 会建立三个 layout group。某个 layout 不支持的场景会只对该
+group 跳过，例如 `dog_num_commands < 9` 时不运行 gait scenario。
+已知历史 layout 会恢复其原始字段语义：旧 86 维 observation 会使用 pre-v3
+roll/pitch 与 EE-pose 排布，99 维 trajectory layout 会在 arm joint state 前恢复
+9 维 EE pose；不会用简单的补零或截断冒充兼容。
+
+`metadata.json` 中的 `execution_mode`、`num_layout_groups`、
+`peak_simultaneous_envs` 和 `layout_groups` 会记录本次实际分组。
 
 ## Inspect Policy Bundles
 
@@ -122,7 +133,7 @@ python -m benchmark.cli \
   --candidate_dir benchmark/candidates
 ```
 
-inspect 会读取 `parameters.pkl`、`checkpoints_dog/` 和 `checkpoints_arm/`，输出 dog/arm 的 observation、history、privileged obs、action、command、adaptation module 和 checkpoint shape。它用于回答“这个 policy bundle 内部结构是否自洽”，以及“它属于哪一代 policy layout”。它不会保证该 policy 能在当前 env 中直接执行；真正执行仍然需要通过 dog-only、arm-only 或 wbc benchmark 的 shared-env compatibility check。
+inspect 会读取 `parameters.pkl`、`checkpoints_dog/` 和 `checkpoints_arm/`，输出 dog/arm 的 observation、history、privileged obs、action、command、adaptation module 和 checkpoint shape。它用于回答“这个 policy bundle 内部结构是否自洽”，以及“它属于哪一代 policy layout”。它不会保证该 policy 能在当前 env 中直接执行；dog-only benchmark 会在加载权重时再次校验 checkpoint 与其 layout group 环境的维度。arm-only 和 wbc benchmark 仍会执行各自的 compatibility check。
 
 例如旧版 RoboDuet policy 可能显示：
 

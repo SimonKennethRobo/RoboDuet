@@ -5,7 +5,7 @@ import math
 import os
 import pickle as pkl
 from dataclasses import asdict, dataclass
-from typing import Callable, Dict, List, NamedTuple, Optional
+from typing import Callable, Dict, List, NamedTuple, Optional, Tuple
 
 import isaacgym  # noqa: F401 - must precede torch
 import torch
@@ -22,7 +22,7 @@ from go1_gym.envs.config.wbc import ROBODUET_OVERRIDES
 from go1_gym.utils.global_switch import global_switch
 from go1_gym.utils.math_utils import quat_apply_yaw
 from go1_gym_learn.ppo_cse_automatic.dog_ac import DogActorCritic
-from isaacgym.torch_utils import quat_conjugate, quat_from_angle_axis, quat_mul, quat_rotate_inverse
+from isaacgym.torch_utils import quat_apply, quat_conjugate, quat_from_angle_axis, quat_mul, quat_rotate_inverse
 from scripts.load_policy import _ensure_asset_file
 
 DEFAULT_CFG = build_roboduet_config()
@@ -126,15 +126,7 @@ def detect_command_layout(cfg) -> CommandLayout:
 # ---------------------------------------------------------------------------
 
 
-def _read_dog_dims(logdir: str) -> dict:
-    """Extract dog network dims from a logdir's parameters.pkl.
-
-    Does not mutate a process-global config — safe to call for every logdir.
-    Falls back to the centralized WBC task defaults for any key that is absent.
-    """
-    with open(logdir + "/parameters.pkl", "rb") as f:
-        cfg_dict = pkl.load(f)["Cfg"]
-
+def _dog_dims_from_cfg_dict(cfg_dict: dict) -> dict:
     dog = cfg_dict.get("dog", {})
 
     def _get(key, default):
@@ -159,21 +151,34 @@ def _read_dog_dims(logdir: str) -> dict:
     )
 
 
+def _read_dog_dims(logdir: str) -> dict:
+    """Extract dog network dims from a logdir's parameters.pkl.
+
+    Does not mutate a process-global config — safe to call for every logdir.
+    Falls back to the centralized WBC task defaults for any key that is absent.
+    """
+    with open(logdir + "/parameters.pkl", "rb") as f:
+        cfg_dict = pkl.load(f)["Cfg"]
+    return _dog_dims_from_cfg_dict(cfg_dict)
+
+
 def load_dog_policy_for_benchmark(
     logdir: str,
     ckpt_id: str,
     env_cfg,
+    expected_dims: Optional[dict] = None,
 ) -> Callable:
-    """Load a dog policy whose observation/action layout matches the shared env."""
+    """Load a dog policy whose observation/action layout matches its env group."""
     dims = _read_dog_dims(logdir)
 
-    expected_dims = {
-        "dog_num_observations": env_cfg.dog.dog_num_observations,
-        "dog_num_privileged_obs": env_cfg.dog.dog_num_privileged_obs,
-        "dog_num_observation_history": env_cfg.dog.dog_num_observation_history,
-        "dog_num_obs_history": env_cfg.dog.dog_num_obs_history,
-        "dog_actions": env_cfg.dog.dog_actions,
-    }
+    if expected_dims is None:
+        expected_dims = {
+            "dog_num_observations": env_cfg.dog.dog_num_observations,
+            "dog_num_privileged_obs": env_cfg.dog.dog_num_privileged_obs,
+            "dog_num_observation_history": env_cfg.dog.dog_num_observation_history,
+            "dog_num_obs_history": env_cfg.dog.dog_num_obs_history,
+            "dog_actions": env_cfg.dog.dog_actions,
+        }
     mismatches = [
         f"{key}: checkpoint={dims[key]} env={expected}"
         for key, expected in expected_dims.items()
@@ -181,9 +186,8 @@ def load_dog_policy_for_benchmark(
     ]
     if mismatches:
         raise ValueError(
-            f"{logdir}: checkpoint dog policy obs/action dimensions are incompatible with the shared env "
+            f"{logdir}: checkpoint dog policy obs/action dimensions are incompatible with its benchmark env "
             "(use_adaptation_module differences are allowed when obs/action dimensions match). "
-            "Run candidates with different dog policy layouts in separate benchmark groups. "
             + "; ".join(mismatches)
         )
 
@@ -238,6 +242,165 @@ class PolicyHandle:
     @property
     def n_envs(self) -> int:
         return self.env_end - self.env_start
+
+
+class BenchmarkHistoryWrapper(HistoryWrapper):
+    """History wrapper that recreates checkpoint-specific dog observations.
+
+    The runtime environment stays on the current implementation. Only the
+    policy-facing dog observation is adapted when an older checkpoint predates
+    the current fixed-width tracking layout or includes the historical
+    trajectory EE-pose block.
+    """
+
+    def __init__(self, env: WBCEnv, checkpoint_cfg: dict):
+        super().__init__(env)
+        dims = _dog_dims_from_cfg_dict(checkpoint_cfg)
+        self.benchmark_dog_dims = dims
+        self._checkpoint_cfg = checkpoint_cfg
+        self._runtime_dog_obs_dim = int(env.cfg.dog.dog_num_observations)
+        self._dog_obs_mode = self._detect_dog_obs_mode()
+        self.benchmark_observation_mode = self._dog_obs_mode
+        self.dog_obs_history = torch.zeros(
+            env.num_envs,
+            dims["dog_num_obs_history"],
+            dtype=torch.float,
+            device=env.device,
+            requires_grad=False,
+        )
+
+    def _detect_dog_obs_mode(self) -> str:
+        saved = int(self.benchmark_dog_dims["dog_num_observations"])
+        if saved == self._runtime_dog_obs_dim:
+            return "native"
+
+        legacy_arm_trajectory = bool(
+            self._checkpoint_cfg.get("arm", {}).get("trajectory", {}).get("enabled", False)
+        )
+        wbc_trajectory = bool(
+            self._checkpoint_cfg.get("wbc", {}).get("trajectory", {}).get("enabled", False)
+        )
+        if wbc_trajectory and saved == self._runtime_dog_obs_dim + 9:
+            return "native_plus_ee_pose"
+        if legacy_arm_trajectory:
+            return "legacy_pre_v3"
+        raise ValueError(
+            "Unsupported dog observation layout: "
+            f"checkpoint={saved}, current_runtime={self._runtime_dog_obs_dim}. "
+            "No known legacy observation adapter matches this parameters.pkl."
+        )
+
+    def _legacy_pre_v3_observation(self) -> torch.Tensor:
+        b = self.env
+        cfg = b.cfg
+        obs = torch.cat(
+            (
+                b.projected_gravity,
+                (b.dof_pos[:, : b.num_actions_loco] - b.default_dof_pos[:, : b.num_actions_loco])
+                * b.obs_scales.dof_pos,
+                b.dof_vel[:, : b.num_actions_loco] * b.obs_scales.dof_vel,
+                b.actions[:, : b.num_actions_loco],
+            ),
+            dim=-1,
+        )
+        dog_commands = (b.commands_dog * b.commands_scale_dog)[:, : cfg.dog.dog_num_commands]
+        legacy_vision = bool(
+            self._checkpoint_cfg.get("hybrid", {}).get("use_vision", False)
+        )
+        if legacy_vision:
+            arm_task = torch.cat(
+                (
+                    b.obj_obs_pose_in_ee
+                    if global_switch.switch_open
+                    else torch.zeros_like(b.obj_obs_pose_in_ee),
+                    b.obj_obs_abg_in_ee
+                    if global_switch.switch_open
+                    else torch.zeros_like(b.obj_obs_abg_in_ee),
+                ),
+                dim=-1,
+            )
+        else:
+            arm_commands = b.commands_arm_obs[:, : cfg.arm.arm_num_commands]
+            arm_task = (
+                arm_commands
+                if global_switch.switch_open
+                else torch.zeros_like(arm_commands)
+            )
+        obs = torch.cat(
+            (obs, dog_commands, arm_task, b.roll.unsqueeze(1), b.pitch.unsqueeze(1)),
+            dim=-1,
+        )
+        if cfg.env.observe_two_prev_actions:
+            obs = torch.cat((obs, b.last_actions), dim=-1)
+        if cfg.env.observe_timing_parameter:
+            obs = torch.cat((obs, b.gait_indices.unsqueeze(1)), dim=-1)
+        if cfg.env.observe_clock_inputs:
+            obs = torch.cat((obs, b.clock_inputs), dim=-1)
+
+        legacy_env = self._checkpoint_cfg.get("env", {})
+        if legacy_env.get("observe_vel", False):
+            lin_vel = (
+                b.root_states[: b.num_envs, 7:10]
+                if cfg.commands.global_reference
+                else b.base_lin_vel
+            )
+            obs = torch.cat(
+                (lin_vel * b.obs_scales.lin_vel, b.base_ang_vel * b.obs_scales.ang_vel, obs),
+                dim=-1,
+            )
+        if legacy_env.get("observe_only_ang_vel", False):
+            obs = torch.cat((b.base_ang_vel * b.obs_scales.ang_vel, obs), dim=-1)
+        if legacy_env.get("observe_only_lin_vel", False):
+            obs = torch.cat((b.base_lin_vel * b.obs_scales.lin_vel, obs), dim=-1)
+        if legacy_env.get("observe_yaw", False):
+            forward = quat_apply(b.base_quat, b.forward_vec)
+            heading = torch.atan2(forward[:, 1], forward[:, 0]).unsqueeze(1)
+            obs = torch.cat((obs, heading), dim=-1)
+        if legacy_env.get("observe_contact_states", False):
+            contacts = (b.contact_forces[:, b.feet_indices, 2] > 1.0).view(b.num_envs, -1).float()
+            obs = torch.cat((obs, contacts), dim=-1)
+
+        obs = torch.cat((obs, b.get_ee_pose_body_9d()), dim=-1)
+        arm_slice = slice(b.num_actions_loco, b.num_actions_loco + b.num_actions_arm)
+        arm_pos = (b.dof_pos[:, arm_slice] - b.default_dof_pos[:, arm_slice]) * b.obs_scales.dof_pos
+        arm_vel = b.dof_vel[:, arm_slice] * b.obs_scales.dof_vel
+        return torch.cat((obs, arm_pos, arm_vel), dim=-1)
+
+    def get_dog_observations(self):
+        if self._dog_obs_mode == "native":
+            obs, privileged_obs = self.env.get_dog_observations()
+        elif self._dog_obs_mode == "native_plus_ee_pose":
+            obs, privileged_obs = self.env.get_dog_observations()
+            arm_state_width = 2 * self.env.num_actions_arm
+            obs = torch.cat(
+                (obs[:, :-arm_state_width], self.env.get_ee_pose_body_9d(), obs[:, -arm_state_width:]),
+                dim=-1,
+            )
+        else:
+            obs = self._legacy_pre_v3_observation()
+            privileged_obs = torch.zeros(
+                self.env.num_envs,
+                self.benchmark_dog_dims["dog_num_privileged_obs"],
+                dtype=torch.float,
+                device=self.env.device,
+            )
+
+        clip_obs = self.env.cfg.normalization.clip_observations
+        obs = torch.clip(obs, -clip_obs, clip_obs)
+        expected = int(self.benchmark_dog_dims["dog_num_observations"])
+        if obs.shape[1] != expected:
+            raise AssertionError(
+                f"{self._dog_obs_mode} dog observation width {obs.shape[1]} != checkpoint width {expected}"
+            )
+        self.dog_obs_history = torch.cat(
+            (self.dog_obs_history[:, expected:], obs),
+            dim=-1,
+        )
+        return {
+            "obs": obs,
+            "privileged_obs": privileged_obs,
+            "obs_history": self.dog_obs_history,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -369,7 +532,9 @@ CRITICAL_COMPAT_CFG_PATHS = [
     "dog.num_actions_loco",
     "arm.arm_num_commands",
     "arm.num_actions_arm",
+    "arm.trajectory.enabled",
     "wbc.trajectory.enabled",
+    "asset.file",
     "commands.global_reference",
     "env.observe_two_prev_actions",
     "env.observe_timing_parameter",
@@ -441,6 +606,45 @@ def validate_shared_env_compatibility(base_logdir: str, candidate_logdirs: List[
         )
 
 
+def shared_env_compatibility_key(logdir: str) -> Tuple[object, ...]:
+    """Return the resolved config signature that determines shared-env safety."""
+    cfg = _read_cfg_dict(logdir)
+
+    def _freeze(value):
+        if isinstance(value, dict):
+            return tuple(sorted((key, _freeze(item)) for key, item in value.items()))
+        if isinstance(value, (list, tuple)):
+            return tuple(_freeze(item) for item in value)
+        return value
+
+    return tuple(_freeze(_cfg_value(cfg, path)) for path in CRITICAL_COMPAT_CFG_PATHS)
+
+
+def group_shared_env_compatible_runs(logdirs: List[str]) -> List[List[int]]:
+    """Group input run indices by compatible observation/control semantics.
+
+    Group and member order are stable. Policies in one group can still share a
+    simulator; incompatible groups must be evaluated in separate simulators.
+    """
+    groups: List[List[int]] = []
+    key_to_group: Dict[Tuple[object, ...], int] = {}
+    for index, logdir in enumerate(logdirs):
+        key = shared_env_compatibility_key(logdir)
+        group_index = key_to_group.get(key)
+        if group_index is None:
+            group_index = len(groups)
+            key_to_group[key] = group_index
+            groups.append([])
+        groups[group_index].append(index)
+    return groups
+
+
+def describe_shared_env_group(logdir: str) -> Dict[str, object]:
+    """Return a JSON-friendly compatibility description for metadata."""
+    cfg = _read_cfg_dict(logdir)
+    return {path: _cfg_value(cfg, path) for path in CRITICAL_COMPAT_CFG_PATHS}
+
+
 def _load_cfg_from_pkl(logdir: str, robot: Optional[str] = None) -> ConfigNode:
     cfg = build_roboduet_config()
     checkpoint_asset_file = None
@@ -505,11 +709,12 @@ def load_env_benchmark(
     device: str = "cuda:0",
     robot: Optional[str] = None,
 ):
+    checkpoint_cfg = _read_cfg_dict(logdir)
     cfg = _load_cfg_from_pkl(logdir, robot=robot)
     _apply_benchmark_env_overrides(cfg, total_envs, envs_per_policy)
     configure_privileged_obs_dims(cfg)
     env = WBCEnv(sim_device=device, headless=headless, cfg=cfg)
-    env = HistoryWrapper(env)
+    env = BenchmarkHistoryWrapper(env, checkpoint_cfg)
     return env, cfg
 
 
