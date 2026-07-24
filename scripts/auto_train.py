@@ -197,7 +197,7 @@ def main(args):
     else:
         args.log_dir = osp.join(f"{MINI_GYM_ROOT_DIR}/runs", wandb.run.name)
     print(f"Logging to {args.log_dir}")
-    args.log_dir += f"_seed{args.seed}"
+    # args.log_dir += f"_seed{args.seed}"
 
     os.makedirs(osp.join(args.log_dir, "checkpoints_arm"), exist_ok=True)
     os.makedirs(osp.join(args.log_dir, "checkpoints_dog"), exist_ok=True)

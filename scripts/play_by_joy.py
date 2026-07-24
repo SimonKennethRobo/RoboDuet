@@ -51,6 +51,7 @@ JOYSTICK_COMMAND_MAP = {
         "mode": "absolute",
         "command": {"target": "dog", "cmd_key": "x_vel"},
         "deadzone": 0.08,
+        "scale": 1.5,
         "clamp": (-1.5, 1.5),
     },
     "left_stick_y": {
@@ -65,7 +66,8 @@ JOYSTICK_COMMAND_MAP = {
         "mode": "absolute",
         "command": {"target": "dog", "cmd_key": "yaw_vel"},
         "deadzone": 0.08,
-        "clamp": (-1, 1),
+        "scale": 1.5,
+        "clamp": (-1.5, 1.5),
     },
     "right_stick_x": {
         "source": "axis",

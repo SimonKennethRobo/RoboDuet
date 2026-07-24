@@ -461,9 +461,9 @@ class KeyboardStage1Wrapper(WBCEnv):
                 elif evt.action == "dog_pitch_down":
                     self._add_dog_cmd("body_pitch", -self._POSE_STEP, (-0.4, 0.4))
                 elif evt.action == "dog_height_up":
-                    self._add_dog_cmd("body_height", self._HEIGHT_STEP, (-0.2, 0.2))
+                    self._add_dog_cmd("body_height", self._HEIGHT_STEP, (-0.3, 0.3))
                 elif evt.action == "dog_height_down":
-                    self._add_dog_cmd("body_height", -self._HEIGHT_STEP, (-0.2, 0.2))
+                    self._add_dog_cmd("body_height", -self._HEIGHT_STEP, (-0.3, 0.3))
                 elif evt.action == "dog_freq_up":
                     self._add_dog_cmd("gait_frequency", self._GAIT_FREQ_STEP, (1.0, 4.0))
                 elif evt.action == "dog_freq_down":
