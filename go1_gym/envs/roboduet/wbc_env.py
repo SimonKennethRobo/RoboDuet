@@ -151,6 +151,12 @@ class WBCEnv(LeggedRobot):
         Legacy arm reaching reads ``arm.target``. Whole-body goal reaching
         reads ``wbc.goal_reaching`` and then locks the sampled pose in world
         coordinates. No reachability gating is applied.
+
+        For goal reaching, ``pos_range``'s x/y are still a body-relative
+        offset (rotated into world by the base heading at sample time), but
+        z is an absolute world-frame height -- e.g. [0.0, 0.5] samples a
+        goal between 0m and 0.5m above the ground, independent of the
+        robot's own height.
         """
         if len(env_ids) == 0:
             return
@@ -186,9 +192,9 @@ class WBCEnv(LeggedRobot):
         self.arm_target_quat_body[env_ids] = quat_mul(q1, quat_mul(q2, q3)).reshape(-1, 4)
 
         if self._goal_reaching_enabled():
-            self.arm_goal_pos_world[env_ids] = self.base_pos[env_ids] + quat_apply(
-                self.base_quat[env_ids], self.arm_target_pos_body[env_ids]
-            )
+            xy_offset_world = quat_apply(self.base_quat[env_ids], self.arm_target_pos_body[env_ids])[:, :2]
+            self.arm_goal_pos_world[env_ids, :2] = self.base_pos[env_ids, :2] + xy_offset_world
+            self.arm_goal_pos_world[env_ids, 2] = self.arm_target_pos_body[env_ids, 2]
             self.arm_goal_quat_world[env_ids] = quat_mul(
                 self.base_quat[env_ids], self.arm_target_quat_body[env_ids]
             )

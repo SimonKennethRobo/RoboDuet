@@ -245,7 +245,10 @@ ROBODUET_OVERRIDES = {
     # preview/time-law inputs: dq(6), dv(3), posture(3). Gait frequency,
     # swing height and stance width remain fixed configurable dog commands.
     "wbc.goal_reaching.enabled": False,
-    "wbc.goal_reaching.pos_range": [[-0.3, 0.3], [-0.1, 0.1], [0.25, 0.90]],
+    # x/y are a body-relative offset sampled at goal resample time; z is an
+    # absolute world-frame height (e.g. [0.25, 0.90] = 0.25m-0.90m above the
+    # ground), independent of the robot's own height.
+    "wbc.goal_reaching.pos_range": [[-0.4, 0.4], [-0.2, 0.2], [0.05, 1.2]],
     "wbc.goal_reaching.roll_ee": [-math.radians(20.0), math.radians(20.0)],
     "wbc.goal_reaching.pitch_ee": [-math.radians(20.0), math.radians(20.0)],
     "wbc.goal_reaching.yaw_ee": [-math.radians(20.0), math.radians(20.0)],
