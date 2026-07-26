@@ -231,6 +231,7 @@ ROBODUET_OVERRIDES = {
     "wbc.reward_scales.upper_action_rate": 0.0,
     "wbc.reward_scales.delta_vel_magnitude": 0.0,
     "wbc.reward_scales.posture_command_rate": 0.0,
+    "wbc.reward_scales.stay_still_in_reach_sector": 0.0,
     "wbc.reward_scales.jump": 5.0,
     "wbc.reward_scales.hip_action_l2": -0.05,
     "wbc.reward_scales.raibert_heuristic": -0.0,
@@ -275,6 +276,8 @@ ROBODUET_OVERRIDES = {
     "wbc.goal_reaching.fixed_stance_width": 0.35,
     "wbc.goal_reaching.success_pos_threshold": 0.05,
     "wbc.goal_reaching.success_rot_threshold": 0.25,
+    "wbc.goal_reaching.stay_sector_radius": 0.60,
+    "wbc.goal_reaching.stay_sector_half_angle": math.radians(90.0),
     # domain randomization: base & mount
     "domain_rand.dog_obs_frame_drop_prob": 0.02,
     "domain_rand.added_mass_range": [-2.0, 2.0],
@@ -361,6 +364,7 @@ GOAL_REACHING_REWARD_CONFIG = {
     "upper_action_rate": -0.02,
     "delta_vel_magnitude": -0.05,
     "posture_command_rate": -0.02,
+    "stay_still_in_reach_sector": -0.05,
 }
 
 

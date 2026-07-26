@@ -178,6 +178,19 @@ class Rewards:
         previous = self.env.last_arm_policy_actions[:, start : start + 3]
         return torch.sum(torch.square(current - previous), dim=-1)
 
+    def _reward_stay_still_in_reach_sector(self):
+        """Penalize vx/vy/yaw-rate commands while the goal's ground-plane
+        projection sits inside a forward-facing sector (radius + half-angle,
+        both hyperparameters) -- the base shouldn't reposition for a goal the
+        arm can already reach from where it's standing."""
+        cfg = self.env.cfg.wbc.goal_reaching
+        goal_xy_body = self.env.arm_target_pos_body[:, :2]
+        radius = torch.linalg.vector_norm(goal_xy_body, dim=-1)
+        bearing = torch.atan2(goal_xy_body[:, 1], goal_xy_body[:, 0]).abs()
+        in_sector = (radius <= float(cfg.stay_sector_radius)) & (bearing <= float(cfg.stay_sector_half_angle))
+        vel_cmd_sq = torch.sum(torch.square(self.env.commands_dog[:, :3]), dim=-1)
+        return torch.where(in_sector, vel_cmd_sq, torch.zeros_like(vel_cmd_sq))
+
     def _reward_dof_pos_limits(self):
         # Penalize dof positions too close to the limit
         out_of_limits = -(self.env.dof_pos - self.env.dof_pos_limits[:, 0]).clip(max=0.)  # lower limit

@@ -757,6 +757,7 @@ class LeggedRobot(BaseTask):
             "upper_action_rate",
             "delta_vel_magnitude",
             "posture_command_rate",
+            "stay_still_in_reach_sector",
         }
 
     def _update_dog_vel_ref(self):
