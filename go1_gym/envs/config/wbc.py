@@ -26,12 +26,14 @@ stage/mode you'd touch them to tune**, not just by subsystem:
   reward weights that only make sense for this submode live together here --
   tune this one section, not two.
 
-All groups except ``GOAL_REACHING_REWARD_SCALES`` are merged into one
-``ROBODUET_OVERRIDES`` and applied unconditionally at config-build time.
-``GOAL_REACHING_REWARD_SCALES`` is intentionally NOT merged in: those reward
-names only exist on ``cfg.wbc.reward_scales`` (and their ``_reward_*``
-functions only get registered/called) when ``--goal_reaching`` is passed --
-see the docstring above ``GOAL_REACHING_OVERRIDES``.
+All groups, including ``GOAL_REACHING_REWARD_SCALES`` at 0.0, are merged into
+one ``ROBODUET_OVERRIDES`` and applied unconditionally at config-build time.
+That's safe because ``LeggedRobot._prepare_reward_function`` now drops any
+``wbc.reward_scales.*`` entry that's exactly 0 before registering ``_reward_*``
+callbacks, so a name sitting at its 0.0 default is never registered/called --
+only ``core.enable_goal_reaching()`` overwriting it with a real value (behind
+``--goal_reaching``) makes it live. See the docstring above
+``GOAL_REACHING_OVERRIDES``.
 
 Parameters carry short section headers only; no per-parameter comments.
 Every field's meaning, current value rationale and tuning direction lives in
@@ -369,7 +371,7 @@ STAGE2_IK_OVERRIDES = {
 # section -- tune GOAL_REACHING_OVERRIDES / GOAL_REACHING_REWARD_SCALES,
 # nothing else.
 #
-# GOAL_REACHING_OVERRIDES (the params) IS folded into the always-applied
+# GOAL_REACHING_OVERRIDES (the params) is folded into the always-applied
 # ROBODUET_OVERRIDES below, because WBCEnv._resample_arm_target unconditionally
 # evaluates `self.cfg.arm.target`/reads `getattr(self.cfg.wbc, "goal_reaching",
 # None)` every resample regardless of the flag, and code that actually acts on
@@ -377,15 +379,14 @@ STAGE2_IK_OVERRIDES = {
 # itself gated behind _goal_reaching_enabled(), so the section is cheap and
 # harmless to keep always-present.
 #
-# GOAL_REACHING_REWARD_SCALES (the weights) is deliberately NOT folded in --
-# LeggedRobot._prepare_reward_function only registers/calls a _reward_* method
-# for names that exist in cfg.wbc.reward_scales, so if these names are absent
-# when --goal_reaching is off, _reward_goal_pos_l2/_reward_reachability_barrier/
-# etc. are simply never called (not called-with-zero-weight). core.
-# enable_goal_reaching() copies GOAL_REACHING_REWARD_SCALES onto
-# cfg.wbc.reward_scales only when the flag is passed. One side effect: runs
-# without --goal_reaching no longer log these reward names in
-# episode_sums/wandb at all (previously they showed up pinned at 0).
+# GOAL_REACHING_REWARD_SCALES (the weights) is ALSO folded in, at 0.0 --
+# same pattern as e.g. wbc.reward_scales.raibert_heuristic elsewhere in this
+# file. That's safe, not wasteful: LeggedRobot._prepare_reward_function drops
+# any wbc.reward_scales.* entry that's exactly 0 before registering _reward_*
+# callbacks, so _reward_goal_pos_l2/_reward_reachability_barrier/etc. are
+# simply never called while the scale sits at its 0.0 default. core.
+# enable_goal_reaching() overwrites these with real values only when
+# --goal_reaching is passed, which is what actually makes them live.
 # ============================================================
 GOAL_REACHING_OVERRIDES = {
     "wbc.goal_reaching.enabled": False,
@@ -443,6 +444,7 @@ ROBODUET_OVERRIDES = {
     **STAGE2_OVERRIDES,
     **STAGE2_IK_OVERRIDES,
     **GOAL_REACHING_OVERRIDES,
+    **{f"wbc.reward_scales.{name}": 0.0 for name in GOAL_REACHING_REWARD_SCALES},
 }
 
 

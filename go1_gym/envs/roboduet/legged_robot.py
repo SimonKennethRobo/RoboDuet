@@ -2002,10 +2002,21 @@ class LeggedRobot(BaseTask):
         for key in list(self.wbc_reward_scales.keys()):
             self.wbc_reward_scales[key] *= self.dt
 
-        # Complete the WBC reward table with unchanged stage-1 scales.
+        # Complete the WBC reward table with unchanged stage-1 scales. A name
+        # explicitly zeroed under wbc.reward_scales.* (e.g. to disable it for
+        # WBC while stage-1 still uses it, like raibert_heuristic) must still
+        # count as "present" here so this inheritance doesn't revive the
+        # nonzero stage-1 value -- so zero-scale WBC entries are only dropped
+        # below, after inheritance is resolved.
         for name, scale in self.pretrained_reward_scales.items():
             if name not in self.wbc_reward_scales:
                 self.wbc_reward_scales[name] = scale
+
+        # remove WBC-side zero scales (dt-scaling above turns them into
+        # exactly 0 too, so this also catches those)
+        for key in list(self.wbc_reward_scales.keys()):
+            if self.wbc_reward_scales[key] == 0:
+                self.wbc_reward_scales.pop(key)
 
         # prepare list of functions
         self.reward_functions = []
