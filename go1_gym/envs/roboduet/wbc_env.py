@@ -1615,26 +1615,47 @@ class WBCEnv(LeggedRobot):
             ee_rot_err_body = quat_apply(base_inv, self.ee_rot_err_axis_angle)
             ee_twist_body = self.get_ee_twist_body()
             contact_states, vel_residual = self._arm_dog_state_obs_terms()
-            obs_buf = torch.cat(
-                (
-                    ee_pos_err_body,
-                    ee_rot_err_body,
-                    ee_twist_body,
-                    self.arm_target_pos_body,
-                    target_rot6d_body,
-                    (self.dof_pos[:, arm_slice] - self.default_dof_pos[:, arm_slice])
-                    * self.obs_scales.dof_pos,
-                    self.dof_vel[:, arm_slice] * self.obs_scales.dof_vel,
-                    torch.stack((self.roll, self.pitch, self.base_pos[:, 2]), dim=-1),
-                    self.base_lin_vel,
-                    self.base_ang_vel,
-                    vel_residual,
-                    contact_states,
-                    self.base_feedforward_cmd,
-                    self.arm_policy_actions,
-                ),
-                dim=-1,
+            common_terms = (
+                ee_pos_err_body,
+                ee_rot_err_body,
+                ee_twist_body,
+                self.arm_target_pos_body,
+                target_rot6d_body,
+                (self.dof_pos[:, arm_slice] - self.default_dof_pos[:, arm_slice])
+                * self.obs_scales.dof_pos,
+                self.dof_vel[:, arm_slice] * self.obs_scales.dof_vel,
+                torch.stack((self.roll, self.pitch, self.base_pos[:, 2]), dim=-1),
+                self.base_lin_vel,
+                self.base_ang_vel,
+                vel_residual,
             )
+            if getattr(self.cfg.arm, "checkpoint_observation_layout", "current") == "goal_reaching_extended_v1":
+                phase = 2.0 * np.pi * self.gait_indices
+                gait_phase = torch.stack((torch.sin(phase), torch.cos(phase)), dim=-1)
+                obs_buf = torch.cat(
+                    common_terms
+                    + (
+                        gait_phase,
+                        contact_states,
+                        self.goal_manipulability.unsqueeze(-1),
+                        self.goal_joint_limit_distance,
+                        self.goal_rho.unsqueeze(-1),
+                        self.arm_ema_motion,
+                        self.base_feedforward_cmd,
+                        self.arm_policy_actions,
+                    ),
+                    dim=-1,
+                )
+            else:
+                obs_buf = torch.cat(
+                    common_terms
+                    + (
+                        contact_states,
+                        self.base_feedforward_cmd,
+                        self.arm_policy_actions,
+                    ),
+                    dim=-1,
+                )
         else:
             obs_buf = torch.cat(
                 (

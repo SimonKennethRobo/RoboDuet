@@ -6,6 +6,7 @@ import sys
 import gym
 import torch
 from isaacgym import gymapi
+from isaacgym.torch_utils import quat_apply, quat_conjugate, quat_from_euler_xyz, quat_mul
 
 from go1_gym.envs.config import ConfigNode
 from go1_gym.envs.roboduet.wbc_env import WBCEnv, dog_cmd_idx
@@ -210,6 +211,193 @@ class KeyboardWrapper(WBCEnv):
 
     def update_arm_commands(self):
         self.sync_arm_commands_to_obs(env_ids=slice(0, 1))
+
+
+class KeyboardStage2Wrapper(WBCEnv):
+    """Keyboard-controlled preview marker for stage-2 EE goals.
+
+    The marker is expressed in world coordinates. Editing it does not alter
+    the active policy target until ``C`` is pressed.
+
+    Translation: W/S = +/-x, A/D = +/-y, Q/E = +/-z.
+    Rotation:    I/K = +/-roll, J/L = +/-pitch, U/O = +/-yaw.
+    """
+
+    _TRANSLATION_STEP = 0.025
+    _ROTATION_STEP = 0.05
+
+    def __init__(self, sim_device, headless, cfg):
+        # WBCEnv calls _resample_arm_target while it is being constructed.
+        # Let that initial sample complete, then freeze random resampling so
+        # the interactive target remains under user control.
+        self._manual_goal_control = False
+        super().__init__(sim_device, headless, cfg=cfg)
+
+        self.marker_pos_world = torch.zeros(3, dtype=torch.float, device=self.device)
+        self.marker_quat_world = torch.zeros(4, dtype=torch.float, device=self.device)
+        self.marker_quat_world[3] = 1.0
+        self.marker_initialized = False
+        self._manual_goal_control = True
+        self.arm_target_resample_steps[:] = 10**9
+
+        if self.viewer is not None:
+            bindings = [
+                (gymapi.KEY_W, "marker_x_up"),
+                (gymapi.KEY_S, "marker_x_down"),
+                (gymapi.KEY_A, "marker_y_up"),
+                (gymapi.KEY_D, "marker_y_down"),
+                (gymapi.KEY_Q, "marker_z_up"),
+                (gymapi.KEY_E, "marker_z_down"),
+                (gymapi.KEY_I, "marker_roll_up"),
+                (gymapi.KEY_K, "marker_roll_down"),
+                (gymapi.KEY_J, "marker_pitch_up"),
+                (gymapi.KEY_L, "marker_pitch_down"),
+                (gymapi.KEY_U, "marker_yaw_up"),
+                (gymapi.KEY_O, "marker_yaw_down"),
+                (gymapi.KEY_C, "marker_confirm"),
+            ]
+            for key, action in bindings:
+                self.gym.subscribe_viewer_keyboard_event(self.viewer, key, action)
+
+    def _resample_arm_target(self, env_ids):
+        if getattr(self, "_manual_goal_control", False):
+            return
+        super()._resample_arm_target(env_ids)
+
+    def initialize_stage2_marker(self, commit=True):
+        """Initialize the marker from the current EE pose.
+
+        Publishing that pose as the startup goal gives the policy a safe hold
+        target. Subsequent edits remain preview-only until ``C`` is pressed.
+        """
+        self.marker_pos_world.copy_(self.end_effector_state[0, :3])
+        self.marker_quat_world.copy_(self.end_effector_state[0, 3:7])
+        self.marker_initialized = True
+        self.arm_target_resample_steps[:] = 10**9
+        self.arm_time_buf.zero_()
+        self._print_marker("[marker] preview initialized")
+        if commit:
+            self.commit_marker_pose()
+
+    def _ensure_marker_initialized(self):
+        if not self.marker_initialized:
+            self.initialize_stage2_marker()
+
+    def _print_marker(self, prefix):
+        pos = self.marker_pos_world.detach().cpu().tolist()
+        quat = self.marker_quat_world.detach().cpu().tolist()
+        print(
+            f"{prefix}: world xyz=({pos[0]:+.3f}, {pos[1]:+.3f}, {pos[2]:+.3f}), "
+            f"quat_xyzw=({quat[0]:+.3f}, {quat[1]:+.3f}, {quat[2]:+.3f}, {quat[3]:+.3f})",
+            flush=True,
+        )
+
+    def _translate_marker(self, axis, delta):
+        self._ensure_marker_initialized()
+        self.marker_pos_world[axis] += delta
+
+    def _rotate_marker(self, axis, delta):
+        self._ensure_marker_initialized()
+        angle = torch.zeros(1, dtype=torch.float, device=self.device)
+        angle[0] = delta
+        zero = torch.zeros_like(angle)
+        euler = [zero, zero, zero]
+        euler[axis] = angle
+        delta_quat = quat_from_euler_xyz(euler[0], euler[1], euler[2])[0]
+        self.marker_quat_world.copy_(quat_mul(delta_quat.unsqueeze(0), self.marker_quat_world.unsqueeze(0))[0])
+        self.marker_quat_world.div_(torch.linalg.vector_norm(self.marker_quat_world).clamp_min(1e-8))
+
+    def commit_marker_pose(self):
+        """Publish the preview pose as the active EE goal used by the policy."""
+        self._ensure_marker_initialized()
+        self.arm_target_resample_steps[:] = 10**9
+        self.arm_time_buf.zero_()
+
+        base_inv = quat_conjugate(self.base_quat)
+        pos = self.marker_pos_world.unsqueeze(0).expand(self.num_envs, -1)
+        quat = self.marker_quat_world.unsqueeze(0).expand(self.num_envs, -1)
+        self.arm_target_pos_body[:] = quat_apply(base_inv, pos - self.base_pos)
+        self.arm_target_quat_body[:] = quat_mul(base_inv, quat)
+
+        if self._goal_reaching_enabled():
+            self.arm_goal_pos_world[:] = pos
+            self.arm_goal_quat_world[:] = quat
+            self.goal_rho_valid[:] = False
+
+        # Make the new goal visible to the next policy inference immediately;
+        # the regular post-physics hook will refresh the same fields thereafter.
+        self._update_ee_task_space_error()
+        self._print_marker("[marker] committed EE goal")
+
+    def _handle_marker_action(self, action):
+        translations = {
+            "marker_x_up": (0, self._TRANSLATION_STEP),
+            "marker_x_down": (0, -self._TRANSLATION_STEP),
+            "marker_y_up": (1, self._TRANSLATION_STEP),
+            "marker_y_down": (1, -self._TRANSLATION_STEP),
+            "marker_z_up": (2, self._TRANSLATION_STEP),
+            "marker_z_down": (2, -self._TRANSLATION_STEP),
+        }
+        rotations = {
+            "marker_roll_up": (0, self._ROTATION_STEP),
+            "marker_roll_down": (0, -self._ROTATION_STEP),
+            "marker_pitch_up": (1, self._ROTATION_STEP),
+            "marker_pitch_down": (1, -self._ROTATION_STEP),
+            "marker_yaw_up": (2, self._ROTATION_STEP),
+            "marker_yaw_down": (2, -self._ROTATION_STEP),
+        }
+        if action in translations:
+            self._translate_marker(*translations[action])
+        elif action in rotations:
+            self._rotate_marker(*rotations[action])
+        elif action == "marker_confirm":
+            self.commit_marker_pose()
+
+    def _arm_draw_overlay_hook(self):
+        super()._arm_draw_overlay_hook()
+        if not self.marker_initialized:
+            return
+        pos = self.marker_pos_world.detach().cpu().tolist()
+        self.draw_sphere_and_axes(
+            pos,
+            self.marker_quat_world,
+            sphere_radius=0.045,
+            sphere_color=(1.0, 0.0, 1.0),
+            scale=0.16,
+        )
+
+    def render_gui(self, sync_frame_time=True):
+        if self.viewer:
+            if self.fixed_cam:
+                cam_target = gymapi.Vec3(self.root_states[0, 0], self.root_states[0, 1], self.root_states[0, 2])
+                cam_pos = cam_target + gymapi.Vec3(1, 1, 1)
+                self.gym.viewer_camera_look_at(self.viewer, self.envs[0], cam_pos, cam_target)
+
+            if self.gym.query_viewer_has_closed(self.viewer):
+                sys.exit()
+
+            for evt in self.gym.query_viewer_action_events(self.viewer):
+                if evt.action == "QUIT" and evt.value > 0:
+                    sys.exit()
+                if evt.action == "toggle_viewer_sync" and evt.value > 0:
+                    self.enable_viewer_sync = not self.enable_viewer_sync
+                elif evt.action == "fixed_cam" and evt.value > 0:
+                    self.fixed_cam = not self.fixed_cam
+                elif evt.action.startswith("marker_") and evt.value > 0:
+                    self._handle_marker_action(evt.action)
+
+        if self.device != "cpu":
+            self.gym.fetch_results(self.sim, True)
+
+        if self.enable_viewer_sync:
+            self.gym.step_graphics(self.sim)
+            self._draw_viewer_overlays()
+            self.gym.draw_viewer(self.viewer, self.sim, True)
+            if sync_frame_time:
+                self.gym.sync_frame_time(self.sim)
+        else:
+            self._draw_viewer_overlays()
+            self.gym.poll_viewer_events(self.viewer)
 
 
 class HistoryWrapper(gym.Wrapper):
