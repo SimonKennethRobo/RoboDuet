@@ -256,12 +256,7 @@ def arm_obs_dim_parts(cfg):
             "base_roll_pitch_height": 3,
             "base_twist": 6,
             "dog_vel_residual": 3,
-            "gait_phase": 2,
             "dog_contact_states": 4,
-            "manipulability": 1,
-            "joint_limit_distance": cfg.arm.num_actions_arm,
-            "rho": 1,
-            "arm_ema_motion": cfg.arm.num_actions_arm,
             "base_feedforward": 3,
             "arm_actions": cfg.arm.num_actions_arm_cd,
         }
@@ -382,6 +377,11 @@ def privileged_obs_dim_parts(cfg, dof_dim, policy=None):
             parts["arm_link_com_offset"] = 3 * cfg.arm.num_privileged_links
         parts["arm_dof_pos"] = cfg.arm.num_actions_arm
         parts["arm_dof_vel"] = cfg.arm.num_actions_arm
+    if policy == "arm" and getattr(getattr(cfg.wbc, "goal_reaching", None), "enabled", False):
+        parts["goal_manipulability"] = 1
+        parts["goal_joint_limit_distance"] = cfg.arm.num_actions_arm
+        parts["goal_rho"] = 1
+        parts["arm_ema_motion"] = cfg.arm.num_actions_arm
     return parts
 
 

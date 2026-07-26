@@ -1609,8 +1609,6 @@ class WBCEnv(LeggedRobot):
             ee_rot_err_body = quat_apply(base_inv, self.ee_rot_err_axis_angle)
             ee_twist_body = self.get_ee_twist_body()
             contact_states, vel_residual = self._arm_dog_state_obs_terms()
-            phase = 2.0 * np.pi * self.gait_indices
-            gait_phase = torch.stack((torch.sin(phase), torch.cos(phase)), dim=-1)
             obs_buf = torch.cat(
                 (
                     ee_pos_err_body,
@@ -1625,12 +1623,7 @@ class WBCEnv(LeggedRobot):
                     self.base_lin_vel,
                     self.base_ang_vel,
                     vel_residual,
-                    gait_phase,
                     contact_states,
-                    self.goal_manipulability.unsqueeze(-1),
-                    self.goal_joint_limit_distance,
-                    self.goal_rho.unsqueeze(-1),
-                    self.arm_ema_motion,
                     self.base_feedforward_cmd,
                     self.arm_policy_actions,
                 ),
@@ -1664,6 +1657,17 @@ class WBCEnv(LeggedRobot):
             self.obj_obs_abg_in_ee[env_ids] = self.obj_abg_in_ee[env_ids].clone()
 
         privileged_obs_buf = self._get_physics_privileged_observations("arm")
+        if self._goal_reaching_enabled():
+            privileged_obs_buf = torch.cat(
+                (
+                    privileged_obs_buf,
+                    self.goal_manipulability.unsqueeze(-1),
+                    self.goal_joint_limit_distance,
+                    self.goal_rho.unsqueeze(-1),
+                    self.arm_ema_motion,
+                ),
+                dim=-1,
+            )
 
         assert privileged_obs_buf.shape[1] == self.cfg.arm.arm_num_privileged_obs, (
             f"arm num_privileged_obs ({self.cfg.arm.arm_num_privileged_obs}) \
