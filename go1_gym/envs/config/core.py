@@ -505,13 +505,13 @@ def enable_dyna_gait(cfg, layout, min_frequency=0.0):
 
 
 def enable_goal_reaching(cfg, layout):
-    from .wbc import FEATURE_LAYOUT, GOAL_REACHING_REWARD_CONFIG
+    from .wbc import FEATURE_LAYOUT, GOAL_REACHING_REWARD_SCALES
 
     if not cfg.commands.use_dynamic_gait:
         raise ValueError("goal_reaching requires dynamic gait commands")
     cfg.wbc.goal_reaching.enabled = True
     layout.arm_action_cd = cfg.arm.num_actions_arm + FEATURE_LAYOUT["goal_reaching_plan_action_dims"]
-    for name, scale in GOAL_REACHING_REWARD_CONFIG.items():
+    for name, scale in GOAL_REACHING_REWARD_SCALES.items():
         setattr(cfg.wbc.reward_scales, name, scale)
 
 

@@ -9,15 +9,38 @@ Derived observation sizes and runtime feature switches are intentionally kept
 out of this table.  They are calculated in ``core.py`` from these
 source values and the command-line options.
 
-Parameters are grouped by subsystem with short section headers only; no
-per-parameter comments. Every field's meaning, current value rationale and
-tuning direction lives in ``docs/PARAM_TUNING.md``.
+Below the robot/arm wiring tables, parameters are grouped by **which
+stage/mode you'd touch them to tune**, not just by subsystem:
+
+- ``COMMON_OVERRIDES``: infra shared by every stage (robot pose, PD gains,
+  low-level control, dog policy, arm policy layout, base domain rand).
+- ``STAGE1_OVERRIDES``: only read while pretraining the dog with the arm as
+  a disturbance source (``env.stage1_arm_*`` curriculum, ``domain_rand.stage1_arm.*``).
+- ``STAGE2_OVERRIDES``: shared substrate both stage-2 submodes below sit on
+  top of (DLS-IK controller, EE tracking reward/sigma, WBC termination,
+  ``domain_rand.stage2_arm.*``).
+- ``STAGE2_IK_OVERRIDES``: the default stage-2 submode (no ``--goal_reaching``)
+  -- absolute-box SE(3) EE target sampling.
+- ``GOAL_REACHING_OVERRIDES`` / ``GOAL_REACHING_REWARD_SCALES``: the
+  ``--goal_reaching`` submode. Both the sampling/shaping params and the
+  reward weights that only make sense for this submode live together here --
+  tune this one section, not two.
+
+All groups except ``GOAL_REACHING_REWARD_SCALES`` are merged into one
+``ROBODUET_OVERRIDES`` and applied unconditionally at config-build time.
+``GOAL_REACHING_REWARD_SCALES`` is intentionally NOT merged in: those reward
+names only exist on ``cfg.wbc.reward_scales`` (and their ``_reward_*``
+functions only get registered/called) when ``--goal_reaching`` is passed --
+see the docstring above ``GOAL_REACHING_OVERRIDES``.
+
+Parameters carry short section headers only; no per-parameter comments.
+Every field's meaning, current value rationale and tuning direction lives in
+``docs/PARAM_TUNING.md``.
 """
 
 import math
 
 from .core import ConfigProfile
-
 
 ROBOT_ASSET_FILES = {
     "go1": "{MINI_GYM_ROOT_DIR}/resources/robots/arx5p2Go1/urdf/arx5p2Go1.urdf",
@@ -44,7 +67,13 @@ ROBOT_ARM_SPEC = {
 }
 
 
-ROBODUET_OVERRIDES = {
+# ============================================================
+# COMMON: shared by every stage/mode -- robot pose, PD gains, low-level
+# control & asset, env infra + generic critic priv-obs switches, dog
+# policy, arm policy layout (everything except target sampling, which is
+# stage-2-submode-specific below), and base/mount domain randomization.
+# ============================================================
+COMMON_OVERRIDES = {
     # robot init pose (leg + arm joint angles)
     "init_state.default_joint_angles": {
         "FL_hip_joint": 0.1,
@@ -116,7 +145,6 @@ ROBODUET_OVERRIDES = {
     "env.priv_observe_vel": True,
     "env.priv_observe_arm_mount_tf": True,
     "env.priv_observe_high_freq_goal": False,
-    "env.priv_observe_stage1_ee_payload_mass": True,
     # base body commands
     "commands.body_roll_range": [-0.4, 0.4],
     "commands.limit_body_roll": [-0.4, 0.4],
@@ -128,7 +156,7 @@ ROBODUET_OVERRIDES = {
     "dog.dog_num_observation_history": 30,
     "dog.dog_num_commands": 6,
     "dog.use_adaptation_module": False,
-    "dog.add_obs_noise": True,
+    "dog.add_obs_noise": False,
     "dog.observe_lin_vel": True,
     "dog.observe_pose_actual": True,
     "dog.observe_track_error": True,
@@ -178,28 +206,46 @@ ROBODUET_OVERRIDES = {
         "x5_joint8": 100.0,
         "x5_gripper_joint": 100.0,
     },
-    # arm policy layout
+    # arm policy layout (target sampling lives in the stage-2 submode blocks)
     "arm.num_actions_arm": 6,
     "arm.num_actions_arm_cd": 6,
     "arm.num_privileged_links": 8,
     "arm.arm_num_observation_history": 60,
     "arm.arm_num_commands": 6,
     "arm.use_adaptation_module": False,
-    # arm target sampling (absolute box SE(3))
-    "arm.target.pos_range": [[0.0, 0.55], [-0.4, 0.4], [0.25, 0.9]],
-    "arm.target.roll_ee": [-math.radians(20.0), math.radians(20.0)],
-    "arm.target.pitch_ee": [-math.radians(20.0), math.radians(20.0)],
-    "arm.target.yaw_ee": [-math.radians(20.0), math.radians(20.0)],
-    "arm.target.resample_time_s": [2.0, 3.0],
-    # arm DLS-IK controller
-    "arm.ik.damping": 0.1,
-    "arm.ik.step_gain": 1.0,
-    "arm.ik.max_step_rad": 0.5,
-    "arm.ik.residual_scale": 0.07,
-    "arm.ik.pos_weight": 1.0,
-    "arm.ik.rot_weight": 3.0,
-    "arm.ik.ee_local_pos": [0.1424, 0.0, 0.0001057],
-    # stage-1 arm disturbance curriculum
+    # rewards: locomotion (dog) -- these are cfg.reward_scales.*, the base
+    # namespace shared by pretrained-dog and WBC reward tables alike (see
+    # LeggedRobot._prepare_reward_function's pretrained -> wbc fallback merge)
+    "rewards.terminal_body_height": 0.17,
+    "reward_scales.loco_energy": -0.00004,
+    "reward_scales.response_consistency": -0.05,
+    # domain randomization: base & mount
+    "domain_rand.dog_obs_frame_drop_prob": 0.0,
+    "domain_rand.added_mass_range": [-2.0, 2.0],
+    "domain_rand.randomize_lag_timesteps": False,
+    "domain_rand.randomize_end_effector_force": False,
+    "domain_rand.max_force": 15.0,
+    "domain_rand.max_force_offset": 0.01,
+    "domain_rand.randomize_mount_position": True,
+    "domain_rand.mount_position_range": [[-0.05, 0.05], [-0.02, 0.02], [-0.05, 0.05]],
+    "domain_rand.randomize_mount_rotation": True,
+    "domain_rand.mount_rpy_range": [
+        [-0.05236, 0.05236],
+        [-0.05236, 0.05236],
+        [-0.08727, 0.08727],
+    ],
+    "domain_rand.mount_tf_buckets": 16,
+    "domain_rand.mount_tf_bucket_seed": 1234,
+}
+
+
+# ============================================================
+# STAGE 1: dog-only pretraining while the arm is a disturbance source, not
+# policy-driven. Only these keys are stage-1-exclusive; PD gains, dog
+# policy layout etc. above are shared infra, not stage-1 params.
+# ============================================================
+STAGE1_OVERRIDES = {
+    "env.priv_observe_stage1_ee_payload_mass": True,
     "env.stage1_arm_ramp_iterations": 20000,
     "env.stage1_arm_fixed_fraction": 0.1,
     "env.stage1_arm_saturation_fraction": 0.8,
@@ -209,11 +255,42 @@ ROBODUET_OVERRIDES = {
     "env.stage1_arm_max_accel": 10.0,
     "env.stage1_arm_max_vel": 5.0,
     "env.stage1_arm_init_dof_pos_noise": 1.0,
-    # rewards: locomotion (dog)
-    "rewards.terminal_body_height": 0.17,
-    "reward_scales.loco_energy": -0.00004,
-    "reward_scales.response_consistency": -0.05,
-    # rewards: WBC / arm task-space (stage-2)
+    # domain randomization: stage-1 arm (incl. EE payload)
+    "domain_rand.stage1_arm.randomize_Kp_factor": True,
+    "domain_rand.stage1_arm.Kp_factor_range": [0.5, 1.5],
+    "domain_rand.stage1_arm.randomize_Kd_factor": True,
+    "domain_rand.stage1_arm.Kd_factor_range": [0.2, 2.0],
+    "domain_rand.stage1_arm.randomize_motor_strength": True,
+    "domain_rand.stage1_arm.motor_strength_range": [0.7, 1.3],
+    "domain_rand.stage1_arm.randomize_motor_offset": True,
+    "domain_rand.stage1_arm.motor_offset_range": 0.05,
+    "domain_rand.stage1_arm.randomize_link_mass": True,
+    "domain_rand.stage1_arm.link_mass_range": [0.1, 2.0],
+    "domain_rand.stage1_arm.randomize_link_com": True,
+    "domain_rand.stage1_arm.link_com_range": 0.1,
+    "domain_rand.stage1_arm.randomize_ee_payload": True,
+    "domain_rand.stage1_arm.ee_payload_mass_range": [0.0, 1.5],
+}
+
+
+# ============================================================
+# STAGE 2 (shared substrate): both stage-2 submodes below -- legacy IK box
+# reaching and --goal_reaching -- sit on top of this. The DLS-IK
+# controller, EE tracking reward/sigma and WBC termination are identical
+# in both submodes; only target *sampling* differs (see the two blocks
+# further down).
+# ============================================================
+STAGE2_OVERRIDES = {
+    # arm DLS-IK controller (consumes the actor's first 6 action dims in
+    # both stage-2 submodes)
+    "arm.ik.damping": 0.1,
+    "arm.ik.step_gain": 1.0,
+    "arm.ik.max_step_rad": 0.5,
+    "arm.ik.residual_scale": 0.07,
+    "arm.ik.pos_weight": 1.0,
+    "arm.ik.rot_weight": 3.0,
+    "arm.ik.ee_local_pos": [0.1424, 0.0, 0.0001057],
+    # rewards: WBC / arm task-space
     "wbc.use_vision": False,
     "rewards.ee_pos_tracking_sigma": 0.02,
     "rewards.ee_rot_tracking_sigma": 0.25,
@@ -222,16 +299,6 @@ ROBODUET_OVERRIDES = {
     "wbc.reward_scales.arm_control_limits": -0.0001,
     "wbc.reward_scales.ee_smoothness": -1e-4,
     "wbc.reward_scales.arm_contact": -1.0,
-    "wbc.reward_scales.goal_pos_l2": 0.0,
-    "wbc.reward_scales.reachability_barrier": 0.0,
-    "wbc.reward_scales.manipulability": 0.0,
-    "wbc.reward_scales.joint_limit_barrier": 0.0,
-    "wbc.reward_scales.arm_ema_motion": 0.0,
-    "wbc.reward_scales.rho_rate": 0.0,
-    "wbc.reward_scales.upper_action_rate": 0.0,
-    "wbc.reward_scales.delta_vel_magnitude": 0.0,
-    "wbc.reward_scales.posture_command_rate": 0.0,
-    "wbc.reward_scales.stay_still_in_reach_sector": 0.0,
     "wbc.reward_scales.jump": 5.0,
     "wbc.reward_scales.hip_action_l2": -0.05,
     "wbc.reward_scales.raibert_heuristic": -0.0,
@@ -241,10 +308,86 @@ ROBODUET_OVERRIDES = {
     "wbc.rewards.use_terminal_pitch": False,
     "wbc.rewards.terminal_body_roll": 0.10,
     "wbc.rewards.terminal_body_pitch": 0.2,
-    # Intermediate whole-body milestone: static world-frame SE(3) goal.
-    # The upper actor layout follows project-design-v3 §8.2 without trajectory
-    # preview/time-law inputs: dq(6), dv(3), posture(3). Gait frequency,
-    # swing height and stance width remain fixed configurable dog commands.
+    # domain randomization: stage-2 arm (tighter than stage-1 -- stage-2
+    # wants cm-level precision, see docs/PARAM_TUNING.md §11)
+    "domain_rand.stage2_arm.randomize_Kp_factor": True,
+    "domain_rand.stage2_arm.Kp_factor_range": [0.9, 1.1],
+    "domain_rand.stage2_arm.randomize_Kd_factor": True,
+    "domain_rand.stage2_arm.Kd_factor_range": [0.9, 1.1],
+    "domain_rand.stage2_arm.randomize_motor_strength": True,
+    "domain_rand.stage2_arm.motor_strength_range": [0.85, 1.15],
+    "domain_rand.stage2_arm.randomize_motor_offset": True,
+    "domain_rand.stage2_arm.motor_offset_range": 0.025,
+    "domain_rand.stage2_arm.randomize_link_mass": False,
+    "domain_rand.stage2_arm.link_mass_range": [0.9, 1.1],
+    "domain_rand.stage2_arm.randomize_link_com": False,
+    "domain_rand.stage2_arm.link_com_range": 0.01,
+}
+
+
+# Also stage-2-shared, but NOT an override dict like the sections above --
+# core._derive_wbc_rewards(cfg, WBC_REWARD_FACTORS) multiplies each factor by
+# the matching cfg.reward_scales.* (dog/pretrained) value to derive
+# cfg.wbc.reward_scales.{tracking_lin_vel,tracking_ang_vel,arm_energy,
+# arm_dof_vel,arm_dof_acc,arm_action_rate,arm_action_smoothness_1,_2} at
+# build time, so the arm-side reward stays proportional to its dog-side
+# counterpart instead of needing separate hand-tuning. It can't be a
+# "wbc.reward_scales.X": value entry in STAGE2_OVERRIDES because the value
+# isn't a literal -- it's a ratio applied to another config field.
+WBC_REWARD_FACTORS = {
+    "tracking_lin_vel": 0.7,
+    "tracking_ang_vel": 0.5,
+    "arm_energy": -0.00004,
+    "arm_dof_vel": 0.01,
+    "arm_dof_acc": 0.01,
+    "arm_action_rate": 0.001,
+    "arm_action_smoothness_1": 0.001,
+    "arm_action_smoothness_2": 0.001,
+}
+
+
+# ============================================================
+# STAGE 2 - IK submode (default, no --goal_reaching): absolute box SE(3)
+# EE target sampled in the base frame every resample, tracked purely by
+# DLS-IK (STAGE2_OVERRIDES above) + a small policy residual. This is the
+# ONLY thing exclusive to this submode -- everything else it needs is
+# shared STAGE2_OVERRIDES.
+# ============================================================
+STAGE2_IK_OVERRIDES = {
+    "arm.target.pos_range": [[0.0, 0.55], [-0.4, 0.4], [0.25, 0.9]],
+    "arm.target.roll_ee": [-math.radians(20.0), math.radians(20.0)],
+    "arm.target.pitch_ee": [-math.radians(20.0), math.radians(20.0)],
+    "arm.target.yaw_ee": [-math.radians(20.0), math.radians(20.0)],
+    "arm.target.resample_time_s": [2.0, 3.0],
+}
+
+
+# ============================================================
+# GOAL REACHING (--goal_reaching) submode: static world-frame SE(3) goal,
+# upper actor outputs Δq_arm(6) + Δv_base(3) + posture(3). Params AND
+# reward weights that only matter for this submode live together in this
+# section -- tune GOAL_REACHING_OVERRIDES / GOAL_REACHING_REWARD_SCALES,
+# nothing else.
+#
+# GOAL_REACHING_OVERRIDES (the params) IS folded into the always-applied
+# ROBODUET_OVERRIDES below, because WBCEnv._resample_arm_target unconditionally
+# evaluates `self.cfg.arm.target`/reads `getattr(self.cfg.wbc, "goal_reaching",
+# None)` every resample regardless of the flag, and code that actually acts on
+# goal-reaching state (WBCEnv.plan(), _update_goal_reaching_diagnostics()) is
+# itself gated behind _goal_reaching_enabled(), so the section is cheap and
+# harmless to keep always-present.
+#
+# GOAL_REACHING_REWARD_SCALES (the weights) is deliberately NOT folded in --
+# LeggedRobot._prepare_reward_function only registers/calls a _reward_* method
+# for names that exist in cfg.wbc.reward_scales, so if these names are absent
+# when --goal_reaching is off, _reward_goal_pos_l2/_reward_reachability_barrier/
+# etc. are simply never called (not called-with-zero-weight). core.
+# enable_goal_reaching() copies GOAL_REACHING_REWARD_SCALES onto
+# cfg.wbc.reward_scales only when the flag is passed. One side effect: runs
+# without --goal_reaching no longer log these reward names in
+# episode_sums/wandb at all (previously they showed up pinned at 0).
+# ============================================================
+GOAL_REACHING_OVERRIDES = {
     "wbc.goal_reaching.enabled": False,
     # x/y are a body-relative offset sampled at goal resample time; z is an
     # absolute world-frame height (e.g. [0.25, 0.90] = 0.25m-0.90m above the
@@ -278,63 +421,28 @@ ROBODUET_OVERRIDES = {
     "wbc.goal_reaching.success_rot_threshold": 0.25,
     "wbc.goal_reaching.stay_sector_radius": 0.60,
     "wbc.goal_reaching.stay_sector_half_angle": math.radians(90.0),
-    # domain randomization: base & mount
-    "domain_rand.dog_obs_frame_drop_prob": 0.02,
-    "domain_rand.added_mass_range": [-2.0, 2.0],
-    "domain_rand.randomize_lag_timesteps": False,
-    "domain_rand.randomize_end_effector_force": False,
-    "domain_rand.max_force": 15.0,
-    "domain_rand.max_force_offset": 0.01,
-    "domain_rand.randomize_mount_position": True,
-    "domain_rand.mount_position_range": [[-0.05, 0.05], [-0.02, 0.02], [-0.05, 0.05]],
-    "domain_rand.randomize_mount_rotation": True,
-    "domain_rand.mount_rpy_range": [
-        [-0.05236, 0.05236],
-        [-0.05236, 0.05236],
-        [-0.08727, 0.08727],
-    ],
-    "domain_rand.mount_tf_buckets": 16,
-    "domain_rand.mount_tf_bucket_seed": 1234,
-    # domain randomization: stage-1 arm (incl. EE payload)
-    "domain_rand.stage1_arm.randomize_Kp_factor": True,
-    "domain_rand.stage1_arm.Kp_factor_range": [0.5, 1.5],
-    "domain_rand.stage1_arm.randomize_Kd_factor": True,
-    "domain_rand.stage1_arm.Kd_factor_range": [0.2, 2.0],
-    "domain_rand.stage1_arm.randomize_motor_strength": True,
-    "domain_rand.stage1_arm.motor_strength_range": [0.7, 1.3],
-    "domain_rand.stage1_arm.randomize_motor_offset": True,
-    "domain_rand.stage1_arm.motor_offset_range": 0.05,
-    "domain_rand.stage1_arm.randomize_link_mass": True,
-    "domain_rand.stage1_arm.link_mass_range": [0.1, 2.0],
-    "domain_rand.stage1_arm.randomize_link_com": True,
-    "domain_rand.stage1_arm.link_com_range": 0.1,
-    "domain_rand.stage1_arm.randomize_ee_payload": True,
-    "domain_rand.stage1_arm.ee_payload_mass_range": [0.0, 1.5],
-    # domain randomization: stage-2 arm
-    "domain_rand.stage2_arm.randomize_Kp_factor": True,
-    "domain_rand.stage2_arm.Kp_factor_range": [0.9, 1.1],
-    "domain_rand.stage2_arm.randomize_Kd_factor": True,
-    "domain_rand.stage2_arm.Kd_factor_range": [0.9, 1.1],
-    "domain_rand.stage2_arm.randomize_motor_strength": True,
-    "domain_rand.stage2_arm.motor_strength_range": [0.85, 1.15],
-    "domain_rand.stage2_arm.randomize_motor_offset": True,
-    "domain_rand.stage2_arm.motor_offset_range": 0.025,
-    "domain_rand.stage2_arm.randomize_link_mass": False,
-    "domain_rand.stage2_arm.link_mass_range": [0.9, 1.1],
-    "domain_rand.stage2_arm.randomize_link_com": False,
-    "domain_rand.stage2_arm.link_com_range": 0.01,
+}
+
+GOAL_REACHING_REWARD_SCALES = {
+    "goal_pos_l2": -2.0,
+    "reachability_barrier": -0.2,
+    "manipulability": 0.05,
+    "joint_limit_barrier": -0.02,
+    "arm_ema_motion": -0.05,
+    "rho_rate": -0.02,
+    "upper_action_rate": -0.02,
+    "delta_vel_magnitude": -0.05,
+    "posture_command_rate": -0.02,
+    "stay_still_in_reach_sector": -0.05,
 }
 
 
-WBC_REWARD_FACTORS = {
-    "tracking_lin_vel": 0.7,
-    "tracking_ang_vel": 0.5,
-    "arm_energy": -0.00004,
-    "arm_dof_vel": 0.01,
-    "arm_dof_acc": 0.01,
-    "arm_action_rate": 0.001,
-    "arm_action_smoothness_1": 0.001,
-    "arm_action_smoothness_2": 0.001,
+ROBODUET_OVERRIDES = {
+    **COMMON_OVERRIDES,
+    **STAGE1_OVERRIDES,
+    **STAGE2_OVERRIDES,
+    **STAGE2_IK_OVERRIDES,
+    **GOAL_REACHING_OVERRIDES,
 }
 
 
@@ -351,20 +459,6 @@ DYNAMIC_GAIT_BIN_CONFIG = {
     "commands.num_bins_gait_duration": 3,
     "commands.num_bins_stance_width": 3,
     "commands.num_bins_stance_length": 3,
-}
-
-
-GOAL_REACHING_REWARD_CONFIG = {
-    "goal_pos_l2": -2.0,
-    "reachability_barrier": -0.2,
-    "manipulability": 0.05,
-    "joint_limit_barrier": -0.02,
-    "arm_ema_motion": -0.05,
-    "rho_rate": -0.02,
-    "upper_action_rate": -0.02,
-    "delta_vel_magnitude": -0.05,
-    "posture_command_rate": -0.02,
-    "stay_still_in_reach_sector": -0.05,
 }
 
 
