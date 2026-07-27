@@ -1485,6 +1485,52 @@ class WBCEnv(LeggedRobot):
         self._draw_ee_ori_coord()
         self._draw_command_ori_coord()
         self._draw_policy_trajectory()
+        self._draw_trajectory_viewer()
+
+    def _trajectory_path_points(self, env_id, max_points=80):
+        """Sub-sampled world-frame points of the full reference path for
+        env_id (only the arc-length grid up to L; the padded tail is skipped)."""
+        tb = self.traj_batch
+        n_valid = int((tb.gamma_s[env_id] < tb.L[env_id] - 1e-6).sum().item()) + 1
+        n_valid = max(2, min(n_valid, tb.max_gamma_points))
+        stride = max(1, n_valid // max_points)
+        return tb.gamma_p[env_id, :n_valid:stride], n_valid
+
+    def _draw_trajectory_viewer(self, env_id=0):
+        """Live-viewer overlay for trajectory mode: full path polyline, sparse
+        RGB orientation axes along it, the look-ahead preview window
+        (spheres+axes), and a marker at the current arc-length progress."""
+        if self.headless or self.viewer is None or not self._traj_tracking_enabled():
+            return
+        tb = self.traj_batch
+        if float(tb.L[env_id]) <= 1e-3:
+            return
+
+        path, n_valid = self._trajectory_path_points(env_id)
+        self._draw_viewer_polyline(path.detach().cpu().numpy().astype(np.float32), (0.4, 0.4, 1.0), env_id)
+
+        # sparse orientation axes along the path (RGB = local frame)
+        for i in torch.linspace(0, n_valid - 1, 8, device=self.device).long().tolist():
+            p = tb.gamma_p[env_id, i]
+            q = self._traj_mat_to_quat(tb.gamma_R[env_id, i])
+            self.draw_coord_pos_quat(p[0].item(), p[1].item(), p[2].item(), q, scale=0.05)
+
+        # look-ahead preview window (brighter, with pose)
+        tcfg = self.cfg.wbc.goal_reaching.trajectory
+        _, p_k, R_k, _ = tb.sample_preview(self.traj_s, float(tcfg.preview_horizon), int(tcfg.preview_points))
+        q_k = self._traj_mat_to_quat(R_k[env_id])
+        for k in range(p_k.shape[1]):
+            p = p_k[env_id, k]
+            self.draw_sphere_and_axes(
+                (p[0].item(), p[1].item(), p[2].item()), q_k[k], 0.012, (1.0, 0.6, 0.0), scale=0.04
+            )
+
+        # current progress point (where the EE projects onto the path)
+        prog = tb.p_at(self.traj_s)[env_id]
+        self.draw_sphere_and_axes(
+            (prog[0].item(), prog[1].item(), prog[2].item()),
+            self.end_effector_state[env_id, 3:7], 0.02, (0.1, 1.0, 0.1), scale=0.0,
+        )
 
     def _policy_command_overlay_panels(self, env_id=0):
         """Return (left_lines, right_lines) for two-panel overlay."""
@@ -1615,7 +1661,34 @@ class WBCEnv(LeggedRobot):
         if valid[0]:
             cv2.circle(frame, tuple(pixels[0]), 5, (0, 255, 255, 255), -1, cv2.LINE_AA)
 
+    def _overlay_trajectory_video(self, frame, env_id, env_handle, camera_handle):
+        """Recorded-video overlay for trajectory mode: project the full path
+        polyline and the preview window onto the frame."""
+        if not (self._traj_tracking_enabled() and self.cfg.env.recording_overlay_trajectory):
+            return
+        tb = self.traj_batch
+        if float(tb.L[env_id]) <= 1e-3:
+            return
+        path, _ = self._trajectory_path_points(env_id)
+        path_np = path.detach().cpu().numpy().astype(np.float32)
+        try:
+            px, valid = self._project_world_points_to_camera(path_np, env_handle, camera_handle)
+        except Exception:
+            return
+        for i in range(len(px) - 1):
+            if valid[i] and valid[i + 1]:
+                cv2.line(frame, tuple(px[i]), tuple(px[i + 1]), (60, 180, 255, 255), 1, cv2.LINE_AA)
+
+        tcfg = self.cfg.wbc.goal_reaching.trajectory
+        _, p_k, _, _ = tb.sample_preview(self.traj_s, float(tcfg.preview_horizon), int(tcfg.preview_points))
+        pk_np = p_k[env_id].detach().cpu().numpy().astype(np.float32)
+        pxk, vk = self._project_world_points_to_camera(pk_np, env_handle, camera_handle)
+        for i in range(len(pxk)):
+            if vk[i]:
+                cv2.circle(frame, tuple(pxk[i]), 3, (0, 200, 255, 255), -1, cv2.LINE_AA)
+
     def _arm_render_overlay_hook(self, frame, env_id, env_handle, camera_handle):
+        self._overlay_trajectory_video(frame, env_id, env_handle, camera_handle)
         self._overlay_policy_trajectory(frame, env_id, env_handle, camera_handle)
         if self.cfg.env.recording_overlay_text:
             self._overlay_policy_text(frame, env_id)
