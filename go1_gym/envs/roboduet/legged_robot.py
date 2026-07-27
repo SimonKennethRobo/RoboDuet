@@ -758,6 +758,10 @@ class LeggedRobot(BaseTask):
             "delta_vel_magnitude",
             "posture_command_rate",
             "stay_still_in_reach_sector",
+            "traj_progress",
+            "traj_lateral_err",
+            "traj_timing",
+            "traj_twist_err",
         }
 
     def _update_dog_vel_ref(self):

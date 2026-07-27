@@ -191,6 +191,30 @@ class Rewards:
         vel_cmd_sq = torch.sum(torch.square(self.env.commands_dog[:, :3]), dim=-1)
         return torch.where(in_sector, vel_cmd_sq, torch.zeros_like(vel_cmd_sq))
 
+    # ---- trajectory tracking (target_mode='trajectory', Group T) ----
+    # All read env buffers precomputed each step in _arm_post_physics_hook.
+
+    def _reward_traj_progress(self):
+        """Reward the EE actually advancing along the path (measured arc-length
+        speed, clamped >=0 so backsliding isn't rewarded)."""
+        return self.env.traj_sdot_meas.clamp(min=0.0)
+
+    def _reward_traj_lateral_err(self):
+        """Penalize distance from the EE to the reference path (d_lat)."""
+        return self.env.traj_d_lat
+
+    def _reward_traj_timing(self):
+        """Deadzone penalty on being ahead of / behind the reference arc length
+        by more than tau (a time-tube of tolerance)."""
+        tau = float(self.env.cfg.wbc.goal_reaching.trajectory.timing_tau)
+        return F.relu(self.env.traj_timing_err.abs() - tau)
+
+    def _reward_traj_twist_err(self):
+        """Penalize EE spatial velocity that deviates from the reference
+        velocity (tangent * sdot_ref) -- i.e. wrong speed or off-tangent
+        motion."""
+        return self.env.traj_twist_err
+
     def _reward_dof_pos_limits(self):
         # Penalize dof positions too close to the limit
         out_of_limits = -(self.env.dof_pos - self.env.dof_pos_limits[:, 0]).clip(max=0.)  # lower limit

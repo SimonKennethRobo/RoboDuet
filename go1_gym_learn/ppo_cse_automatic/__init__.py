@@ -464,6 +464,9 @@ class Runner:
                         elif key.startswith("reset_curriculum_"):
                             name = key.replace("reset_curriculum_", "", 1)
                             wandb_dict["Curriculum/reset_" + name] = mean
+                        elif key.startswith("traj_curriculum_"):
+                            name = key.replace("traj_curriculum_", "", 1)
+                            wandb_dict["Curriculum/traj_" + name] = mean
                         elif key.startswith("perf_"):
                             name = key.replace("perf_", "", 1)
                             wandb_dict["Performance/" + name] = mean

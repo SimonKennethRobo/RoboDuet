@@ -128,6 +128,13 @@ class WBCEnv(LeggedRobot):
             and getattr(self, "num_plan_actions", 0) == 6
         )
 
+    def _traj_tracking_enabled(self):
+        goal_cfg = getattr(self.cfg.wbc, "goal_reaching", None)
+        return bool(
+            self._goal_reaching_enabled()
+            and getattr(goal_cfg, "target_mode", "static") == "trajectory"
+        )
+
     def _get_object_pose_in_ee(self):
         env_ids = torch.arange(self.num_envs, device=self.device)
         xyz = self._arm_target_pos_world(env_ids)
@@ -738,6 +745,56 @@ class WBCEnv(LeggedRobot):
             self.num_envs, self.cfg.dog.dog_num_observations, dtype=torch.float, device=self.device
         )
 
+        self._traj_tracking_init_hook()
+
+
+    def _traj_tracking_init_hook(self):
+        """Build the trajectory batch, pre-generated bank and M10 curriculum,
+        and preallocate the per-env progress/error buffers. Inert unless
+        target_mode='trajectory'."""
+        if not self._traj_tracking_enabled():
+            return
+        from modules.trajectory import TrajectoryBatch, mat_to_quat
+        from modules.curriculum import CurriculumManager, TrajectoryBank
+
+        self._traj_mat_to_quat = mat_to_quat
+        tcfg = self.cfg.wbc.goal_reaching.trajectory
+        self._traj_max_g = int(tcfg.max_gamma_points)
+        self._traj_max_t = int(tcfg.max_tl_points)
+
+        self.traj_curriculum = CurriculumManager(
+            self.num_envs, self.device,
+            n_levels_A=int(tcfg.n_levels_A), n_levels_B=int(tcfg.n_levels_B),
+            success_threshold=float(tcfg.curriculum_success_threshold),
+            fail_threshold=float(tcfg.curriculum_fail_threshold),
+            ema_alpha=float(tcfg.curriculum_ema_alpha),
+        )
+        self.traj_bank = TrajectoryBank(
+            self.traj_curriculum, per_cell=int(tcfg.bank_per_cell),
+            max_gamma_points=self._traj_max_g, max_tl_points=self._traj_max_t,
+            device=self.device,
+        )
+        self.traj_batch = TrajectoryBatch(
+            self.num_envs, self._traj_max_g, self._traj_max_t, device=self.device
+        )
+
+        z = lambda: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.traj_s = z()
+        self.traj_s_prev = z()
+        self.traj_sim_time = z()
+        self.traj_d_lat = z()
+        self.traj_sdot_meas = z()
+        self.traj_timing_err = z()
+        self.traj_twist_err = z()
+        # episode success accumulators (mean over the episode)
+        self.traj_dlat_sum = z()
+        self.traj_timing_abs_sum = z()
+        self.traj_ik_jump_max = z()
+        self.traj_samples = z()
+        self._traj_anchor_offset = torch.tensor(
+            list(tcfg.anchor_offset_body), dtype=torch.float, device=self.device
+        ).view(1, 3)
+
 
     def _arm_pre_step_hook(self):
         self._apply_stage1_arm_curriculum_actions()
@@ -762,10 +819,18 @@ class WBCEnv(LeggedRobot):
         )
         if global_switch.switch_open:
             self.gym.refresh_jacobian_tensors(self.sim)
+            if self._traj_tracking_enabled():
+                self._advance_trajectory_target()
             self._update_ee_task_space_error()
             if self._goal_reaching_enabled():
                 self._update_goal_reaching_diagnostics()
+            if self._traj_tracking_enabled():
+                self._update_trajectory_progress()
             self.prev_ee_twist_body[:] = self.get_ee_twist_body()
+            if self._traj_tracking_enabled():
+                # Trajectory mode ends by timeout/fall/completion, not by the
+                # static per-timer/reach-success target resample.
+                return
             due = self.arm_time_buf >= self.arm_target_resample_steps
             if self._goal_reaching_enabled():
                 goal_cfg = self.cfg.wbc.goal_reaching
@@ -779,6 +844,48 @@ class WBCEnv(LeggedRobot):
                 due |= reached
             if torch.any(due):
                 self._resample_arm_target(due.nonzero(as_tuple=False).flatten())
+
+    def _advance_trajectory_target(self):
+        """Advance reference time and write the current moving SE(3) reference
+        into arm_goal_pos/quat_world, which every downstream reader (v_ff,
+        rho diagnostics, IK task error, obs) already consumes."""
+        self.traj_sim_time += self.dt
+        s_ref_now = self.traj_batch.s_ref(self.traj_sim_time)
+        self.arm_goal_pos_world[:] = self.traj_batch.p_at(s_ref_now)
+        self.arm_goal_quat_world[:] = self._traj_mat_to_quat(self.traj_batch.R_at(s_ref_now))
+
+    def _update_trajectory_progress(self):
+        """Update the EE's arc-length progress (forward-window projection) and
+        the tracking error buffers consumed by the traj_* rewards / obs."""
+        self.traj_s_prev[:] = self.traj_s
+        from modules.trajectory import quat_to_mat, update_s_batch
+
+        ee_R = quat_to_mat(self.end_effector_state[:, 3:7])  # xyzw
+        self.traj_s[:], self.traj_d_lat[:] = update_s_batch(
+            self.traj_s, self.end_effector_state[:, :3], ee_R, self.traj_batch,
+            window=float(self.cfg.wbc.goal_reaching.trajectory.update_s_window),
+        )
+        self.traj_sdot_meas[:] = (self.traj_s - self.traj_s_prev) / self.dt
+        s_ref_now = self.traj_batch.s_ref(self.traj_sim_time)
+        self.traj_timing_err[:] = self.traj_s - s_ref_now
+
+        # EE spatial (grasp-point) velocity in world vs. reference tangent*sdot_ref
+        v_origin = self.end_effector_state[:, 7:10]
+        w = self.end_effector_state[:, 10:13]
+        d_world = quat_apply(self.end_effector_state[:, 3:7], self.ee_local_offset.expand(self.num_envs, -1))
+        v_grasp = v_origin + torch.cross(w, d_world, dim=-1)
+        tangent = self.traj_batch.tangent_at(self.traj_s)
+        sdot_ref = self.traj_batch.sdot_ref(self.traj_sim_time)
+        v_ref = tangent * sdot_ref.unsqueeze(-1)
+        self.traj_twist_err[:] = torch.linalg.vector_norm(v_grasp - v_ref, dim=-1)
+
+        # episode success accumulators
+        arm_slice = slice(self.num_actions_loco, self.num_actions_loco + self.num_actions_arm)
+        step_dq = torch.linalg.vector_norm(self.dof_vel[:, arm_slice] * self.dt, dim=-1)
+        self.traj_ik_jump_max[:] = torch.maximum(self.traj_ik_jump_max, step_dq)
+        self.traj_dlat_sum += self.traj_d_lat
+        self.traj_timing_abs_sum += self.traj_timing_err.abs()
+        self.traj_samples += 1.0
 
     def _arm_check_termination_hook(self):
         pass
@@ -874,7 +981,10 @@ class WBCEnv(LeggedRobot):
         self.stage1_arm_target_vel[env_ids] = 0.0
         self.stage1_arm_target_accel[env_ids] = 0.0
         if self._goal_reaching_enabled():
-            self._resample_arm_target(env_ids)
+            if self._traj_tracking_enabled():
+                self._reset_trajectories(env_ids)
+            else:
+                self._resample_arm_target(env_ids)
             self._reset_goal_commands(env_ids)
             self.arm_policy_actions[env_ids] = 0.0
             self.last_arm_policy_actions[env_ids] = 0.0
@@ -882,6 +992,61 @@ class WBCEnv(LeggedRobot):
             self.goal_rho[env_ids] = 0.0
             self.goal_rho_prev[env_ids] = 0.0
             self.goal_rho_valid[env_ids] = False
+
+    def _reset_trajectories(self, env_ids):
+        """For the reset envs: score the finished episode for the curriculum,
+        pick a new (harder-as-mastered) cell, gather a fresh trajectory from
+        the bank, anchor it to a reachable spot in front of the shoulder, and
+        clear the per-env progress state."""
+        if len(env_ids) == 0:
+            return
+        tcfg = self.cfg.wbc.goal_reaching.trajectory
+
+        # 1. report the finished episode to the curriculum (train envs only,
+        #    and only those that actually ran an episode). Uses the OLD cell,
+        #    before sample_cells overwrites it.
+        train_done = (env_ids < self.num_train_envs) & (self.traj_samples[env_ids] > 0)
+        if torch.any(train_done):
+            rep_ids = env_ids[train_done]
+            samples = self.traj_samples[rep_ids].clamp_min(1.0)
+            progress = self.traj_s[rep_ids] / self.traj_batch.L[rep_ids].clamp_min(1e-6)
+            mean_dlat = self.traj_dlat_sum[rep_ids] / samples
+            mean_timing = self.traj_timing_abs_sum[rep_ids] / samples
+            success = (
+                (progress > float(tcfg.success_progress))
+                & (mean_dlat < float(tcfg.success_dlat))
+                & (mean_timing < float(tcfg.success_timing))
+                & (self.traj_ik_jump_max[rep_ids] < float(tcfg.ik_jump_threshold))
+                & self.time_out_buf[rep_ids]  # finished by timeout, not a fall
+            )
+            self.traj_curriculum.report_result(rep_ids, success)
+
+        # 2. sample a new cell for every reset env, gather a bank trajectory
+        self.traj_curriculum.sample_cells(env_ids)
+        rows = self.traj_bank.sample_rows(
+            self.traj_curriculum.cell_A[env_ids],
+            self.traj_curriculum.cell_B[env_ids],
+            self.traj_curriculum.rng,
+        )
+        self.traj_batch.load_from_stacked(env_ids, self.traj_bank.batch, rows)
+
+        # 3. anchor the origin-centered path in front of the shoulder (world
+        #    axes -- the base yaws to follow via v_ff)
+        mount_offset_body = self.arm_mount_tfs[env_ids, :3]
+        shoulder_world = self.base_pos[env_ids] + quat_apply(self.base_quat[env_ids], mount_offset_body)
+        anchor = shoulder_world + quat_apply(
+            self.base_quat[env_ids], self._traj_anchor_offset.expand(len(env_ids), -1)
+        )
+        self.traj_batch.gamma_p[env_ids] += anchor.unsqueeze(1)
+
+        # 4. clear per-env progress state + episode accumulators
+        for buf in (
+            self.traj_s, self.traj_s_prev, self.traj_sim_time, self.traj_d_lat,
+            self.traj_sdot_meas, self.traj_timing_err, self.traj_twist_err,
+            self.traj_dlat_sum, self.traj_timing_abs_sum, self.traj_ik_jump_max,
+            self.traj_samples,
+        ):
+            buf[env_ids] = 0.0
 
     def _randomize_arm_dof_props(self, env_ids):
         """Override arm DOF slice in Kp/Kd/strength/offset buffers with stage-specific ranges."""
@@ -1255,6 +1420,13 @@ class WBCEnv(LeggedRobot):
         extras["perf_ee_position_rmse_m"] = self._mean_valid_metric(position_rmse, valid)
         extras["perf_ee_orientation_rmse_rad"] = self._mean_valid_metric(orientation_rmse, valid)
 
+        if self._traj_tracking_enabled():
+            st = self.traj_curriculum.stats()
+            for key, value in st.items():
+                extras["traj_curriculum_" + key] = torch.as_tensor(
+                    float(value), device=self.device
+                )
+
     def _arm_privileged_obs_hook(self, privileged_obs_buf):
         return self._get_physics_privileged_observations("dog")
 
@@ -1603,6 +1775,56 @@ class WBCEnv(LeggedRobot):
         )
         return contact_states, vel_residual
 
+    def _arm_traj_obs_terms(self):
+        """Actor-facing trajectory-tracking extras: progress/timing scalars, a
+        tau phase encoding, reach urgency, and a K-point look-ahead preview
+        (position/rot6d/tangent in base frame + reference speed + rho). Width
+        = 8 + K*14, matching core.arm_obs_dim_parts' traj_* entries."""
+        tcfg = self.cfg.wbc.goal_reaching.trajectory
+        N = self.num_envs
+        K = int(tcfg.preview_points)
+        L = self.traj_batch.L.clamp_min(1e-6)
+
+        s_norm = (self.traj_s / L).unsqueeze(-1)
+        sdot_ref = self.traj_batch.sdot_ref(self.traj_sim_time)
+        scalars = torch.stack(
+            (self.traj_s / L, self.traj_timing_err, self.traj_sdot_meas, sdot_ref), dim=-1
+        )
+        phase = 2.0 * np.pi * s_norm
+        tau_enc = torch.cat((torch.sin(phase), torch.cos(phase)), dim=-1)
+
+        s_k, p_k, R_k, sdot_k = self.traj_batch.sample_preview(
+            self.traj_s, float(tcfg.preview_horizon), K
+        )
+        # base-frame transforms (flatten the K axis for quat ops)
+        base_inv = quat_conjugate(self.base_quat)
+        base_inv_k = base_inv.unsqueeze(1).expand(N, K, 4).reshape(N * K, 4)
+        p_rel = (p_k - self.base_pos.unsqueeze(1)).reshape(N * K, 3)
+        p_k_body = quat_apply(base_inv_k, p_rel).reshape(N, K, 3)
+        q_k = self._traj_mat_to_quat(R_k).reshape(N * K, 4)
+        q_k_body = quat_mul(base_inv_k, q_k)
+        rot6d_k = quat_xyzw_to_rot6d(q_k_body).reshape(N, K, 6)
+        tangent_k = self.traj_batch.tangent_at(s_k).reshape(N * K, 3)
+        tangent_k_body = quat_apply(base_inv_k, tangent_k).reshape(N, K, 3)
+
+        # closed-form rho along the preview (reuse the diagnostics formula)
+        mount_offset_body = self.arm_mount_tfs[:, :3]
+        shoulder_world = self.base_pos + quat_apply(self.base_quat, mount_offset_body)
+        reach = max(float(self.cfg.wbc.goal_reaching.reach_radius), 1e-3)
+        rho_k = torch.linalg.vector_norm(p_k - shoulder_world.unsqueeze(1), dim=-1) / reach
+        rho_hi = float(self.cfg.wbc.goal_reaching.rho_hi)
+        urgency = (rho_k - rho_hi).clamp_min(0.0).max(dim=-1).values
+        violated = rho_k > rho_hi
+        any_viol = violated.any(dim=-1)
+        first_viol = violated.float().argmax(dim=-1).float() / max(K, 1)
+        s_to_viol = torch.where(any_viol, first_viol, torch.ones_like(first_viol))
+        urgency_pair = torch.stack((urgency, s_to_viol), dim=-1)
+
+        preview = torch.cat(
+            (p_k_body, rot6d_k, tangent_k_body, sdot_k.unsqueeze(-1), rho_k.unsqueeze(-1)), dim=-1
+        ).reshape(N, K * 14)
+        return torch.cat((scalars, tau_enc, urgency_pair, preview), dim=-1)
+
     def get_arm_observations(self):
         """DLS-IK MVP task-space observations -- see core.arm_obs_dim_parts
         for the authoritative width breakdown this must match exactly."""
@@ -1670,6 +1892,9 @@ class WBCEnv(LeggedRobot):
                 ),
                 dim=-1,
             )
+
+        if self._traj_tracking_enabled():
+            obs_buf = torch.cat((obs_buf, self._arm_traj_obs_terms()), dim=-1)
 
         if self.cfg.env.observe_two_prev_actions:
             obs_buf = torch.cat((obs_buf, self.last_actions), dim=-1)

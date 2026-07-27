@@ -422,6 +422,9 @@ GOAL_REACHING_OVERRIDES = {
     "wbc.goal_reaching.success_rot_threshold": 0.25,
     "wbc.goal_reaching.stay_sector_radius": 0.60,
     "wbc.goal_reaching.stay_sector_half_angle": math.radians(90.0),
+    # 'static' = the classic discrete-goal-sequence behavior; 'trajectory' =
+    # the moving SE(3) path tracking mode (set by enable_traj_tracking).
+    "wbc.goal_reaching.target_mode": "static",
 }
 
 GOAL_REACHING_REWARD_SCALES = {
@@ -437,6 +440,62 @@ GOAL_REACHING_REWARD_SCALES = {
     "stay_still_in_reach_sector": -0.05,
 }
 
+# ============================================================
+# Trajectory-tracking sub-mode (target_mode='trajectory').
+# Applied by enable_traj_tracking() AFTER enable_goal_reaching(), so it
+# overrides the goal_reaching defaults above where they differ.
+# ============================================================
+TRAJ_TRACKING_OVERRIDES = {
+    "wbc.goal_reaching.target_mode": "trajectory",
+    "wbc.goal_reaching.trajectory.preview_horizon": 0.5,   # L_h (m)
+    "wbc.goal_reaching.trajectory.preview_points": 9,       # K
+    "wbc.goal_reaching.trajectory.update_s_window": 0.15,   # forward search window (m)
+    "wbc.goal_reaching.trajectory.timing_tau": 0.10,        # timing deadzone (m of arc length)
+    # body-frame point the origin-centered path is translated to at reset (a
+    # comfortable reachable spot in front of the shoulder): rho_star*reach in
+    # front, slightly up.
+    "wbc.goal_reaching.trajectory.anchor_offset_body": [0.36, 0.0, 0.10],
+    # trajectory bank / batch sizing (see modules/curriculum.py TrajectoryBank).
+    # max_gamma_points bounds L/ds_grid; hardest cell L~10m at ds_grid=0.01 with
+    # per-sample variation, so 1536 leaves headroom.
+    "wbc.goal_reaching.trajectory.max_gamma_points": 1536,
+    "wbc.goal_reaching.trajectory.max_tl_points": 512,
+    "wbc.goal_reaching.trajectory.bank_per_cell": 64,
+    # M10 curriculum grid
+    "wbc.goal_reaching.trajectory.n_levels_A": 6,
+    "wbc.goal_reaching.trajectory.n_levels_B": 6,
+    "wbc.goal_reaching.trajectory.curriculum_ema_alpha": 0.05,
+    "wbc.goal_reaching.trajectory.curriculum_success_threshold": 0.70,
+    "wbc.goal_reaching.trajectory.curriculum_fail_threshold": 0.30,
+    # episode-success criteria (per design doc M10)
+    "wbc.goal_reaching.trajectory.success_progress": 0.80,  # traversed fraction of L
+    "wbc.goal_reaching.trajectory.success_dlat": 0.08,      # mean lateral err (m)
+    "wbc.goal_reaching.trajectory.success_timing": 0.15,    # mean |timing_err| (m)
+    "wbc.goal_reaching.trajectory.ik_jump_threshold": 0.50, # max ||delta_q_ik|| (rad)
+}
+
+# Group T tracking rewards (new) + the reachability/smoothness terms carried
+# over unchanged from goal_reaching. goal_pos_l2 and stay_still_in_reach_sector
+# are explicitly zeroed here: they're superseded by traj_lateral_err / the base
+# should move to track. Primary tracking term (traj_lateral_err) kept at the
+# same magnitude goal_pos_l2 had, so this drops into the existing tuning.
+TRAJ_TRACKING_REWARD_SCALES = {
+    "goal_pos_l2": 0.0,
+    "stay_still_in_reach_sector": 0.0,
+    "traj_progress": 1.0,
+    "traj_lateral_err": -2.0,
+    "traj_timing": -0.5,
+    "traj_twist_err": -0.2,
+    "reachability_barrier": -0.2,
+    "manipulability": 0.05,
+    "joint_limit_barrier": -0.02,
+    "arm_ema_motion": -0.05,
+    "rho_rate": -0.02,
+    "upper_action_rate": -0.02,
+    "delta_vel_magnitude": -0.05,
+    "posture_command_rate": -0.02,
+}
+
 
 ROBODUET_OVERRIDES = {
     **COMMON_OVERRIDES,
@@ -444,7 +503,10 @@ ROBODUET_OVERRIDES = {
     **STAGE2_OVERRIDES,
     **STAGE2_IK_OVERRIDES,
     **GOAL_REACHING_OVERRIDES,
-    **{f"wbc.reward_scales.{name}": 0.0 for name in GOAL_REACHING_REWARD_SCALES},
+    **{
+        f"wbc.reward_scales.{name}": 0.0
+        for name in {*GOAL_REACHING_REWARD_SCALES, *TRAJ_TRACKING_REWARD_SCALES}
+    },
 }
 
 

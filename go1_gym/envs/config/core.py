@@ -169,6 +169,7 @@ class RoboDuetRuntimeOptions:
     dyna_gait_min_frequency: float = 0.0
     stage1_arm_curriculum: bool = True
     goal_reaching: bool = False
+    traj_tracking: bool = False
 
     @classmethod
     def from_args(cls, args):
@@ -180,6 +181,7 @@ class RoboDuetRuntimeOptions:
             dyna_gait_min_frequency=getattr(args, "dyna_gait_min_frequency", 0.0),
             stage1_arm_curriculum=not getattr(args, "no_stage1_arm_curriculum", False),
             goal_reaching=getattr(args, "goal_reaching", False),
+            traj_tracking=getattr(args, "traj_tracking", False),
         )
 
 
@@ -245,7 +247,7 @@ def arm_obs_dim_parts(cfg):
     6D DLS-residual policy.
     """
     if getattr(getattr(cfg.wbc, "goal_reaching", None), "enabled", False):
-        return {
+        parts = {
             "ee_pos_err_body": 3,
             "ee_rot_err_body": 3,
             "ee_twist_body": 6,
@@ -260,6 +262,17 @@ def arm_obs_dim_parts(cfg):
             "base_feedforward": 3,
             "arm_actions": cfg.arm.num_actions_arm_cd,
         }
+        if getattr(cfg.wbc.goal_reaching, "target_mode", "static") == "trajectory":
+            # Moving-trajectory extras (actor-facing). K preview points, each
+            # carrying pos(3)+rot6d(6)+tangent(3)+sdot(1)+rho(1)=14, plus
+            # progress/timing scalars, a tau phase encoding, and the reach
+            # urgency pair. Total = 8 + K*14 (= 134 at K=9).
+            K = int(cfg.wbc.goal_reaching.trajectory.preview_points)
+            parts["traj_progress_scalars"] = 4  # s_norm, timing_err, sdot, sdot_ref
+            parts["traj_tau_enc"] = 2
+            parts["traj_urgency"] = 2  # urgency, s_to_viol
+            parts["traj_preview"] = K * 14
+        return parts
 
     parts = {
         "ee_pos_err": 3,
@@ -515,6 +528,22 @@ def enable_goal_reaching(cfg, layout):
         setattr(cfg.wbc.reward_scales, name, scale)
 
 
+def enable_traj_tracking(cfg, layout):
+    """Switch goal reaching from a static point to a moving SE(3) trajectory.
+
+    A strict superset on top of ``enable_goal_reaching`` (which must have run
+    first): flips ``target_mode`` to 'trajectory', applies the trajectory
+    overrides, and swaps the static goal_reaching reward set for the
+    trajectory-tracking one (Group T tracking terms + the carried-over
+    reachability/smoothness terms; the static-only terms are zeroed).
+    """
+    from .wbc import TRAJ_TRACKING_OVERRIDES, TRAJ_TRACKING_REWARD_SCALES
+
+    apply_cfg_overrides(cfg, TRAJ_TRACKING_OVERRIDES, allow_new=True)
+    for name, scale in TRAJ_TRACKING_REWARD_SCALES.items():
+        setattr(cfg.wbc.reward_scales, name, scale)
+
+
 def configure_robot_asset(cfg, robot):
     from .wbc import ROBOT_ASSET_FILES, ROBOT_ARM_SPEC
 
@@ -565,10 +594,13 @@ def build_roboduet_config(args=None, *, options=None, debug=False):
     else:
         cfg.use_rot6d = False
 
-    if options.dyna_gait or options.goal_reaching:
+    goal_reaching = options.goal_reaching or options.traj_tracking
+    if options.dyna_gait or goal_reaching:
         enable_dyna_gait(cfg, layout, min_frequency=options.dyna_gait_min_frequency)
-    if options.goal_reaching:
+    if goal_reaching:
         enable_goal_reaching(cfg, layout)
+    if options.traj_tracking:
+        enable_traj_tracking(cfg, layout)
 
     layout.finalize(cfg)
     configure_privileged_obs_dims(cfg)

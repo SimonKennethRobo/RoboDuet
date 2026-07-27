@@ -306,6 +306,13 @@ if __name__ == "__main__":
         default=False,
         help="Train the 12D whole-body upper policy on static world-frame 6D goals.",
     )
+    parser.add_argument(
+        "--traj_tracking",
+        action="store_true",
+        default=False,
+        help="Train the whole-body upper policy to track a moving SE(3) trajectory "
+        "(implies --goal_reaching; sets wbc.goal_reaching.target_mode='trajectory').",
+    )
 
     args = parser.parse_args()
 
