@@ -425,28 +425,10 @@ GOAL_REACHING_OVERRIDES = {
     # 'static' = the classic discrete-goal-sequence behavior; 'trajectory' =
     # the moving SE(3) path tracking mode (set by enable_traj_tracking).
     "wbc.goal_reaching.target_mode": "static",
-}
-
-GOAL_REACHING_REWARD_SCALES = {
-    "goal_pos_l2": -2.0,
-    "reachability_barrier": -0.2,
-    "manipulability": 0.05,
-    "joint_limit_barrier": -0.02,
-    "arm_ema_motion": -0.05,
-    "rho_rate": -0.02,
-    "upper_action_rate": -0.02,
-    "delta_vel_magnitude": -0.05,
-    "posture_command_rate": -0.02,
-    "stay_still_in_reach_sector": -0.05,
-}
-
-# ============================================================
-# Trajectory-tracking sub-mode (target_mode='trajectory').
-# Applied by enable_traj_tracking() AFTER enable_goal_reaching(), so it
-# overrides the goal_reaching defaults above where they differ.
-# ============================================================
-TRAJ_TRACKING_OVERRIDES = {
-    "wbc.goal_reaching.target_mode": "trajectory",
+    # Trajectory-mode defaults live here (always in the schema, even in static
+    # mode) so a saved trajectory-run config round-trips through load_env's
+    # snapshot restore without the subtree being dropped. enable_traj_tracking
+    # only flips target_mode to 'trajectory'.
     "wbc.goal_reaching.trajectory.preview_horizon": 0.5,   # L_h (m)
     "wbc.goal_reaching.trajectory.preview_points": 9,       # K
     "wbc.goal_reaching.trajectory.update_s_window": 0.15,   # forward search window (m)
@@ -472,6 +454,30 @@ TRAJ_TRACKING_OVERRIDES = {
     "wbc.goal_reaching.trajectory.success_dlat": 0.08,      # mean lateral err (m)
     "wbc.goal_reaching.trajectory.success_timing": 0.15,    # mean |timing_err| (m)
     "wbc.goal_reaching.trajectory.ik_jump_threshold": 0.50, # max ||delta_q_ik|| (rad)
+}
+
+GOAL_REACHING_REWARD_SCALES = {
+    "goal_pos_l2": -2.0,
+    "reachability_barrier": -0.2,
+    "manipulability": 0.05,
+    "joint_limit_barrier": -0.02,
+    "arm_ema_motion": -0.05,
+    "rho_rate": -0.02,
+    "upper_action_rate": -0.02,
+    "delta_vel_magnitude": -0.05,
+    "posture_command_rate": -0.02,
+    "stay_still_in_reach_sector": -0.05,
+}
+
+# ============================================================
+# Trajectory-tracking sub-mode (target_mode='trajectory').
+# Applied by enable_traj_tracking() AFTER enable_goal_reaching(). The
+# trajectory.* defaults already live in GOAL_REACHING_OVERRIDES (so they're
+# always in the schema and round-trip through load_env); this only flips the
+# mode switch.
+# ============================================================
+TRAJ_TRACKING_OVERRIDES = {
+    "wbc.goal_reaching.target_mode": "trajectory",
 }
 
 # Group T tracking rewards (new) + the reachability/smoothness terms carried

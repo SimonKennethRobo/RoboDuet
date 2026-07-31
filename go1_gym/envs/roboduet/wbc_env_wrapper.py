@@ -400,6 +400,124 @@ class KeyboardStage2Wrapper(WBCEnv):
             self.gym.poll_viewer_events(self.viewer)
 
 
+class KeyboardStage2TrajWrapper(WBCEnv):
+    """Keyboard-controlled eval for stage-2 trajectory tracking.
+
+    The target is a moving SE(3) trajectory (target_mode='trajectory'), so
+    there is no editable goal marker -- instead the keys pick which trajectory
+    plays and at what difficulty, and let you pause / replay to inspect
+    tracking. The base overlay already draws the full path, orientation axes,
+    the preview window and the current progress point.
+
+    Keys
+    ----
+    N        - load the next trajectory at the current difficulty
+    ] / [    - difficulty harder / easier (bumps the curriculum cell), reload
+    R        - replay the current trajectory from the start
+    P        - pause / resume trajectory time (freeze the reference target)
+    """
+
+    def __init__(self, sim_device, headless, cfg):
+        self._paused = False
+        self._eval_A = 0
+        self._eval_B = 0
+        super().__init__(sim_device, headless, cfg=cfg)
+        if not self._traj_tracking_enabled():
+            raise ValueError(
+                "KeyboardStage2TrajWrapper requires a trajectory-tracking config "
+                "(wbc.goal_reaching.target_mode='trajectory'); load a --traj_tracking run."
+            )
+        if self.viewer is not None:
+            for key, action in (
+                (gymapi.KEY_N, "traj_next"),
+                (gymapi.KEY_RIGHT_BRACKET, "traj_harder"),
+                (gymapi.KEY_LEFT_BRACKET, "traj_easier"),
+                (gymapi.KEY_R, "traj_restart"),
+                (gymapi.KEY_P, "traj_pause"),
+            ):
+                self.gym.subscribe_viewer_keyboard_event(self.viewer, key, action)
+
+    def _advance_trajectory_target(self):
+        if self._paused:
+            # hold the reference at the current time (recompute target without
+            # advancing sim time) so the EE can be inspected catching up
+            s_ref_now = self.traj_batch.s_ref(self.traj_sim_time)
+            self.arm_goal_pos_world[:] = self.traj_batch.p_at(s_ref_now)
+            self.arm_goal_quat_world[:] = self._traj_mat_to_quat(self.traj_batch.R_at(s_ref_now))
+            return
+        super()._advance_trajectory_target()
+
+    def load_eval_trajectory(self, env_id=0):
+        """Load a fresh trajectory for env_id at the currently selected cell,
+        bypassing the curriculum's success-driven sampling."""
+        env_ids = torch.tensor([env_id], device=self.device)
+        self.traj_curriculum.cell_A[env_id] = int(self._eval_A)
+        self.traj_curriculum.cell_B[env_id] = int(self._eval_B)
+        self._load_trajectory_for(env_ids)
+        self._update_ee_task_space_error()
+        self._print_traj_status()
+
+    def _print_traj_status(self):
+        print(
+            f"[traj] cell=(A={self._eval_A}, B={self._eval_B})  L={float(self.traj_batch.L[0]):.2f}m  "
+            f"{'PAUSED' if self._paused else 'PLAY'}",
+            flush=True,
+        )
+
+    def _handle_traj_action(self, action):
+        if action == "traj_next":
+            self.load_eval_trajectory()
+        elif action == "traj_harder":
+            self._eval_A = min(self._eval_A + 1, self.traj_curriculum.nA - 1)
+            self._eval_B = min(self._eval_B + 1, self.traj_curriculum.nB - 1)
+            self.load_eval_trajectory()
+        elif action == "traj_easier":
+            self._eval_A = max(self._eval_A - 1, 0)
+            self._eval_B = max(self._eval_B - 1, 0)
+            self.load_eval_trajectory()
+        elif action == "traj_restart":
+            self.traj_sim_time[0] = 0.0
+            self.traj_s[0] = 0.0
+            self.traj_s_prev[0] = 0.0
+            self._print_traj_status()
+        elif action == "traj_pause":
+            self._paused = not self._paused
+            self._print_traj_status()
+
+    def render_gui(self, sync_frame_time=True):
+        if self.viewer:
+            if self.fixed_cam:
+                cam_target = gymapi.Vec3(self.root_states[0, 0], self.root_states[0, 1], self.root_states[0, 2])
+                cam_pos = cam_target + gymapi.Vec3(1, 1, 1)
+                self.gym.viewer_camera_look_at(self.viewer, self.envs[0], cam_pos, cam_target)
+
+            if self.gym.query_viewer_has_closed(self.viewer):
+                sys.exit()
+
+            for evt in self.gym.query_viewer_action_events(self.viewer):
+                if evt.action == "QUIT" and evt.value > 0:
+                    sys.exit()
+                if evt.action == "toggle_viewer_sync" and evt.value > 0:
+                    self.enable_viewer_sync = not self.enable_viewer_sync
+                elif evt.action == "fixed_cam" and evt.value > 0:
+                    self.fixed_cam = not self.fixed_cam
+                elif evt.action.startswith("traj_") and evt.value > 0:
+                    self._handle_traj_action(evt.action)
+
+        if self.device != "cpu":
+            self.gym.fetch_results(self.sim, True)
+
+        if self.enable_viewer_sync:
+            self.gym.step_graphics(self.sim)
+            self._draw_viewer_overlays()
+            self.gym.draw_viewer(self.viewer, self.sim, True)
+            if sync_frame_time:
+                self.gym.sync_frame_time(self.sim)
+        else:
+            self._draw_viewer_overlays()
+            self.gym.poll_viewer_events(self.viewer)
+
+
 class HistoryWrapper(gym.Wrapper):
     def __init__(self, env):
         super().__init__(env)

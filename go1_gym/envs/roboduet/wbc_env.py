@@ -1021,8 +1021,17 @@ class WBCEnv(LeggedRobot):
             )
             self.traj_curriculum.report_result(rep_ids, success)
 
-        # 2. sample a new cell for every reset env, gather a bank trajectory
+        # 2. sample a new cell for every reset env, then load a trajectory
         self.traj_curriculum.sample_cells(env_ids)
+        self._load_trajectory_for(env_ids)
+
+    def _load_trajectory_for(self, env_ids):
+        """Gather a bank trajectory for each env's CURRENT curriculum cell,
+        anchor it in front of the shoulder, and clear the per-env progress
+        state. (Cell selection is the caller's responsibility -- the training
+        reset samples it; eval can set it directly.)"""
+        if len(env_ids) == 0:
+            return
         rows = self.traj_bank.sample_rows(
             self.traj_curriculum.cell_A[env_ids],
             self.traj_curriculum.cell_B[env_ids],
@@ -1030,8 +1039,8 @@ class WBCEnv(LeggedRobot):
         )
         self.traj_batch.load_from_stacked(env_ids, self.traj_bank.batch, rows)
 
-        # 3. anchor the origin-centered path in front of the shoulder (world
-        #    axes -- the base yaws to follow via v_ff)
+        # anchor the origin-centered path in front of the shoulder (world
+        # axes -- the base yaws to follow via v_ff)
         mount_offset_body = self.arm_mount_tfs[env_ids, :3]
         shoulder_world = self.base_pos[env_ids] + quat_apply(self.base_quat[env_ids], mount_offset_body)
         anchor = shoulder_world + quat_apply(
@@ -1039,7 +1048,7 @@ class WBCEnv(LeggedRobot):
         )
         self.traj_batch.gamma_p[env_ids] += anchor.unsqueeze(1)
 
-        # 4. clear per-env progress state + episode accumulators
+        # clear per-env progress state + episode accumulators
         for buf in (
             self.traj_s, self.traj_s_prev, self.traj_sim_time, self.traj_d_lat,
             self.traj_sdot_meas, self.traj_timing_err, self.traj_twist_err,

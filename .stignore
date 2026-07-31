@@ -19,6 +19,6 @@
 **.log
 **__pycache__
 **.pyc
-runs
-.pytest_cache
-wandb
+**runs
+**.pytest_cache
+**wandb
