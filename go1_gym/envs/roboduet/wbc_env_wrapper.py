@@ -443,7 +443,7 @@ class KeyboardStage2TrajWrapper(WBCEnv):
             # advancing sim time) so the EE can be inspected catching up
             s_ref_now = self.traj_batch.s_ref(self.traj_sim_time)
             self.arm_goal_pos_world[:] = self.traj_batch.p_at(s_ref_now)
-            self.arm_goal_quat_world[:] = self._traj_mat_to_quat(self.traj_batch.R_at(s_ref_now))
+            self.arm_goal_quat_world[:] = self.traj_batch.quat_at(s_ref_now)
             return
         super()._advance_trajectory_target()
 

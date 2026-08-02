@@ -249,7 +249,15 @@ class TrajectoryBatch:
         self.N, self.max_gamma_points, self.max_tl_points, self.device = N, max_gamma_points, max_tl_points, device
         self.gamma_s = torch.zeros(N, max_gamma_points, device=device)
         self.gamma_p = torch.zeros(N, max_gamma_points, 3, device=device)
-        self.gamma_R = torch.zeros(N, max_gamma_points, 3, 3, device=device)
+        # Orientations are stored as xyzw QUATERNIONS, not 3x3 matrices: 4
+        # floats per point instead of 9 (at N=4096, M=1536 that is 96 MB
+        # instead of 216 MB, and the pre-generated bank saves the same
+        # fraction again), and every consumer -- SLERP here, the observation
+        # builder, the viewer overlay -- wants a quaternion anyway, so this
+        # also removes a matrix->quaternion conversion from the per-step path.
+        # ``R_at`` still returns matrices for callers that want them.
+        self.gamma_quat = torch.zeros(N, max_gamma_points, 4, device=device)
+        self.gamma_quat[..., 3] = 1.0
         self.gamma_tangent = torch.zeros(N, max_gamma_points, 3, device=device)
         self.L = torch.zeros(N, device=device)
 
@@ -257,6 +265,7 @@ class TrajectoryBatch:
         self.tl_s = torch.zeros(N, max_tl_points, device=device)
         self.tl_sdot = torch.zeros(N, max_tl_points, device=device)
         self.T = torch.zeros(N, device=device)
+        self._row_cache = None
 
     def load(self, env_ids, gammas, time_laws):
         """Write newly generated (gamma, time_law) pairs into the given env slots."""
@@ -270,8 +279,9 @@ class TrajectoryBatch:
             self.gamma_s[env_id, n:] = gamma.s_grid[n - 1].to(self.device)
             self.gamma_p[env_id, :n] = gamma.p[:n].to(self.device)
             self.gamma_p[env_id, n:] = gamma.p[n - 1].to(self.device)
-            self.gamma_R[env_id, :n] = gamma.R[:n].to(self.device)
-            self.gamma_R[env_id, n:] = gamma.R[n - 1].to(self.device)
+            q = mat_to_quat(gamma.R[:n].to(self.device))
+            self.gamma_quat[env_id, :n] = q
+            self.gamma_quat[env_id, n:] = q[n - 1]
             self.gamma_tangent[env_id, :n] = gamma.tangent[:n].to(self.device)
             self.gamma_tangent[env_id, n:] = gamma.tangent[n - 1].to(self.device)
             self.L[env_id] = gamma.s_grid[n - 1].to(self.device)
@@ -297,7 +307,7 @@ class TrajectoryBatch:
         src_idx = torch.as_tensor(src_idx, device=self.device, dtype=torch.long)
         self.gamma_s[env_ids] = src.gamma_s[src_idx]
         self.gamma_p[env_ids] = src.gamma_p[src_idx]
-        self.gamma_R[env_ids] = src.gamma_R[src_idx]
+        self.gamma_quat[env_ids] = src.gamma_quat[src_idx]
         self.gamma_tangent[env_ids] = src.gamma_tangent[src_idx]
         self.L[env_ids] = src.L[src_idx]
         self.tl_t[env_ids] = src.tl_t[src_idx]
@@ -309,15 +319,31 @@ class TrajectoryBatch:
     def _to_2d(s):
         return (s.unsqueeze(-1), True) if s.dim() == 1 else (s, False)
 
+    def _rows(self, N):
+        """(N, 1) row index for advanced indexing, cached per device."""
+        if self._row_cache is None or self._row_cache.shape[0] != N:
+            self._row_cache = torch.arange(N, device=self.device).unsqueeze(1)
+        return self._row_cache
+
+    # NOTE on the indexing style used by every lookup below. The obvious
+    # formulation -- expand a field to (N, K, M, ...) and torch.gather along
+    # the M axis -- allocates that whole expanded tensor: at N=4096, K=9,
+    # M=1536 a single call peaked at 217 MB, and a trajectory-mode step makes
+    # several of them. Two changes remove it entirely:
+    #   * torch.searchsorted accepts a batched (N, M) sorted_sequence against
+    #     an (N, K) query directly, so the (N, K, M) `.contiguous()` copy that
+    #     dominated that 217 MB is unnecessary;
+    #   * advanced indexing field[rows, idx] with rows (N,1) and idx (N,K)
+    #     broadcasts to (N, K) and allocates only the (N, K, ...) result.
+    # Same values, ~1000x less transient memory. Keep it this way.
+
     def _locate_gamma(self, s2d):
         # s2d: (N, K)
-        K = s2d.shape[1]
-        gs = self.gamma_s.unsqueeze(1).expand(-1, K, -1).contiguous()  # (N, K, M)
         s_clamped = s2d.clamp(self.gamma_s[:, :1], self.L.unsqueeze(-1))
-        idx = torch.searchsorted(gs, s_clamped.unsqueeze(-1), right=True).squeeze(-1)
+        idx = torch.searchsorted(self.gamma_s, s_clamped, right=True)
         idx = idx.clamp(1, self.max_gamma_points - 1) - 1
-        s0 = torch.gather(self.gamma_s.unsqueeze(1).expand(-1, K, -1), 2, idx.unsqueeze(-1)).squeeze(-1)
-        s1 = torch.gather(self.gamma_s.unsqueeze(1).expand(-1, K, -1), 2, (idx + 1).unsqueeze(-1)).squeeze(-1)
+        s0 = torch.gather(self.gamma_s, 1, idx)
+        s1 = torch.gather(self.gamma_s, 1, idx + 1)
         frac = ((s_clamped - s0) / (s1 - s0).clamp_min(1e-9)).clamp(0.0, 1.0)
         return idx, frac  # (N, K) each
 
@@ -325,46 +351,47 @@ class TrajectoryBatch:
         """s: (N,) or (N,K) -> matching-shape (...,3)."""
         s2d, was_1d = self._to_2d(s)
         idx, frac = self._locate_gamma(s2d)
-        N, K = idx.shape
-        gp = self.gamma_p.unsqueeze(1).expand(-1, K, -1, -1)  # (N,K,M,3)
-        p0 = torch.gather(gp, 2, idx.view(N, K, 1, 1).expand(-1, -1, 1, 3)).squeeze(2)
-        p1 = torch.gather(gp, 2, (idx + 1).view(N, K, 1, 1).expand(-1, -1, 1, 3)).squeeze(2)
+        rows = self._rows(idx.shape[0])
+        p0, p1 = self.gamma_p[rows, idx], self.gamma_p[rows, idx + 1]
         out = p0 + frac.unsqueeze(-1) * (p1 - p0)
         return out.squeeze(1) if was_1d else out
 
-    def R_at(self, s):
+    def quat_at(self, s):
+        """s: (N,) or (N,K) -> matching-shape (...,4) xyzw, SLERP interpolated.
+        Prefer this over ``R_at`` -- it is what the stored data already is."""
         s2d, was_1d = self._to_2d(s)
         idx, frac = self._locate_gamma(s2d)
-        N, K = idx.shape
-        gR = self.gamma_R.unsqueeze(1).expand(-1, K, -1, -1, -1)  # (N,K,M,3,3)
-        R0 = torch.gather(gR, 2, idx.view(N, K, 1, 1, 1).expand(-1, -1, 1, 3, 3)).squeeze(2)
-        R1 = torch.gather(gR, 2, (idx + 1).view(N, K, 1, 1, 1).expand(-1, -1, 1, 3, 3)).squeeze(2)
-        q0, q1 = mat_to_quat(R0), mat_to_quat(R1)
-        out = quat_to_mat(quat_slerp(q0, q1, frac))
+        rows = self._rows(idx.shape[0])
+        q0, q1 = self.gamma_quat[rows, idx], self.gamma_quat[rows, idx + 1]
+        out = quat_slerp(q0, q1, frac)
         return out.squeeze(1) if was_1d else out
+
+    def R_at(self, s):
+        """s: (N,) or (N,K) -> matching-shape (...,3,3)."""
+        return quat_to_mat(self.quat_at(s))
 
     def tangent_at(self, s):
         s2d, was_1d = self._to_2d(s)
         idx, frac = self._locate_gamma(s2d)
-        N, K = idx.shape
-        gt = self.gamma_tangent.unsqueeze(1).expand(-1, K, -1, -1)
-        t0 = torch.gather(gt, 2, idx.view(N, K, 1, 1).expand(-1, -1, 1, 3)).squeeze(2)
-        t1 = torch.gather(gt, 2, (idx + 1).view(N, K, 1, 1).expand(-1, -1, 1, 3)).squeeze(2)
+        rows = self._rows(idx.shape[0])
+        t0, t1 = self.gamma_tangent[rows, idx], self.gamma_tangent[rows, idx + 1]
         v = t0 + frac.unsqueeze(-1) * (t1 - t0)
         v = v / v.norm(dim=-1, keepdim=True).clamp_min(1e-8)
         return v.squeeze(1) if was_1d else v
 
+    def _locate_time(self, t2d):
+        t_clamped = t2d.clamp(self.tl_t[:, :1], self.T.unsqueeze(-1))
+        idx = torch.searchsorted(self.tl_t, t_clamped, right=True)
+        idx = idx.clamp(1, self.max_tl_points - 1) - 1
+        return idx, t_clamped
+
     def s_ref(self, t):
         t2d, was_1d = self._to_2d(t)
-        K = t2d.shape[1]
-        tg = self.tl_t.unsqueeze(1).expand(-1, K, -1).contiguous()
-        t_clamped = t2d.clamp(self.tl_t[:, :1], self.T.unsqueeze(-1))
-        idx = torch.searchsorted(tg, t_clamped.unsqueeze(-1), right=True).squeeze(-1)
-        idx = idx.clamp(1, self.max_tl_points - 1) - 1
-        s0 = torch.gather(self.tl_s.unsqueeze(1).expand(-1, K, -1), 2, idx.unsqueeze(-1)).squeeze(-1)
-        s1 = torch.gather(self.tl_s.unsqueeze(1).expand(-1, K, -1), 2, (idx + 1).unsqueeze(-1)).squeeze(-1)
-        t0 = torch.gather(tg, 2, idx.unsqueeze(-1)).squeeze(-1)
-        t1 = torch.gather(tg, 2, (idx + 1).unsqueeze(-1)).squeeze(-1)
+        idx, t_clamped = self._locate_time(t2d)
+        s0 = torch.gather(self.tl_s, 1, idx)
+        s1 = torch.gather(self.tl_s, 1, idx + 1)
+        t0 = torch.gather(self.tl_t, 1, idx)
+        t1 = torch.gather(self.tl_t, 1, idx + 1)
         frac = ((t_clamped - t0) / (t1 - t0).clamp_min(1e-9)).clamp(0.0, 1.0)
         out = s0 + frac * (s1 - s0)
         return out.squeeze(1) if was_1d else out
@@ -372,31 +399,25 @@ class TrajectoryBatch:
     def sdot_ref(self, t):
         """Reference arc-length speed at time t. t: (N,) or (N,K)."""
         t2d, was_1d = self._to_2d(t)
-        K = t2d.shape[1]
-        tg = self.tl_t.unsqueeze(1).expand(-1, K, -1).contiguous()
-        t_clamped = t2d.clamp(self.tl_t[:, :1], self.T.unsqueeze(-1))
-        idx = torch.searchsorted(tg, t_clamped.unsqueeze(-1), right=True).squeeze(-1)
-        idx = idx.clamp(1, self.max_tl_points - 1) - 1
-        out = torch.gather(self.tl_sdot.unsqueeze(1).expand(-1, K, -1), 2, idx.unsqueeze(-1)).squeeze(-1)
+        idx, _ = self._locate_time(t2d)
+        out = torch.gather(self.tl_sdot, 1, idx)
         return out.squeeze(1) if was_1d else out
 
     def sample_preview(self, s_current, L_h, K=9):
-        """s_current: (N,) -> s_k (N,K), p_k (N,K,3), R_k (N,K,3,3), sdot_k (N,K)."""
+        """s_current: (N,) -> s_k (N,K), p_k (N,K,3), q_k (N,K,4) xyzw, sdot_k (N,K)."""
         delta = L_h * preview_fractions(K, device=self.device)  # (K,)
         s_k = (s_current.unsqueeze(1) + delta.unsqueeze(0)).clamp(max=self.L.unsqueeze(1))
         p_k = self.p_at(s_k)
-        R_k = self.R_at(s_k)
+        q_k = self.quat_at(s_k)
         # sdot at s_k: approximate via the time law by inverse-locating s in tl_s
         sdot_k = self._sdot_at_s(s_k)
-        return s_k, p_k, R_k, sdot_k
+        return s_k, p_k, q_k, sdot_k
 
     def _sdot_at_s(self, s2d):
-        K = s2d.shape[1]
-        ts = self.tl_s.unsqueeze(1).expand(-1, K, -1).contiguous()
         s_clamped = s2d.clamp(self.tl_s[:, :1], self.L.unsqueeze(-1))
-        idx = torch.searchsorted(ts, s_clamped.unsqueeze(-1), right=True).squeeze(-1)
+        idx = torch.searchsorted(self.tl_s, s_clamped, right=True)
         idx = idx.clamp(1, self.max_tl_points - 1) - 1
-        return torch.gather(self.tl_sdot.unsqueeze(1).expand(-1, K, -1), 2, idx.unsqueeze(-1)).squeeze(-1)
+        return torch.gather(self.tl_sdot, 1, idx)
 
 
 # ============================================================

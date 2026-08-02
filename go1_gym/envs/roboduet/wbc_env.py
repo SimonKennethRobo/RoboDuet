@@ -374,11 +374,14 @@ class WBCEnv(LeggedRobot):
         by its own response time constant."""
         if not self._traj_tracking_enabled():
             return self.arm_goal_pos_world.unsqueeze(1), self.base_nom_weights
+        # Only the look-ahead POSITIONS matter here, so interpolate those
+        # directly instead of calling sample_preview, which would also SLERP
+        # the orientations and look up the reference speeds -- work the base
+        # feedforward never reads, and the most expensive part of the call.
         tcfg = self.cfg.wbc.goal_reaching.trajectory
-        _, p_k, _, _ = self.traj_batch.sample_preview(
-            self.traj_s, float(tcfg.preview_horizon), int(tcfg.preview_points)
-        )
-        return p_k, self.base_nom_weights
+        delta = float(tcfg.preview_horizon) * self.base_nom_fracs  # (K,)
+        s_k = (self.traj_s.unsqueeze(1) + delta.unsqueeze(0)).clamp(max=self.traj_batch.L.unsqueeze(1))
+        return self.traj_batch.p_at(s_k), self.base_nom_weights
 
     def _compute_point_goal_base_nom(self):
         cfg = self.cfg.wbc.goal_reaching
@@ -869,10 +872,9 @@ class WBCEnv(LeggedRobot):
         target_mode='trajectory'."""
         if not self._traj_tracking_enabled():
             return
-        from modules.trajectory import TrajectoryBatch, mat_to_quat
+        from modules.trajectory import TrajectoryBatch
         from modules.curriculum import CurriculumManager, TrajectoryBank
 
-        self._traj_mat_to_quat = mat_to_quat
         tcfg = self.cfg.wbc.goal_reaching.trajectory
         self._traj_max_g = int(tcfg.max_gamma_points)
         self._traj_max_t = int(tcfg.max_tl_points)
@@ -925,8 +927,8 @@ class WBCEnv(LeggedRobot):
         # near-dense/far-sparse fractions sample_preview uses.
         from modules.trajectory import preview_fractions
 
-        fracs = preview_fractions(int(tcfg.preview_points), device=self.device)
-        weights = torch.exp(-2.0 * fracs)
+        self.base_nom_fracs = preview_fractions(int(tcfg.preview_points), device=self.device)
+        weights = torch.exp(-2.0 * self.base_nom_fracs)
         self.base_nom_weights = weights / weights.sum()
 
 
@@ -986,7 +988,7 @@ class WBCEnv(LeggedRobot):
         self.traj_sim_time += self.dt
         s_ref_now = self.traj_batch.s_ref(self.traj_sim_time)
         self.arm_goal_pos_world[:] = self.traj_batch.p_at(s_ref_now)
-        self.arm_goal_quat_world[:] = self._traj_mat_to_quat(self.traj_batch.R_at(s_ref_now))
+        self.arm_goal_quat_world[:] = self.traj_batch.quat_at(s_ref_now)
 
     def _update_trajectory_progress(self):
         """Update the EE's arc-length progress (forward-window projection) and
@@ -1720,13 +1722,13 @@ class WBCEnv(LeggedRobot):
         # sparse orientation axes along the path (RGB = local frame)
         for i in torch.linspace(0, n_valid - 1, 8, device=self.device).long().tolist():
             p = tb.gamma_p[env_id, i]
-            q = self._traj_mat_to_quat(tb.gamma_R[env_id, i])
+            q = tb.gamma_quat[env_id, i]
             self.draw_coord_pos_quat(p[0].item(), p[1].item(), p[2].item(), q, scale=0.05)
 
         # look-ahead preview window (brighter, with pose)
         tcfg = self.cfg.wbc.goal_reaching.trajectory
-        _, p_k, R_k, _ = tb.sample_preview(self.traj_s, float(tcfg.preview_horizon), int(tcfg.preview_points))
-        q_k = self._traj_mat_to_quat(R_k[env_id])
+        _, p_k, q_k_all, _ = tb.sample_preview(self.traj_s, float(tcfg.preview_horizon), int(tcfg.preview_points))
+        q_k = q_k_all[env_id]
         for k in range(p_k.shape[1]):
             p = p_k[env_id, k]
             self.draw_sphere_and_axes(
@@ -2089,7 +2091,7 @@ class WBCEnv(LeggedRobot):
         phase = 2.0 * np.pi * s_norm
         tau_enc = torch.cat((torch.sin(phase), torch.cos(phase)), dim=-1)
 
-        s_k, p_k, R_k, sdot_k = self.traj_batch.sample_preview(
+        s_k, p_k, q_k, sdot_k = self.traj_batch.sample_preview(
             self.traj_s, float(tcfg.preview_horizon), K
         )
         # heading-frame transforms (flatten the K axis for quat ops)
@@ -2097,8 +2099,7 @@ class WBCEnv(LeggedRobot):
         heading_inv_k = heading_inv.unsqueeze(1).expand(N, K, 4).reshape(N * K, 4)
         p_rel = (p_k - self.base_pos.unsqueeze(1)).reshape(N * K, 3)
         p_k_heading = quat_apply(heading_inv_k, p_rel).reshape(N, K, 3)
-        q_k = self._traj_mat_to_quat(R_k).reshape(N * K, 4)
-        q_k_heading = quat_mul(heading_inv_k, q_k)
+        q_k_heading = quat_mul(heading_inv_k, q_k.reshape(N * K, 4))
         rot6d_k = quat_xyzw_to_rot6d(q_k_heading).reshape(N, K, 6)
         tangent_k = self.traj_batch.tangent_at(s_k).reshape(N * K, 3)
         tangent_k_heading = quat_apply(heading_inv_k, tangent_k).reshape(N, K, 3)

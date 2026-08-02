@@ -118,7 +118,7 @@ def test_preview_clamp():
     batch.load([0], [gamma], [time_law])
 
     s_current = torch.tensor([gamma.L - 0.02])  # near the end
-    s_k, p_k, R_k, sdot_k = batch.sample_preview(s_current, L_h=0.5, K=9)
+    s_k, p_k, q_k, sdot_k = batch.sample_preview(s_current, L_h=0.5, K=9)
     ok = bool((s_k <= gamma.L + 1e-4).all())
     print(f"[test] preview clamp near s=L: max(s_k)={s_k.max().item():.4f}, L={gamma.L:.4f} -> {'PASS' if ok else 'FAIL'}")
     return ok
@@ -191,7 +191,7 @@ def run_m5_demo(out_dir, seed=0):
         N=1, max_gamma_points=gamma.s_grid.shape[0] + 1, max_tl_points=time_law.t_grid.shape[0] + 1, device="cpu"
     )
     batch.load([0], [gamma], [time_law])
-    s_k, p_k, R_k, sdot_k = batch.sample_preview(s_ref_steps[mid_step : mid_step + 1], L_h=0.5, K=9)
+    s_k, p_k, q_k, sdot_k = batch.sample_preview(s_ref_steps[mid_step : mid_step + 1], L_h=0.5, K=9)
 
     return dict(
         gamma=gamma,
