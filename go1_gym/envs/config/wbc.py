@@ -454,6 +454,40 @@ GOAL_REACHING_OVERRIDES = {
     "wbc.goal_reaching.trajectory.success_dlat": 0.08,      # mean lateral err (m)
     "wbc.goal_reaching.trajectory.success_timing": 0.15,    # mean |timing_err| (m)
     "wbc.goal_reaching.trajectory.ik_jump_threshold": 0.50, # max ||delta_q_ik|| (rad)
+    # early-termination thresholds (design doc §8.4). Set an entry to 0 to
+    # disable that one condition. These are NOT a performance bar -- they
+    # declare an episode unrecoverable, so that samples whose s projection
+    # (and every traj_* quantity derived from it) has stopped meaning anything
+    # don't keep filling the buffer. The success_* criteria above are what
+    # score tracking quality; these are an order of magnitude looser.
+    #
+    # Calibrated against the zero-action pure-DLS-IK baseline (no policy
+    # residual, easiest curriculum cell, 256 envs x 375 steps), whose
+    # distributions are:
+    #     d_lat   p50 0.15  p90 0.60  p99 1.03  max 1.35
+    #     timing  p50 0.13  p90 0.62  p99 1.35  max 2.09
+    # Anything at or below that baseline's p90 would terminate the reference
+    # controller itself, so each threshold sits at roughly its p99.
+    #
+    # d_lat is absolute because it is a spatial error: 1.00 m ~ 1.67 *
+    # reach_radius, which means the same thing in every curriculum cell.
+    "wbc.goal_reaching.trajectory.terminate_d_lat": 1.00,        # lateral err (m)
+    # timing is a FRACTION of the path length, not metres. |s - s_ref| is an
+    # arc length bounded by L, and L spans 2.0 m (easiest cell) to 9.0 m
+    # (hardest) -- a fixed metre threshold would mean 75% of the path on the
+    # easy end and 17% on the hard end, i.e. effectively disabled early and
+    # strict late, by accident rather than by design. As a fraction it is
+    # cell-independent, and because the time law normalizes L to T seconds,
+    # timing_err / L is exactly "fraction of the episode's duration behind
+    # schedule": 0.70 ~ 5.6 s of lag at the default T = 8 s, in every cell.
+    # 0.70 is the same ~p99-of-baseline calibration as terminate_d_lat (the
+    # baseline's p99 lag is 1.35 m on the easiest cell, whose L is 2.0 m).
+    "wbc.goal_reaching.trajectory.terminate_timing_frac": 0.70,
+    # Grace period after a reset during which none of the above fire. The arm
+    # starts the episode wherever the reset pose left it, not on the path, so
+    # d_lat is legitimately large for the first fraction of a second; without
+    # this the env could reset-loop instead of ever running an episode.
+    "wbc.goal_reaching.trajectory.terminate_grace_s": 0.5,
 }
 
 GOAL_REACHING_REWARD_SCALES = {

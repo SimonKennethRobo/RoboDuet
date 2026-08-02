@@ -225,6 +225,15 @@ class TimeLaw:
 _PREVIEW_FRACS = torch.tensor([0.02, 0.05, 0.10, 0.18, 0.30, 0.45, 0.65, 0.85, 1.0])
 
 
+def preview_fractions(K, device=None):
+    """The first K look-ahead fractions of the preview horizon (near-dense,
+    far-sparse). Consumers that need to weight the preview points -- e.g. the
+    base feedforward's exp(-2*Delta/L_h) blend -- must use these same
+    fractions as ``sample_preview``, so they live in one place."""
+    fracs = _PREVIEW_FRACS[:K]
+    return fracs.to(device) if device is not None else fracs
+
+
 class TrajectoryBatch:
     """GPU-resident container for N envs, each holding one (gamma, time_law)."""
 
@@ -373,7 +382,7 @@ class TrajectoryBatch:
 
     def sample_preview(self, s_current, L_h, K=9):
         """s_current: (N,) -> s_k (N,K), p_k (N,K,3), R_k (N,K,3,3), sdot_k (N,K)."""
-        delta = (L_h * _PREVIEW_FRACS[:K]).to(self.device)  # (K,)
+        delta = L_h * preview_fractions(K, device=self.device)  # (K,)
         s_k = (s_current.unsqueeze(1) + delta.unsqueeze(0)).clamp(max=self.L.unsqueeze(1))
         p_k = self.p_at(s_k)
         R_k = self.R_at(s_k)

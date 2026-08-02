@@ -44,6 +44,10 @@ goal_plan_channel_names = ("vx", "vy", "yaw", "height", "pitch", "roll")
 
 
 class WBCEnv(LeggedRobot):
+    # trajectory-mode early-termination conditions (design doc §8.4), in the
+    # column order used by traj_term_cause / _arm_check_termination_hook
+    TRAJ_TERM_CAUSES = ("d_lat", "timing")
+
     def __init__(
         self,
         sim_device,
@@ -285,16 +289,45 @@ class WBCEnv(LeggedRobot):
         self.delta_velocity_cmd[env_ids] = 0.0
         self.upper_plan_actions_raw[env_ids] = 0.0
 
+    def _base_nom_targets(self):
+        """The world-frame EE target points the base should stage itself for,
+        as (N, K, 3), paired with their (K,) normalized blend weights.
+
+        Static-goal mode: just the current goal (K=1). Trajectory mode: the
+        design doc's K-point look-ahead along the path (§5.2), sampled at the
+        same near-dense/far-sparse arc lengths the policy sees in its preview.
+        Looking ahead is what lets the base start repositioning for a turn
+        while the turn is still in front of it -- blending only the point the
+        arm is currently chasing makes the base feedforward permanently late
+        by its own response time constant."""
+        if not self._traj_tracking_enabled():
+            return self.arm_goal_pos_world.unsqueeze(1), self.base_nom_weights
+        tcfg = self.cfg.wbc.goal_reaching.trajectory
+        _, p_k, _, _ = self.traj_batch.sample_preview(
+            self.traj_s, float(tcfg.preview_horizon), int(tcfg.preview_points)
+        )
+        return p_k, self.base_nom_weights
+
     def _compute_point_goal_base_nom(self):
         cfg = self.cfg.wbc.goal_reaching
         mount_offset_body = self.arm_mount_tfs[:, :3]
-        shoulder_world = self.base_pos + quat_apply(self.base_quat, mount_offset_body)
-        displacement_world = self.arm_goal_pos_world - shoulder_world
-        distance = displacement_world.norm(dim=-1, keepdim=True).clamp_min(1e-6)
-        direction_world = displacement_world / distance
+        mount_offset_world = quat_apply(self.base_quat, mount_offset_body)
+        shoulder_world = self.base_pos + mount_offset_world
+
+        p_k, weights = self._base_nom_targets()  # (N, K, 3), (K,)
+        w = weights.view(1, -1, 1)
+        d_k = p_k - shoulder_world.unsqueeze(1)  # (N, K, 3)
+        distance_k = d_k.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+        direction_k = d_k / distance_k
+        # Ideal shoulder for each look-ahead point sits rho_star * reach back
+        # along its own bearing; the base pose that would put the shoulder
+        # there is that minus the mount offset. Blend across the horizon.
         desired_reach = float(cfg.rho_star) * float(cfg.reach_radius)
-        shoulder_target_world = self.arm_goal_pos_world - direction_world * desired_reach
-        base_target_world = shoulder_target_world - quat_apply(self.base_quat, mount_offset_body)
+        base_target_k = p_k - direction_k * desired_reach - mount_offset_world.unsqueeze(1)
+        base_target_world = (w * base_target_k).sum(dim=1)
+        # yaw follows the blended bearing to the look-ahead window (§5.5)
+        displacement_world = (w * d_k).sum(dim=1)
+
         velocity_world = (base_target_world - self.base_pos) / max(float(cfg.response_time_s), 1e-3)
         velocity_world[:, 2] = 0.0
 
@@ -655,6 +688,10 @@ class WBCEnv(LeggedRobot):
         )
         self.base_feedforward_cmd = torch.zeros(self.num_envs, 3, dtype=torch.float, device=self.device)
         self.delta_velocity_cmd = torch.zeros_like(self.base_feedforward_cmd)
+        # base_nom look-ahead blend weights; the static-goal case is the K=1
+        # degenerate one. Trajectory mode overwrites this in
+        # _traj_tracking_init_hook with the design doc's decaying profile.
+        self.base_nom_weights = torch.ones(1, dtype=torch.float, device=self.device)
         self.goal_command_targets = self.commands_dog.clone()
         self.goal_command_smoothed = self.commands_dog.clone()
         self.arm_ema_motion = torch.zeros(
@@ -784,8 +821,17 @@ class WBCEnv(LeggedRobot):
         self.traj_sim_time = z()
         self.traj_d_lat = z()
         self.traj_sdot_meas = z()
+        self.traj_sdot_ref = z()
         self.traj_timing_err = z()
         self.traj_twist_err = z()
+        self.traj_early_term = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        # per-condition breakdown, column order matches the `limits` tuple in
+        # _arm_check_termination_hook: 0 = d_lat, 1 = timing
+        self.traj_term_cause = torch.zeros(
+            self.num_envs, len(self.TRAJ_TERM_CAUSES), dtype=torch.bool, device=self.device
+        )
+        self._traj_early_term_ema = 0.0
+        self._traj_term_cause_ema = [0.0] * len(self.TRAJ_TERM_CAUSES)
         # episode success accumulators (mean over the episode)
         self.traj_dlat_sum = z()
         self.traj_timing_abs_sum = z()
@@ -794,6 +840,16 @@ class WBCEnv(LeggedRobot):
         self._traj_anchor_offset = torch.tensor(
             list(tcfg.anchor_offset_body), dtype=torch.float, device=self.device
         ).view(1, 3)
+
+        # base_nom look-ahead weights (project-design-v3.md §5.2):
+        # w_k = exp(-2 * Delta_k / L_h), normalized. Delta_k = L_h * frac_k, so
+        # the profile is horizon-independent -- it only depends on the same
+        # near-dense/far-sparse fractions sample_preview uses.
+        from modules.trajectory import preview_fractions
+
+        fracs = preview_fractions(int(tcfg.preview_points), device=self.device)
+        weights = torch.exp(-2.0 * fracs)
+        self.base_nom_weights = weights / weights.sum()
 
 
     def _arm_pre_step_hook(self):
@@ -875,8 +931,8 @@ class WBCEnv(LeggedRobot):
         d_world = quat_apply(self.end_effector_state[:, 3:7], self.ee_local_offset.expand(self.num_envs, -1))
         v_grasp = v_origin + torch.cross(w, d_world, dim=-1)
         tangent = self.traj_batch.tangent_at(self.traj_s)
-        sdot_ref = self.traj_batch.sdot_ref(self.traj_sim_time)
-        v_ref = tangent * sdot_ref.unsqueeze(-1)
+        self.traj_sdot_ref[:] = self.traj_batch.sdot_ref(self.traj_sim_time)
+        v_ref = tangent * self.traj_sdot_ref.unsqueeze(-1)
         self.traj_twist_err[:] = torch.linalg.vector_norm(v_grasp - v_ref, dim=-1)
 
         # episode success accumulators
@@ -888,7 +944,38 @@ class WBCEnv(LeggedRobot):
         self.traj_samples += 1.0
 
     def _arm_check_termination_hook(self):
-        pass
+        """Trajectory-mode early termination (design doc §8.4).
+
+        Runs after _arm_post_physics_hook, so the traj_* buffers are this
+        step's. Writes into self.reverse_buf, which check_termination ORs into
+        reset_buf right after this hook returns -- same channel the base's own
+        failure conditions use.
+
+        A terminated episode is scored a curriculum failure for free: it does
+        not reach success_progress and time_out_buf is False, both of which
+        _reset_trajectories already requires."""
+        if not (self._traj_tracking_enabled() and global_switch.switch_open):
+            return
+        tcfg = self.cfg.wbc.goal_reaching.trajectory
+        past_grace = self.episode_length_buf > (float(tcfg.terminate_grace_s) / self.dt)
+        # d_lat: absolute metres (a spatial error, scaled by the arm's reach).
+        # timing: a fraction of this env's own path length -- see the config
+        # comment for why an absolute arc-length threshold is not comparable
+        # across curriculum cells.
+        limits = (
+            (self.traj_d_lat, float(tcfg.terminate_d_lat)),
+            (
+                self.traj_timing_err.abs(),
+                float(tcfg.terminate_timing_frac) * self.traj_batch.L,
+            ),
+        )
+        for i, (value, limit) in enumerate(limits):
+            hit = (value > limit) if torch.as_tensor(limit).max() > 0.0 else None
+            self.traj_term_cause[:, i] = (
+                torch.zeros_like(past_grace) if hit is None else (hit & past_grace)
+            )
+        self.traj_early_term[:] = self.traj_term_cause.any(dim=-1)
+        self.reverse_buf |= self.traj_early_term
 
     def _arm_reset_hook(self, env_ids):
         # Absolute box target: independent of the post-reset arm pose, so sample
@@ -1020,6 +1107,17 @@ class WBCEnv(LeggedRobot):
                 & self.time_out_buf[rep_ids]  # finished by timeout, not a fall
             )
             self.traj_curriculum.report_result(rep_ids, success)
+            # EMA of "episode ended on a §8.4 tracking-failure termination" --
+            # if this climbs, the terminate_* thresholds are tighter than the
+            # current curriculum cell can satisfy and the buffer is filling
+            # with truncated episodes.
+            rate = float(self.traj_early_term[rep_ids].float().mean().item())
+            self._traj_early_term_ema = 0.95 * self._traj_early_term_ema + 0.05 * rate
+            causes = self.traj_term_cause[rep_ids].float().mean(dim=0)
+            for i, value in enumerate(causes.tolist()):
+                self._traj_term_cause_ema[i] = (
+                    0.95 * self._traj_term_cause_ema[i] + 0.05 * value
+                )
 
         # 2. sample a new cell for every reset env, then load a trajectory
         self.traj_curriculum.sample_cells(env_ids)
@@ -1051,7 +1149,8 @@ class WBCEnv(LeggedRobot):
         # clear per-env progress state + episode accumulators
         for buf in (
             self.traj_s, self.traj_s_prev, self.traj_sim_time, self.traj_d_lat,
-            self.traj_sdot_meas, self.traj_timing_err, self.traj_twist_err,
+            self.traj_sdot_meas, self.traj_sdot_ref, self.traj_timing_err,
+            self.traj_twist_err,
             self.traj_dlat_sum, self.traj_timing_abs_sum, self.traj_ik_jump_max,
             self.traj_samples,
         ):
@@ -1433,6 +1532,13 @@ class WBCEnv(LeggedRobot):
             st = self.traj_curriculum.stats()
             for key, value in st.items():
                 extras["traj_curriculum_" + key] = torch.as_tensor(
+                    float(value), device=self.device
+                )
+            extras["traj_early_termination_rate"] = torch.as_tensor(
+                float(self._traj_early_term_ema), device=self.device
+            )
+            for name, value in zip(self.TRAJ_TERM_CAUSES, self._traj_term_cause_ema):
+                extras["traj_early_termination_" + name] = torch.as_tensor(
                     float(value), device=self.device
                 )
 
@@ -1857,20 +1963,37 @@ class WBCEnv(LeggedRobot):
         )
         return contact_states, vel_residual
 
+    def _heading_quat(self):
+        """Yaw-only (gravity-aligned) base orientation as an xyzw quaternion --
+        the 'heading frame'. Same construction as math_utils.quat_apply_yaw,
+        exposed here because the preview needs the quaternion itself (it
+        rotates orientations, not just vectors)."""
+        q = self.base_quat.clone()
+        q[:, :2] = 0.0
+        return q / q.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+
     def _arm_traj_obs_terms(self):
         """Actor-facing trajectory-tracking extras: progress/timing scalars, a
         tau phase encoding, reach urgency, and a K-point look-ahead preview
-        (position/rot6d/tangent in base frame + reference speed + rho). Width
-        = 8 + K*14, matching core.arm_obs_dim_parts' traj_* entries."""
+        (position/rot6d/tangent in HEADING frame + reference speed + rho). Width
+        = 8 + K*14, matching core.arm_obs_dim_parts' traj_* entries.
+
+        The preview is expressed in the heading frame (gravity-aligned, yaw-
+        aligned with the base) rather than the actual base frame, per design
+        doc §3.7: in the base frame the whole preview block would swing
+        rigidly at gait frequency as the trunk pitches and rolls, feeding the
+        policy several hundred dimensions of oscillation that carry no
+        information about the path. The *current* EE error stays in the actual
+        base frame -- that one is the physical error the arm has to null."""
         tcfg = self.cfg.wbc.goal_reaching.trajectory
         N = self.num_envs
         K = int(tcfg.preview_points)
         L = self.traj_batch.L.clamp_min(1e-6)
 
         s_norm = (self.traj_s / L).unsqueeze(-1)
-        sdot_ref = self.traj_batch.sdot_ref(self.traj_sim_time)
         scalars = torch.stack(
-            (self.traj_s / L, self.traj_timing_err, self.traj_sdot_meas, sdot_ref), dim=-1
+            (self.traj_s / L, self.traj_timing_err, self.traj_sdot_meas, self.traj_sdot_ref),
+            dim=-1,
         )
         phase = 2.0 * np.pi * s_norm
         tau_enc = torch.cat((torch.sin(phase), torch.cos(phase)), dim=-1)
@@ -1878,16 +2001,16 @@ class WBCEnv(LeggedRobot):
         s_k, p_k, R_k, sdot_k = self.traj_batch.sample_preview(
             self.traj_s, float(tcfg.preview_horizon), K
         )
-        # base-frame transforms (flatten the K axis for quat ops)
-        base_inv = quat_conjugate(self.base_quat)
-        base_inv_k = base_inv.unsqueeze(1).expand(N, K, 4).reshape(N * K, 4)
+        # heading-frame transforms (flatten the K axis for quat ops)
+        heading_inv = quat_conjugate(self._heading_quat())
+        heading_inv_k = heading_inv.unsqueeze(1).expand(N, K, 4).reshape(N * K, 4)
         p_rel = (p_k - self.base_pos.unsqueeze(1)).reshape(N * K, 3)
-        p_k_body = quat_apply(base_inv_k, p_rel).reshape(N, K, 3)
+        p_k_heading = quat_apply(heading_inv_k, p_rel).reshape(N, K, 3)
         q_k = self._traj_mat_to_quat(R_k).reshape(N * K, 4)
-        q_k_body = quat_mul(base_inv_k, q_k)
-        rot6d_k = quat_xyzw_to_rot6d(q_k_body).reshape(N, K, 6)
+        q_k_heading = quat_mul(heading_inv_k, q_k)
+        rot6d_k = quat_xyzw_to_rot6d(q_k_heading).reshape(N, K, 6)
         tangent_k = self.traj_batch.tangent_at(s_k).reshape(N * K, 3)
-        tangent_k_body = quat_apply(base_inv_k, tangent_k).reshape(N, K, 3)
+        tangent_k_heading = quat_apply(heading_inv_k, tangent_k).reshape(N, K, 3)
 
         # closed-form rho along the preview (reuse the diagnostics formula)
         mount_offset_body = self.arm_mount_tfs[:, :3]
@@ -1903,7 +2026,8 @@ class WBCEnv(LeggedRobot):
         urgency_pair = torch.stack((urgency, s_to_viol), dim=-1)
 
         preview = torch.cat(
-            (p_k_body, rot6d_k, tangent_k_body, sdot_k.unsqueeze(-1), rho_k.unsqueeze(-1)), dim=-1
+            (p_k_heading, rot6d_k, tangent_k_heading, sdot_k.unsqueeze(-1), rho_k.unsqueeze(-1)),
+            dim=-1,
         ).reshape(N, K * 14)
         return torch.cat((scalars, tau_enc, urgency_pair, preview), dim=-1)
 

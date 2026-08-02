@@ -196,8 +196,17 @@ class Rewards:
 
     def _reward_traj_progress(self):
         """Reward the EE actually advancing along the path (measured arc-length
-        speed, clamped >=0 so backsliding isn't rewarded)."""
-        return self.env.traj_sdot_meas.clamp(min=0.0)
+        speed, clamped >=0 so backsliding isn't rewarded).
+
+        Capped at the reference speed sdot_ref: running *ahead* of the time law
+        earns nothing extra, it only buys a traj_timing deadzone penalty. Without
+        the cap this term (whose episode integral is w_p * (s_final - s_init),
+        i.e. a pure end-of-path bonus that discounting turns into "get there
+        sooner") pulls against traj_timing. The cap keeps the dense
+        anti-freeze/exploration signal -- which is the term's real job once
+        ee_pos_tracking saturates at large error, and the only progress
+        incentive left in the tau -> inf pure-path-following regime."""
+        return torch.minimum(self.env.traj_sdot_meas.clamp(min=0.0), self.env.traj_sdot_ref)
 
     def _reward_traj_lateral_err(self):
         """Penalize distance from the EE to the reference path (d_lat)."""
