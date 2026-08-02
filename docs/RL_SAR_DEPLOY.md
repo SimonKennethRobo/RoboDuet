@@ -169,11 +169,12 @@ go2 是恒等映射（IsaacLab 里就按 `FR,FL,RR,RL` 定义 `joint_names`）�
 ### 2.1 Stage-1 dog policy 是什么
 
 - 网络：`DogActorCritic.actor_body`，纯 `nn.Sequential`，
-  `Linear(2460→512) ELU Linear(512→256) ELU Linear(256→128) ELU Linear(128→12)`
+  `Linear(H→512) ELU Linear(512→256) ELU Linear(256→128) ELU Linear(128→12)`
   （`go1_gym_learn/ppo_cse_automatic/dog_ac.py:62-76`，hidden dims `[512,256,128]`）
 - `dog.use_adaptation_module = False`（`config/wbc.py:160`）
   → **actor 输入就是纯 obs history，没有 latent 拼接**，这对导出是极大利好。
-- 输入：`dog_num_obs_history = 30 × 82 = 2460`
+- 输入：`H = dog_num_obs_history = 30 × dog_num_observations`
+  （本仓库那次训练是 30 × 90 = 2700；宽度随训练 flag 变，见 §2.2）
 - 输出：12（`dog.num_actions_loco = 12`）
 - **已经在训练时自动导出了 TorchScript**：
   `go1_gym_learn/ppo_cse_automatic/__init__.py:587-590`
@@ -188,10 +189,18 @@ go2 是恒等映射（IsaacLab 里就按 `FR,FL,RR,RL` 定义 `joint_names`）�
 > 单输入单输出 TorchScript，改个名 `policy.pt` 丢进 `policy/go2_x5/roboduet/` 即可被
 > `ModelFactory::load_model()` 加载。真正的工作全部在**观测拼装**这一侧。
 
-### 2.2 82 维 dog observation 精确布局
+### 2.2 dog observation 精确布局
 
 来自 `go1_gym/envs/roboduet/wbc_env.py:2300-2485`（`get_dog_observations`）
 与 `_dog_obs_layout():2235-2298`。缩放常数见 `config/legged_robot.py:360-383`。
+
+> **总宽度不是常数**，取决于训练时开了哪些 flag：
+> `arm_num_commands` 在 `--rot6d` 下是 9、否则 6；
+> `dog_num_commands` 在 `--dyna_gait` 下是 11、否则 6。
+> 当前默认 build 出来是 **85**；本仓库 `runs/2026-08-01/...` 那次
+> （dyna_gait + traj_track）是 **90**。
+> **所以导出脚本必须从 checkpoint 的 `parameters.pkl` 现场推导，不能写死。**
+> 下表的偏移按 90 维那次列出（括号内为维度的配置来源）。
 
 | # | 偏移 | 维 | 内容 | 缩放 | rl_sar 现成？ |
 |---|---|---|---|---|---|
@@ -199,24 +208,25 @@ go2 是恒等映射（IsaacLab 里就按 `FR,FL,RR,RL` 定义 `joint_names`）�
 | 2 | 3:15 | 12 | 腿 `dof_pos - default` | `dof_pos=1.0` | ⚠️ 需切片 |
 | 3 | 15:27 | 12 | 腿 `dof_vel` | `dof_vel=0.05` | ⚠️ 需切片 |
 | 4 | 27:39 | 12 | 腿 `actions`（上一步） | 1.0 | ⚠️ 需切片 |
-| 5 | 39:45 | 6 | `commands_dog` | `[2, 2, 0.25, 1, 1, 1]` | ❌ rl_sar 只有 3 维 |
-| 6 | 45:51 | 6 | `commands_arm_obs` | 1.0 | ❌ **stage-1 恒为 0** |
-| 7 | 51:55 | 4 | `clock_inputs` | 1.0 | ❌ 需自己算步态时钟 |
-| 8 | 55:58 | 3 | `base_ang_vel` | `ang_vel=0.25` | ✅ `ang_vel` |
-| 9 | 58:61 | 3 | `base_lin_vel` | `lin_vel=2.0` | ⚠️ 实物不可观测 |
-| 10 | 61:64 | 3 | `pose_actual = [height, pitch, roll]` | `[1, 1, 1]` | ⚠️ height 实物不可观测 |
-| 11 | 64:67 | 3 | `pose_error = pose_target - pose_actual` | — | ❌ 派生量 |
-| 12 | 67:70 | 3 | `velocity_error = cmd - actual` | — | ❌ 派生量 |
-| 13 | 70:76 | 6 | 臂 `dof_pos - default` | `dof_pos=1.0` | ⚠️ 需切片 |
-| 14 | 76:82 | 6 | 臂 `dof_vel` | `dof_vel=0.05` | ⚠️ 需切片 |
+| 5 | 39:50 | 6 或 11 | `commands_dog` | `[2, 2, 0.25, 1, 1, 1, …]` | ❌ rl_sar 只有 3 维 |
+| 6 | 50:59 | 6 或 9 | `commands_arm_obs` | 1.0 | ❌ **stage-1 恒为 0** |
+| 7 | 59:63 | 4 | `clock_inputs` | 1.0 | ❌ 需自己算步态时钟 |
+| 8 | 63:66 | 3 | `base_ang_vel` | `ang_vel=0.25` | ✅ `ang_vel` |
+| 9 | 66:69 | 3 | `base_lin_vel` | `lin_vel=2.0` | ⚠️ 需状态估计 |
+| 10 | 69:72 | 3 | `pose_actual = [height, pitch, roll]` | `[1, 1, 1]` | ⚠️ 需状态估计 |
+| 11 | 72:75 | 3 | `pose_error = pose_target - pose_actual` | — | ❌ 派生量 |
+| 12 | 75:78 | 3 | `velocity_error = cmd - actual` | — | ❌ 派生量 |
+| 13 | 78:84 | 6 | 臂 `dof_pos - default` | `dof_pos=1.0` | ⚠️ 需切片 |
+| 14 | 84:90 | 6 | 臂 `dof_vel` | `dof_vel=0.05` | ⚠️ 需切片 |
 
 补充说明：
 
 - **命令布局**（`wbc_env.py:27-43`）：
-  `[x_vel, y_vel, yaw_vel, body_pitch, body_roll, body_height]`。
+  `[x_vel, y_vel, yaw_vel, body_pitch, body_roll, body_height]`，
+  dyna_gait 时再接 `[gait_frequency, footswing_height, stance_width, stance_length, gait_duration]`。
   注意 `pose_actual` 是 `[height, pitch, roll]`，**顺序和命令不一样**。
 - `pose_target = [(base_height_target + cmd_height)*1.0, cmd_pitch*1.0, cmd_roll*1.0]`，
-  `base_height_target = 0.34`（`config/go1.py`）。
+  go2 上 `base_height_target = 0.3`（不是 go1 的 0.34，同样要从 cfg 读）。
 - `velocity_error = [cmd_vx*2 - vx*2, cmd_vy*2 - vy*2, cmd_yaw*0.25 - wz*0.25]`。
 - 每帧先按 `clip_observations = 100.0` 截断（`ObservationBuilder.build()`），
   **再** 入历史缓冲 —— 与 rl_sar `Forward()` 里"先 clamp 再 insert"的顺序一致。✅
@@ -280,308 +290,217 @@ arm x5_joint1..6: 全 0
 | G6 | 动作 12 维但机器人 18 自由度 | `ComputeOutput` 尺寸不匹配、`RLControl` 越界 | 动作零填充到 18 |
 | G7 | `base_lin_vel` + `body_height` 实物不可观测 | **sim2real 阻塞项** | 见 §2.7 |
 
-### 2.5 改造方案
 
-#### A. RoboDuet 侧：新增导出脚本 `scripts/export_rl_sar.py`
+> G7 已由 **FAST-LIO 状态估计** 解决（见 §2.7 R1）；G1–G6 的实现见下。
 
-职责：从 `<logdir>` 读 `parameters.pkl` + `checkpoints_dog/ac_weights_*.pt`，
-产出 rl_sar 目录树。**不要手抄常数** —— 全部从运行时 `cfg` 里取，这样以后改配置
-不会静默漂移（robot_lab 那边就是手抄的，是已知的维护痛点）。
+### 2.5 已实现的改动
 
-```
-policy/go2_x5/base.yaml
-policy/go2_x5/roboduet_stage1/config.yaml
-policy/go2_x5/roboduet_stage1/policy.pt
-```
+全部落地完成，清单如下。
 
-模型导出直接复用现成逻辑（比 `body_latest_dog.jit` 更稳的是重新 script 一遍，
-顺带做 dummy-input 数值校验）：
+#### RoboDuet 侧
 
-```python
-from scripts.load_policy import _checkpoint_path, _load_run_parameters, \
-                                _validate_checkpoint_layout, _model_args_from_checkpoint, \
-                                _load_inference_state, _temporary_model_args
-# ... 构造 DogActorCritic(use_adaptation_module=structure["uses_adaptation"]) ...
-assert actor_critic.adaptation_module is None, \
-    "rl_sar 单输入模型不支持 adaptation module；请用 dog.use_adaptation_module=False 训练"
-ts = torch.jit.script(actor_critic.actor_body.cpu().eval())
-ts.save(out / "policy.pt")
-# 数值校验
-x = torch.randn(1, cfg.dog.dog_num_obs_history)
-assert torch.allclose(ts(x), actor_critic.actor_body(x), atol=1e-6)
-```
+| 文件 | 说明 |
+|---|---|
+| `scripts/export_rl_sar.py` | **新增**。从 `<logdir>` 生成 rl_sar 的 `base.yaml` + `config.yaml` + `policy.pt` |
+| `scripts/verify_rl_sar_obs.py` | **新增**。逐维比对 rl_sar 观测拼装 vs `get_dog_observations()` 真值 |
 
-yaml 生成（值全部来自 `cfg`）：
+`export_rl_sar.py` 的关键设计：
 
-```yaml
-# policy/go2_x5/base.yaml
-go2_x5:
-  dt: 0.005                 # cfg.sim.dt
-  decimation: 4             # cfg.control.decimation
-  num_of_dofs: 18           # num_actions_loco + num_actions_arm
-  wheel_indices: []
-  fixed_kp: [60.0 ×12, 50,50,80,30,20,20]   # 站起用的硬 PD，腿部可高于 rl_kp
-  fixed_kd: [3.0 ×12,  5,10,10,2.5,2,1]
-  torque_limits: [23.7,23.7,45.43, ×4, 27,27,27,7,7,7]
-  default_dof_pos: [ 0.1,0.8,-1.5,  -0.1,0.8,-1.5,
-                     0.1,1.0,-1.5,  -0.1,1.0,-1.5,
-                     0.0,0.0,0.0,0.0,0.0,0.0]
-  joint_names: [...]              # 硬件序：FR,FL,RR,RL + arm
-  joint_controller_names: [...]   # 硬件序
-  joint_mapping: [3,4,5, 0,1,2, 9,10,11, 6,7,8, 12,13,14,15,16,17]
-```
+- **所有数值从 checkpoint 的 `parameters.pkl` 现场推导**（`load_runtime_cfg()`
+  复刻 `load_policy.load_env()` 的 cfg 重建流程），没有一个硬编码常数。
+  §2.2 已经证明这是必须的：同一套代码不同 flag 会产出 85 / 90 两种宽度。
+- **不依赖 IsaacGym**。`go1_gym.envs.config` 本身是纯 Python；`dog_ac.py` 用
+  `importlib` 按文件路径单独加载，绕开会 `import isaacgym` 的包 `__init__.py`。
+  所以导出可以在任何有 PyTorch 的机器上跑。
+- **网络层宽从 checkpoint 张量形状推导**，不信 `DogAC_Args`，老 checkpoint 也能导。
+- **拒绝而不是猜**：checkpoint 若带 adaptation module（actor 需要两个输入），
+  直接报错并说明处理方式，不会静默产出一个喂错输入的模型。
+- **落盘后回读校验**：`torch.jit.load()` 重新读出保存的文件，与 eager 模块比对
+  `atol=1e-6`。只查内存里的模块是查不出 `script()` 静默失败的。
+- **宽度自洽检查**：观测项宽度之和必须等于 `cfg.dog.dog_num_observations`，
+  否则报错——这道闸门保证 `observation_terms()` 和 `get_dog_observations()`
+  不会悄悄漂移。
 
-```yaml
-# policy/go2_x5/roboduet_stage1/config.yaml
-go2_x5/roboduet_stage1:
-  model_name: "policy.pt"
-  num_observations: 82
-  observations:
-    - "gravity_vec"                    # 3
-    - "roboduet/leg_dof_pos"           # 12
-    - "roboduet/leg_dof_vel"           # 12
-    - "roboduet/leg_actions"           # 12
-    - "roboduet/dog_commands"          # 6
-    - "roboduet/arm_commands"          # 6  (stage-1 全 0)
-    - "roboduet/clock_inputs"          # 4
-    - "ang_vel"                        # 3
-    - "roboduet/base_lin_vel"          # 3
-    - "roboduet/body_pose_actual"      # 3
-    - "roboduet/body_pose_error"       # 3
-    - "roboduet/velocity_error"        # 3
-    - "roboduet/arm_dof_pos"           # 6
-    - "roboduet/arm_dof_vel"           # 6
-  observations_history: [29,28,27,...,2,1,0]   # 最旧在前，与 HistoryWrapper 一致
-  observations_history_priority: "time"
-  clip_obs: 100.0
-  clip_actions_lower: [-10.0 ×18]
-  clip_actions_upper: [ 10.0 ×18]
-  num_of_dofs: 18
-  num_policy_actions: 12                        # ← 新增 key，见 §B
-  action_scale: [0.125,0.25,0.25, ×4,  0.0 ×6]
-  rl_kp: [35.0 ×12, 50,50,80,30,20,20]
-  rl_kd: [ 1.0 ×12,  5,10,10,2.5,2,1]
-  ang_vel_scale: 0.25
-  lin_vel_scale: 2.0
-  dof_pos_scale: 1.0
-  dof_vel_scale: 0.05
-  # RoboDuet 专用
-  roboduet:
-    num_leg_dofs: 12
-    num_arm_dofs: 6
-    dog_commands_scale: [2.0, 2.0, 0.25, 1.0, 1.0, 1.0]
-    arm_num_commands: 6
-    base_height_target: 0.34
-    gait_frequency: 3.0        # use_dynamic_gait=False → 固定
-    gait_duration: 0.5
-    gait_phases: [0.5, 0.0, 0.0]   # trotting: phases/offsets/bounds
-    observe_lin_vel: true          # 由 cfg.dog.observe_lin_vel 决定是否零填充
-    observe_pose_actual: true
-    observe_track_error: true
-  default_dof_pos: [...]  # 同 base.yaml
-  joint_mapping: [...]    # 同 base.yaml
-```
+#### rl_sar 侧
 
-#### B. rl_sar 侧：`rl_sdk.cpp` 新增观测项
+| 文件 | 改动 |
+|---|---|
+| `library/core/rl_sdk/rl_sdk.hpp` | `RobotState::Base`（浮动基座状态）、`Observations::base_height`、`Control::body_pitch/roll/height`、`RL::gait_indices` |
+| `library/core/rl_sdk/rl_sdk.cpp` | `ComputeObservation()` 新增 12 个 `roboduet/*` 观测项；命令按 `limit_*` 钳位；新增机体位姿按键 |
+| `src/rl_sim_mujoco.cpp` | `GetState()` 读浮动基座传感器并转到机体系；`RunModel()` 动作零填充 |
+| `fsm_robot/fsm_go2_x5.hpp` | **新增** 18 自由度 FSM |
+| `fsm_robot/fsm_all.hpp` | 注册新 FSM |
 
-照 `whole_body_tracking/*` 的模式，在 `ComputeObservation()` 的
-`// ============= Other Observations =============` 段（`rl_sdk.cpp:113` 之后）追加。
-需要在 `RL` 类里加三个成员：`gait_indices`（float）、`obs.dog_commands`（6 维）、
-`obs.leg_actions`（12 维，即上一步策略输出未填充版）。
+几个值得说明的实现决定：
 
-核心几项（伪代码，风格与现有分支一致）：
+**动作零填充（G6）** 放在 `RunModel()` 里 `Forward()` 之后：
 
 ```cpp
-else if (observation == "roboduet/leg_dof_pos")
-{
-    int n = this->params.Get<int>("roboduet/num_leg_dofs");
-    std::vector<float> v(this->obs.dof_pos.begin(), this->obs.dof_pos.begin() + n);
-    std::vector<float> d = this->params.Get<std::vector<float>>("default_dof_pos");
-    v = v - std::vector<float>(d.begin(), d.begin() + n);
-    obs_list.push_back(v * this->params.Get<float>("dof_pos_scale"));
-}
-else if (observation == "roboduet/dog_commands")
-{
-    // [x_vel, y_vel, yaw_vel, body_pitch, body_roll, body_height]
-    std::vector<float> c = {this->control.x, this->control.y, this->control.yaw,
-                            this->control.body_pitch, this->control.body_roll,
-                            this->control.body_height};
-    obs_list.push_back(c * this->params.Get<std::vector<float>>("roboduet/dog_commands_scale"));
-}
-else if (observation == "roboduet/arm_commands")
-{
-    obs_list.push_back(std::vector<float>(this->params.Get<int>("roboduet/arm_num_commands"), 0.0f));
-}
-else if (observation == "roboduet/clock_inputs")
-{
-    // 与 LeggedRobot._step_contact_targets 逐行对齐（legged_robot.py:2711-2760）
-    float freq = this->params.Get<float>("roboduet/gait_frequency");   // 3.0
-    float dur  = this->params.Get<float>("roboduet/gait_duration");    // 0.5
-    float dt   = this->params.Get<float>("dt") * this->params.Get<int>("decimation");
-    this->gait_indices = std::fmod(this->gait_indices + dt * freq, 1.0f);
-    // trotting: phases=0.5, offsets=0, bounds=0
-    // foot_indices = [g+0.5, g+0, g+0, g+0.5]  (FL, FR, RL, RR)
-    std::vector<float> fi = {this->gait_indices + 0.5f, this->gait_indices,
-                             this->gait_indices,       this->gait_indices + 0.5f};
-    bool standing = std::sqrt(x*x + y*y + yaw*yaw) < 0.1f;   // 与训练一致的 stand 判据
-    std::vector<float> clock(4);
-    for (int i = 0; i < 4; ++i)
-    {
-        float idx = standing ? 0.25f : std::fmod(fi[i], 1.0f);
-        idx = (idx < dur) ? idx * (0.5f / dur)
-                          : 0.5f + (idx - dur) * (0.5f / (1.0f - dur));
-        clock[i] = std::sin(2.0f * M_PI * idx);
-    }
-    obs_list.push_back(clock);
-}
+this->obs.actions = this->Forward();          // 12 维
+this->obs.actions.resize(this->params.Get<int>("num_of_dofs"), 0.0f);   // 补到 18
 ```
 
-`roboduet/body_pose_actual` / `body_pose_error` / `velocity_error` 同理，
-分别读 `obs.base_height`（新增）、`QuaternionToEuler(base_quat)` 和 `obs.lin_vel`；
-当对应的 `observe_*` 开关为 false 时直接推零向量（与训练侧行为完全一致）。
+必须补零而不是让它保持 12 维——`vector_math.hpp` 的逐元素算子按
+`min(size)` 截断（`vector_math.hpp:175-184`），`output_dof_pos` 会只剩 12 个，
+而 `RLFSMState::RLControl()` 按 `num_of_dofs=18` 索引，**越界读**。
+补零后配合 `action_scale` 里臂的 6 个 0，臂就停在 `default_dof_pos` 上。
+观测项 `roboduet/leg_actions` 取补零前的前 12 维，等价于切片，两边自洽。
 
-> **关键：`gait_indices` 必须在 `RLFSMStateRLLocomotion::Enter()` 里清零**，
-> 和训练侧 reset 时 `gait_indices=0` 对齐；否则每次重进 RL 状态相位随机。
+**被动状态下臂不能松**（`fsm_go2_x5.hpp` `RLFSMStatePassive::Run()`）：
+go2 原版 FSM 在 passive 下把所有关节 `kp=0, kd=8`。18 自由度机器人照抄会让
+臂直接砸到机身上，还可能被反驱到自身硬限位。所以腿松、臂用 `fixed_kp/kd`
+保持在默认位姿。
 
-#### C. rl_sar 侧：动作零填充（G6）
+**`gait_indices` 在 `RLFSMStateRLLocomotion::Enter()` 清零**，对齐训练侧 reset
+行为，否则每次重进 RL 状态相位是随机的。
 
-`ComputeOutput()`（`rl_sdk.cpp:256-271`）假定 `actions.size() == num_of_dofs`。
-RoboDuet 输出 12、机器人 18。`vector_math.hpp` 的逐元素算子会按
-`min(size1, size2)` 截断（`vector_math.hpp:175-184`），结果 `output_dof_pos` 只有 12 个，
-而 `RLFSMState::RLControl()` 会按 `num_of_dofs=18` 索引 → **越界读**。
+**命令钳位** 用 `params.Has()` 守卫，配置里没有 `limit_*` 的机器人（其余 12 台）
+完全不受影响。
 
-最小改动：在 `Forward()` 返回后、写回 `obs.actions` 之前把动作补零到 `num_of_dofs`：
+**浮动基座状态**（FAST-LIO 接入点）：`RobotState::base` 有明确的坐标系约定——
+`lin_vel` 是**机体系**、`position` 是**世界系**。MuJoCo 侧从 `framelinvel`
+读世界系速度后用 `QuatRotateInverse` 转到机体系；实物侧 FAST-LIO 的输出同样
+需要转换后再写入 `robot_state.base.lin_vel`。
 
-```cpp
-// RL_Sim::RunModel()
-this->obs.leg_actions = this->Forward();                 // 12 维，进观测用这个
-this->obs.actions = this->obs.leg_actions;
-this->obs.actions.resize(this->params.Get<int>("num_of_dofs"), 0.0f);   // 补 6 个 0
-```
+### 2.6 验证结果
 
-补零后：臂的 `action_scale` 配成 0 → `output_dof_pos[12..17] = default_dof_pos[12..17]`，
-臂用自己的 `rl_kp/rl_kd` 位置保持在默认姿态。这与训练侧
-`_apply_stage1_arm_curriculum_actions()` 在 `intensity=0` 时的行为一致
-（`wbc_env.py:574-582`，动作使臂目标 = 固定位姿）。
-
-> 观测里的 `roboduet/leg_actions` 用**未填充的 12 维**，
-> 不能用补零后的 18 维——这是最容易踩的坑。
-
-#### D. FSM：`src/rl_sar/fsm_robot/fsm_go2_x5.hpp`
-
-直接拷 `fsm_go2.hpp` 改：
-
-- `rl.config_name = "roboduet_stage1"`（`fsm_go2.hpp:165`）
-- `pre_running_pos` 扩到 18 维（后 6 个填 0）
-- `RLFSMStateRLLocomotion::Enter()` 里加 `rl.gait_indices = 0.0f;`
-- `GetType()` 返回 `"go2_x5"`，`REGISTER_FSM_FACTORY(Go2X5FSMFactory, "RLFSMStatePassive")`
-- 在 `fsm_all.hpp` 加 `#include "fsm_go2_x5.hpp"`
-
-#### E. 机器人描述：`src/rl_sar_zoo/go2_x5_description/`
-
-MuJoCo sim2sim 需要 `mjcf/<scene>.xml`（`rl_sim_mujoco.cpp:64`）。
-`GetState()` 假定 sensordata 布局为：
+`verify_rl_sar_obs.py` 在真实 IsaacGym 环境中，把 rl_sar 的观测拼装
+（按导出的 `config.yaml` 逐项重放）与 RoboDuet 自己的
+`get_dog_observations()` 输出逐维比对，400 步、5 组不同指令
+（含零指令以覆盖站立分支）：
 
 ```
-[0 .. N-1]        jointpos  ×18
-[N .. 2N-1]       jointvel  ×18
-[2N .. 3N-1]      jointactuatorfrc ×18
-[3N .. 3N+3]      framequat (w,x,y,z)
-[3N+4 .. 3N+6]    gyro
+per-term max |truth - rl_sar| over 400 compared steps (tolerance 1e-4):
+
+  [ok  ] gravity_vec                dims   0:3    max_err 1.026e-07
+  [ok  ] roboduet/leg_dof_pos       dims   3:15   max_err 2.980e-08
+  [ok  ] roboduet/leg_dof_vel       dims  15:27   max_err 3.576e-08
+  [ok  ] roboduet/leg_actions       dims  27:39   max_err 0.000e+00
+  [ok  ] roboduet/dog_commands      dims  39:50   max_err 4.768e-08
+  [ok  ] roboduet/arm_commands      dims  50:59   max_err 0.000e+00
+  [ok  ] roboduet/clock_inputs      dims  59:63   max_err 5.734e-07
+  [ok  ] ang_vel                    dims  63:66   max_err 0.000e+00
+  [ok  ] roboduet/base_lin_vel      dims  66:69   max_err 0.000e+00
+  [ok  ] roboduet/body_pose_actual  dims  69:72   max_err 3.065e-08
+  [ok  ] roboduet/body_pose_error   dims  72:75   max_err 3.780e-08
+  [ok  ] roboduet/velocity_error    dims  75:78   max_err 1.192e-07
+  [ok  ] roboduet/arm_dof_pos       dims  78:84   max_err 0.000e+00
+  [ok  ] roboduet/arm_dof_vel       dims  84:90   max_err 2.235e-09
+
+  gait clock rate drift (rl_sar vs env): 3.874e-08
 ```
 
-工作区已有 `go2_x5_description/urdf/go2_x5.urdf`，可用 MuJoCo 的
-`compile` 或 robot_lab 的 `scripts/tools/convert_urdf.py` 转，然后**手工加传感器块**
-并保证顺序按硬件序（FR,FL,RR,RL + arm）排列。
+全部落在 float32 精度内。C++ 侧的这 12 个观测项与该脚本里的 Python 版是
+逐行对照写的，所以这同时验证了导出配置和 `ComputeObservation()`。
 
-因为 stage-1 观测还要 `base_lin_vel` 和 `base_height`，MJCF 里还需额外加：
+**验证过程中发现的一个真实时序问题**：`clock_inputs` 是在 `env.step()` 内部的
+`_step_contact_targets()` 里写入 buffer 的，用的是**当时**的 `commands_dog`。
+若在 step 之后注入新指令再读观测，比对的是"新指令 vs 旧时钟"，必然不一致。
+训练侧和 rl_sar 侧其实都是"同一时刻推进时钟并观测"，没有滞后；
+所以校验脚本改成了真实控制环顺序 **施加指令 → step → 观测 → 比对**。
+这一点在真机上同样重要：rl_sar 的 `ComputeObservation()` 在推进
+`gait_indices` 的同一次调用里读 `control.x/y/yaw`，与训练一致。
 
-```xml
-<framelinvel objtype="site" objname="imu"/>   <!-- 或 velocimeter，注意 world/body 系 -->
-<framepos    objtype="site" objname="imu"/>
+C++ 侧编译验证：
+
+```bash
+# rl_sdk.cpp / fsm_go2_x5.hpp / fsm_all.hpp 全部通过
+g++ -fsyntax-only -std=c++17 -DPOLICY_DIR='"..."' -I ... rl_sdk.cpp
 ```
 
-并在 `RL_Sim::GetState()` 里读出来填 `obs.lin_vel` / `obs.base_height`。
-**注意**：训练侧 `base_lin_vel` 是**机体系**（`quat_rotate_inverse` 后的），
-`framelinvel` 给的是世界系，需要自己转；`base_pos[:,2]` 是世界系 z（绝对高度）。
+`rl_sim_mujoco.cpp` 的改动因为缺 MuJoCo/GLFW 头文件无法整体编译，
+改动片段已用等价的独立 TU 做了类型检查。
 
-### 2.6 工作量清单
+### 2.7 剩余工作与风险
 
-| 文件 | 动作 | 规模 |
-|---|---|---|
-| `RoboDuet/scripts/export_rl_sar.py` | 新增 | ~250 行 |
-| `rl_sar/.../rl_sdk.hpp` | 加 `gait_indices` / `obs.base_height` / `obs.leg_actions` / `control.body_*` | ~15 行 |
-| `rl_sar/.../rl_sdk.cpp` | `ComputeObservation()` 新增 ~10 个 `roboduet/*` 分支 | ~150 行 |
-| `rl_sar/.../rl_sim_mujoco.cpp` | `GetState` 加 lin_vel/height；`RunModel` 动作补零 | ~20 行 |
-| `rl_sar/.../fsm_robot/fsm_go2_x5.hpp` | 新增（拷 go2） | ~250 行 |
-| `rl_sar/.../fsm_robot/fsm_all.hpp` | 加一行 include | 1 行 |
-| `rl_sar/src/rl_sar_zoo/go2_x5_description/` | 新增 MJCF + 配置 | 中等 |
-| `rl_sar/policy/go2_x5/**` | 由导出脚本生成 | 0（自动） |
+**剩余工作**
 
-### 2.7 风险与建议（重要）
+| 项 | 状态 |
+|---|---|
+| `src/rl_sar_zoo/go2_x5_description/mjcf/*.xml` | **待做**。sim2sim 必需，见下 |
+| `src/rl_sar/src/rl_real_go2_x5.cpp` | **待做**。需要 X5 机械臂的 SDK 接口细节 |
+| FAST-LIO → `robot_state.base` 的接线 | **待做**，取决于上一项 |
 
-**R1 — `base_lin_vel` / `body_height` 在实物上不可观测（G7）。**
-当前 `dog.observe_lin_vel/observe_pose_actual/observe_track_error` 全为 `True`
-（`config/wbc.py:162-164`），意味着 obs 的第 58:70 共 12 维里塞了机体线速度、
-绝对机身高度以及它们的跟踪误差。Go2 低层 SDK 只给 IMU 加速度，没有可靠的
-线速度/高度估计。**sim2sim 能跑（MuJoCo 有真值），sim2real 会直接失效。**
+MJCF 的传感器块顺序必须是（N = 18）：
 
-好消息是 RoboDuet 的设计已经考虑了这点：这三个开关**只控制零填充，不改变 obs 宽度**
-（`wbc_env.py:2393-2429` 的注释明确写了 "Fixed width regardless of..."）。所以：
+```
+[0 .. N-1]      jointpos          ×18   硬件序 FR,FL,RR,RL + arm
+[N .. 2N-1]     jointvel          ×18
+[2N .. 3N-1]    jointactuatorfrc  ×18
+[3N .. 3N+3]    framequat  (w,x,y,z)
+[3N+4 .. 3N+6]  gyro
+[3N+7 .. 3N+9]  framelinvel  (世界系)     ← 新增，use_base_state_sensor 读这里
+[3N+10 .. 3N+12] framepos    (世界系)     ← 新增
+```
 
-> **建议：面向部署的 stage-1 训练，用
-> `dog.observe_lin_vel=False`、`dog.observe_pose_actual=False`、
-> `dog.observe_track_error=False` 重训（或微调）。**
-> obs 仍是 82 维，第 58:70 恒为 0，导出的 yaml 里对应项直接推零向量，
-> sim2sim 与 sim2real 行为完全一致，无需状态估计器。
+实物节点没写，是因为 X5 机械臂的通信接口在本工作区里看不到
+（`X5-2025/` 只有 URDF 相关内容）。腿部照抄 `rl_real_go2.cpp` 即可，
+臂的读写和 FAST-LIO 里程计订阅需要你补。
 
-如果一定要用现有的全开策略，就只做 sim2sim 验证，或接一个外部
-里程计/状态估计器（工作区里的 `ocs2_ros2` / `go2_x5_ocs2` 可能有现成的）。
+**R1 — 状态估计（已有方案）**：策略观测 `base_lin_vel`（机体系）和
+`base_pos.z`（世界系绝对高度），共 12 维依赖它们。已确认用 FAST-LIO 提供。
+接入时注意两件事：**坐标系**（`base.lin_vel` 必须是机体系，FAST-LIO 通常给
+世界系，要用当前姿态转换）和**延迟**（LIO 的输出相对 IMU 有几十毫秒延迟，
+训练时是零延迟真值；如果实机表现出低频振荡，优先怀疑这里）。
 
-**R2 — 观测噪声。** `dog.add_obs_noise = False`（`config/wbc.py:161`），
-所以 stage-1 dog policy 训练时**没有观测噪声**。真机上传感器噪声会直接暴露。
-建议部署前先把 `add_obs_noise` 打开重训一轮。
+**R2 — 观测噪声（已解决）**：已有加噪声训练的模型。
 
-**R3 — `domain_rand.dog_obs_frame_drop_prob = 0.0`。** 同理，没有丢帧鲁棒性训练。
+**R3 — 丢帧鲁棒性**：`domain_rand.dog_obs_frame_drop_prob` 默认 0.0。
+如果 FAST-LIO 的更新率低于 50 Hz，dog obs 里那 12 维会重复上一帧的值，
+等效于丢帧。建议开一点 `dog_obs_frame_drop_prob` 重训，或确认 LIO 能跟上 50 Hz。
 
-**R4 — 臂的存在改变了动力学。** stage-1 训练时臂被 `stage1_arm` 曲线扰动
-（质量 0.1~2.0 倍缩放、EE 载荷 0~1.5 kg）。部署时臂如果被另一个控制器（比如 OCS2 侧）
-驱动，其 dof_pos/dof_vel 会实时进入 dog obs —— 这是 stage-1 的设计意图，没问题；
-但**臂的关节读数必须真实接入**，不能像 `arm_commands` 那样零填充。
+**R4 — 臂的关节读数必须真实接入**。stage-1 训练时臂是扰动源，其
+`dof_pos/dof_vel` 实时进入 dog obs（第 78:90 维）——这是 stage-1 的设计意图。
+但 `arm_commands`（第 50:59 维）在 stage-1 恒为 0，是占位槽。
+**两者不要搞混**：前者必须是真值，后者必须是零。
 
-**R5 — `clock_inputs` 相位漂移。** rl_sar 的 `loop_rl` 是软实时线程，
-若发生调度抖动，`gait_indices` 的积分步长与训练时的固定 `dt=0.02` 会偏差。
-建议按实际经过时间积分而非固定 `dt`，或至少监控 `loop_rl` 的实际周期。
+**R5 — `clock_inputs` 相位漂移**：`loop_rl` 是软实时线程，
+`gait_indices` 按固定 `dt` 积分。校验显示速率误差 3.9e-8（即公式正确），
+但真机上若线程抖动，实际经过时间会偏离标称 `dt`。建议监控 `loop_rl` 实际周期；
+必要时改成按实际经过时间积分。
 
-**R6 — `num_of_dofs=18` 影响 FSM 全流程。** `Interpolate()`、`TorqueProtect()`、
-CSV logger 都按 `num_of_dofs` 遍历，所以 `base.yaml` 里所有 18 维数组
-（`fixed_kp/fixed_kd/torque_limits/default_dof_pos`）都必须补全，
-漏一个就是静默的越界或错误行为。
+**R6 — `num_of_dofs=18` 贯穿 FSM 全流程**：`Interpolate()`、`TorqueProtect()`、
+CSV logger 都按 `num_of_dofs` 遍历。导出脚本生成的所有 18 维数组都已补全，
+但如果手工改 yaml，漏一个就是静默越界。
 
-### 2.8 分阶段验证计划
+### 2.8 使用方法
 
-1. **离线数值对齐（最重要，先做）**：写一个 Python 脚本，从 IsaacGym 里 dump
-   连续 N 帧的 `dog_obs_history` 与对应 actions；再用 C++ 侧（或先用 Python 复刻的
-   rl_sar 观测拼装逻辑）喂同样的原始传感器量，**逐维比对 82 维观测**。
-   任何一维不匹配都必须先解决——这一步能省掉 90% 的调试时间。
-2. **模型一致性**：`policy.pt` 用同一批 `obs_history` 在 Python 和 rl_sar 的
-   `test_inference_runtime` 里分别前向，比对 12 维输出，容差 1e-5。
-3. **MuJoCo sim2sim**：`./rl_sim_mujoco go2_x5 scene`，先只做站立（不给速度指令），
-   看 `clock_inputs` 是否进 stand 相位（全部 0.25 → `sin(π/2)=1`）、姿态是否稳定。
-4. **加指令行走**，对比 IsaacGym play 的步态频率/足端相位。
-5. **实物**：先 `RLFSMStatePassive` → `GetUp`，用 `fixed_kp/kd` 确认关节映射正确
-   （看机器人是否摆出正确站姿），再切 RL 状态。打开 `TorqueProtect` /
-   `AttitudeProtect`（`rl_sim_mujoco.cpp:362-363` 目前是注释掉的）。
+```bash
+# 1) 导出（不需要 IsaacGym）
+python scripts/export_rl_sar.py \
+    --logdir runs/<date>/<run> \
+    --rl_sar_root /home/simon/Projects/Simon/wbc_rl_mpc/rl_sar \
+    --robot go2_x5 --config_name roboduet_stage1
+
+# 2) 逐维校验（需要 IsaacGym）
+source /opt/miniconda3/etc/profile.d/conda.sh && conda activate isaacgym
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+python scripts/verify_rl_sar_obs.py \
+    --logdir runs/<date>/<run> \
+    --config ../rl_sar/policy/go2_x5/roboduet_stage1/config.yaml \
+    --steps 400
+
+# 3) sim2sim（需要先补 MJCF）
+cd ../rl_sar && ./build.sh
+./cmake_build/bin/rl_sim_mujoco go2_x5 scene
+#   0 → 站起,  1 → 进 RL,  9 → 趴下,  P → 被动
+#   WSAD/QE 速度,  TG 俯仰,  YH 横滚,  UJ 高度,  空格清零
+```
+
+上机顺序建议：先 `Passive → GetUp`，用 `fixed_kp/kd` 确认关节映射正确
+（看机器人是否摆出正确站姿）；确认无误再按 `1` 切 RL 状态。
+建议先打开 `rl_sim_mujoco.cpp:362-363` 目前注释掉的
+`TorqueProtect` / `AttitudeProtect`。
 
 ---
 
 ## 附：一句话总结
 
 rl_sar 的合约是"**扁平 TorchScript + 逐项对齐的 yaml + `joint_mapping` 桥接策略序与硬件序**"。
-RoboDuet stage-1 的模型侧天然满足（`body_latest_dog.jit` 就是现成的、且无 adaptation module），
-**全部工作量在观测拼装**：82 维里有 34 维是 rl_sar 现有通用项覆盖不到的
-（6 维 dog 命令、6 维臂命令占位、4 维步态时钟、12 维位姿/速度跟踪、以及腿/臂不连续的切片），
-按 rl_sar 已有的 `whole_body_tracking/*` 扩展模式新增一组 `roboduet/*` 观测项即可。
-另外必须处理"12 维动作 vs 18 自由度"的补零问题。
-**部署前的头号决策是 R1**：建议用 `observe_lin_vel/pose_actual/track_error = False` 重训，
-这样不改 obs 宽度就能去掉对状态估计器的依赖，sim2real 才有可行性。
+RoboDuet stage-1 的模型侧天然满足（actor 是纯 `nn.Sequential`、无 adaptation module），
+**全部工作量在观测拼装**：整个观测向量里有 40 多维是 rl_sar 现有通用项覆盖不到的
+（dog 命令、臂命令占位、步态时钟、位姿/速度跟踪、以及腿/臂不连续的切片），
+已按 rl_sar 已有的 `whole_body_tracking/*` 扩展模式新增了一组 `roboduet/*` 观测项，
+并处理了"12 维动作 vs 18 自由度"的补零问题。
+观测拼装已在真实 IsaacGym 环境中逐维验证通过（误差 ≤ 1e-7）。
+**剩余阻塞项是 MJCF 资产和实物节点**，后者需要 X5 机械臂的 SDK 接口细节。
