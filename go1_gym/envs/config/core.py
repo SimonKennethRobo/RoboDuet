@@ -170,6 +170,10 @@ class RoboDuetRuntimeOptions:
     stage1_arm_curriculum: bool = True
     goal_reaching: bool = False
     traj_tracking: bool = False
+    # False forces rho / v_ff back onto the legacy reach_radius sphere instead
+    # of the M2 direction-dependent table -- the ablation the design doc's
+    # A.3 calls for (2D table vs sphere approximation).
+    reach_table: bool = True
 
     @classmethod
     def from_args(cls, args):
@@ -182,6 +186,7 @@ class RoboDuetRuntimeOptions:
             stage1_arm_curriculum=not getattr(args, "no_stage1_arm_curriculum", False),
             goal_reaching=getattr(args, "goal_reaching", False),
             traj_tracking=getattr(args, "traj_tracking", False),
+            reach_table=not getattr(args, "no_reach_table", False),
         )
 
 
@@ -556,6 +561,12 @@ def configure_robot_asset(cfg, robot):
     cfg.asset.ee_body_name = spec["ee_body_name"]
     cfg.arm.ik.ee_local_pos = list(spec["ee_local_pos"])
     cfg.domain_rand.mount_joint_name = spec["mount_joint_name"]
+    # M2 reachability table for this robot (scripts/build_reach_table.py). The
+    # env falls back to the scalar reach_radius sphere if the file is absent,
+    # so this path pointing at nothing is a supported configuration.
+    cfg.wbc.goal_reaching.reach_table_path = (
+        "{MINI_GYM_ROOT_DIR}/resources/reach_tables/" + f"{robot}_2d.pt"
+    )
 
 
 def validate_roboduet_cfg(cfg):
@@ -601,6 +612,8 @@ def build_roboduet_config(args=None, *, options=None, debug=False):
         enable_goal_reaching(cfg, layout)
     if options.traj_tracking:
         enable_traj_tracking(cfg, layout)
+    if not options.reach_table:
+        cfg.wbc.goal_reaching.reach_table_path = ""
 
     layout.finalize(cfg)
     configure_privileged_obs_dims(cfg)

@@ -1,3 +1,5 @@
+import os
+
 import cv2
 import isaacgym
 
@@ -289,6 +291,76 @@ class WBCEnv(LeggedRobot):
         self.delta_velocity_cmd[env_ids] = 0.0
         self.upper_plan_actions_raw[env_ids] = 0.0
 
+    def _load_reach_table(self):
+        """Load the M2 direction-dependent reach table, or fall back to the
+        scalar sphere. Absent file is not an error: the sphere is the previous
+        behaviour, and a run configured before any table was built (or a robot
+        with no table yet) must still start."""
+        from go1_gym import MINI_GYM_ROOT_DIR
+        from modules.reachability import ReachabilityTable
+
+        self.reach_table = None
+        path = str(getattr(self.cfg.wbc.goal_reaching, "reach_table_path", "") or "")
+        if not path:
+            return
+        path = path.format(MINI_GYM_ROOT_DIR=MINI_GYM_ROOT_DIR)
+        if not os.path.isfile(path):
+            print(
+                f"[RoboDuet] no reachability table at {path}; rho/v_ff fall back to the "
+                f"reach_radius={self.cfg.wbc.goal_reaching.reach_radius} sphere "
+                f"(build one with scripts/build_reach_table.py)",
+                flush=True,
+            )
+            return
+        self.reach_table = ReachabilityTable.load(path, device=self.device)
+        r = self.reach_table.table
+        print(
+            f"[RoboDuet] reachability table {tuple(r.shape)} mode={self.reach_table.mode} "
+            f"loaded from {path} (R_max {r.min():.3f}-{r.max():.3f} m)",
+            flush=True,
+        )
+
+    def _shoulder_frame(self):
+        """(position, xyzw quaternion) of the arm mount in world coordinates.
+
+        The orientation matters now that R_max is direction-dependent: the
+        shoulder frame is the trunk rotated by the mount joint's fixed rpy, and
+        every direction fed to the reach table must be expressed in it."""
+        pos = self.base_pos + quat_apply(self.base_quat, self.arm_mount_tfs[:, :3])
+        return pos, quat_mul(self.base_quat, self.arm_mount_quat_body)
+
+    def _reach_query(self, p_tgt_world):
+        """Reachability geometry shared by rho, the rho preview and v_ff.
+
+        p_tgt_world: (N, K, 3) or (N, 3) target positions in world coordinates
+
+        Returns (r, dir_world, r_max), each with the target's leading shape
+        (r_max broadcast per target). r_max comes from the M2 table when one is
+        loaded and from the scalar reach_radius sphere otherwise, so every
+        consumer degrades together and none of them can silently disagree about
+        what the arm can reach.
+        """
+        squeeze = p_tgt_world.dim() == 2
+        if squeeze:
+            p_tgt_world = p_tgt_world.unsqueeze(1)
+        N, K = p_tgt_world.shape[0], p_tgt_world.shape[1]
+
+        sh_pos, sh_quat = self._shoulder_frame()
+        d_world = p_tgt_world - sh_pos.unsqueeze(1)
+        r = d_world.norm(dim=-1).clamp_min(1e-6)
+        dir_world = d_world / r.unsqueeze(-1)
+
+        if self.reach_table is None:
+            r_max = torch.full_like(r, max(float(self.cfg.wbc.goal_reaching.reach_radius), 1e-3))
+        else:
+            q = sh_quat.unsqueeze(1).expand(N, K, 4).reshape(N * K, 4)
+            u = quat_apply(quat_conjugate(q), dir_world.reshape(N * K, 3)).reshape(N, K, 3)
+            r_max = self.reach_table.query(u).clamp_min(1e-3)
+
+        if squeeze:
+            return r[:, 0], dir_world[:, 0], r_max[:, 0]
+        return r, dir_world, r_max
+
     def _base_nom_targets(self):
         """The world-frame EE target points the base should stage itself for,
         as (N, K, 3), paired with their (K,) normalized blend weights.
@@ -310,20 +382,21 @@ class WBCEnv(LeggedRobot):
 
     def _compute_point_goal_base_nom(self):
         cfg = self.cfg.wbc.goal_reaching
-        mount_offset_body = self.arm_mount_tfs[:, :3]
-        mount_offset_world = quat_apply(self.base_quat, mount_offset_body)
-        shoulder_world = self.base_pos + mount_offset_world
+        mount_offset_world = quat_apply(self.base_quat, self.arm_mount_tfs[:, :3])
 
         p_k, weights = self._base_nom_targets()  # (N, K, 3), (K,)
         w = weights.view(1, -1, 1)
-        d_k = p_k - shoulder_world.unsqueeze(1)  # (N, K, 3)
-        distance_k = d_k.norm(dim=-1, keepdim=True).clamp_min(1e-6)
-        direction_k = d_k / distance_k
-        # Ideal shoulder for each look-ahead point sits rho_star * reach back
-        # along its own bearing; the base pose that would put the shoulder
-        # there is that minus the mount offset. Blend across the horizon.
-        desired_reach = float(cfg.rho_star) * float(cfg.reach_radius)
-        base_target_k = p_k - direction_k * desired_reach - mount_offset_world.unsqueeze(1)
+        r_k, direction_k, r_max_k = self._reach_query(p_k)
+        d_k = direction_k * r_k.unsqueeze(-1)  # (N, K, 3)
+        # Ideal shoulder for each look-ahead point sits rho_star * R_max(u)
+        # back along that point's own bearing -- with a direction-dependent
+        # R_max the stand-off distance now varies per point, which is what
+        # makes the base back off further for a target it must reach downward
+        # (short reach) than for one at shoulder height.
+        desired_reach_k = float(cfg.rho_star) * r_max_k  # (N, K)
+        base_target_k = (
+            p_k - direction_k * desired_reach_k.unsqueeze(-1) - mount_offset_world.unsqueeze(1)
+        )
         base_target_world = (w * base_target_k).sum(dim=1)
         # yaw follows the blended bearing to the look-ahead window (§5.5)
         displacement_world = (w * d_k).sum(dim=1)
@@ -704,6 +777,11 @@ class WBCEnv(LeggedRobot):
         self.goal_joint_limit_distance = torch.zeros(
             self.num_envs, self.num_actions_arm, dtype=torch.float, device=self.device
         )
+        # Fixed rotation from the trunk to the arm mount, so the shoulder frame
+        # (the frame R_max(u) is defined in) can be formed each step.
+        rpy = self.arm_mount_tfs[:, 3:6]
+        self.arm_mount_quat_body = quat_from_euler_xyz(rpy[:, 0], rpy[:, 1], rpy[:, 2])
+        self._load_reach_table()
 
         # Jacobian MUST be acquired before the first gym.simulate() call --
         # acquiring it lazily later silently returns an all-zero tensor
@@ -1137,13 +1215,28 @@ class WBCEnv(LeggedRobot):
         )
         self.traj_batch.load_from_stacked(env_ids, self.traj_bank.batch, rows)
 
-        # anchor the origin-centered path in front of the shoulder (world
-        # axes -- the base yaws to follow via v_ff)
-        mount_offset_body = self.arm_mount_tfs[env_ids, :3]
-        shoulder_world = self.base_pos[env_ids] + quat_apply(self.base_quat[env_ids], mount_offset_body)
-        anchor = shoulder_world + quat_apply(
-            self.base_quat[env_ids], self._traj_anchor_offset.expand(len(env_ids), -1)
-        )
+        # Anchor the origin-centered path in front of the shoulder (world axes
+        # -- the base yaws to follow via v_ff). anchor_offset_body supplies the
+        # DIRECTION; the distance along it is rho_star * R_max(that direction),
+        # so the path starts exactly at the comfortable stand-off the base
+        # feedforward will try to hold. Deriving it instead of trusting the
+        # configured length keeps the anchor consistent with whichever reach
+        # model is live -- with the M2 table the comfortable forward distance
+        # (~0.44 m on go2_x5) is not the sphere's 0.6*0.6 = 0.36 m, and an
+        # anchor at the wrong radius makes v_ff back the base away from the
+        # path on the very first step.
+        n = len(env_ids)
+        sh_pos, sh_quat = self._shoulder_frame()
+        sh_pos, sh_quat = sh_pos[env_ids], sh_quat[env_ids]
+        dir_body = torch.nn.functional.normalize(self._traj_anchor_offset, dim=-1).expand(n, -1)
+        dir_world = quat_apply(self.base_quat[env_ids], dir_body)
+        if self.reach_table is None:
+            r_max = torch.full((n,), float(self.cfg.wbc.goal_reaching.reach_radius), device=self.device)
+        else:
+            u_sh = quat_apply(quat_conjugate(sh_quat), dir_world)
+            r_max = self.reach_table.query(u_sh).clamp_min(1e-3)
+        distance = float(self.cfg.wbc.goal_reaching.rho_star) * r_max
+        anchor = sh_pos + dir_world * distance.unsqueeze(-1)
         self.traj_batch.gamma_p[env_ids] += anchor.unsqueeze(1)
 
         # clear per-env progress state + episode accumulators
@@ -1854,10 +1947,8 @@ class WBCEnv(LeggedRobot):
         self.commands_arm_obs[:] = torch.cat((self.arm_target_pos_body, target_ori_body), dim=-1)
 
     def _update_goal_reaching_diagnostics(self):
-        mount_offset_body = self.arm_mount_tfs[:, :3]
-        shoulder_world = self.base_pos + quat_apply(self.base_quat, mount_offset_body)
-        reach = max(float(self.cfg.wbc.goal_reaching.reach_radius), 1e-3)
-        self.goal_rho[:] = torch.linalg.vector_norm(self.arm_goal_pos_world - shoulder_world, dim=-1) / reach
+        r, _, r_max = self._reach_query(self.arm_goal_pos_world)
+        self.goal_rho[:] = r / r_max
         first_sample = ~self.goal_rho_valid
         self.goal_rho_prev[first_sample] = self.goal_rho[first_sample]
         self.goal_rho_valid[:] = True
@@ -2012,17 +2103,13 @@ class WBCEnv(LeggedRobot):
         tangent_k = self.traj_batch.tangent_at(s_k).reshape(N * K, 3)
         tangent_k_heading = quat_apply(heading_inv_k, tangent_k).reshape(N, K, 3)
 
-        # closed-form rho along the preview (reuse the diagnostics formula)
-        mount_offset_body = self.arm_mount_tfs[:, :3]
-        shoulder_world = self.base_pos + quat_apply(self.base_quat, mount_offset_body)
-        reach = max(float(self.cfg.wbc.goal_reaching.reach_radius), 1e-3)
-        rho_k = torch.linalg.vector_norm(p_k - shoulder_world.unsqueeze(1), dim=-1) / reach
-        rho_hi = float(self.cfg.wbc.goal_reaching.rho_hi)
-        urgency = (rho_k - rho_hi).clamp_min(0.0).max(dim=-1).values
-        violated = rho_k > rho_hi
-        any_viol = violated.any(dim=-1)
-        first_viol = violated.float().argmax(dim=-1).float() / max(K, 1)
-        s_to_viol = torch.where(any_viol, first_viol, torch.ones_like(first_viol))
+        # rho along the preview under the frozen-base assumption (§6.1), from
+        # the same reach model rho and v_ff use
+        from modules.reachability import rho_profile_summary
+
+        r_k, _, r_max_k = self._reach_query(p_k)
+        rho_k = r_k / r_max_k
+        urgency, s_to_viol = rho_profile_summary(rho_k, float(self.cfg.wbc.goal_reaching.rho_hi))
         urgency_pair = torch.stack((urgency, s_to_viol), dim=-1)
 
         preview = torch.cat(

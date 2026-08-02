@@ -314,6 +314,14 @@ if __name__ == "__main__":
         "(implies --goal_reaching; sets wbc.goal_reaching.target_mode='trajectory').",
     )
 
+    parser.add_argument(
+        "--no_reach_table",
+        action="store_true",
+        default=False,
+        help="Ablation: use the scalar reach_radius sphere for rho/v_ff instead of "
+        "the M2 direction-dependent reachability table.",
+    )
+
     args = parser.parse_args()
 
     main(args)

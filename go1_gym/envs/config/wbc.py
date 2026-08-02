@@ -402,6 +402,15 @@ GOAL_REACHING_OVERRIDES = {
     "wbc.goal_reaching.rho_star": 0.60,
     "wbc.goal_reaching.rho_lo": 0.35,
     "wbc.goal_reaching.rho_hi": 0.85,
+    # Direction-dependent reach R_max(u) (M2). The path is filled in per robot
+    # by core.configure_robot_asset; build the file with
+    # scripts/build_reach_table.py. Set to "" to force the legacy sphere.
+    "wbc.goal_reaching.reach_table_path": "",
+    # Fallback reach when no table is loaded: rho degrades to r / reach_radius,
+    # i.e. a direction-independent sphere. Measured against the real go2_x5
+    # envelope this is off by up to 57% (0.26 m straight down vs 0.85 m up),
+    # and being constant it makes rho nearly blind to base pitch/height --
+    # the very channel §4.5 expects to steer rho with.
     "wbc.goal_reaching.reach_radius": 0.60,
     "wbc.goal_reaching.response_time_s": 0.50,
     "wbc.goal_reaching.base_nom_filter_hz": 1.50,
