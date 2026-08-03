@@ -10,7 +10,7 @@ import torch
 from isaacgym import gymapi, gymtorch, gymutil
 from isaacgym.torch_utils import quat_apply, quat_from_euler_xyz, quat_mul, quat_rotate, to_torch, torch_rand_float
 
-from go1_gym.envs.config import ConfigNode
+from go1_gym.envs.config import ARM_ACTION_MODES, ConfigNode
 from go1_gym.utils.global_switch import global_switch
 from go1_gym.utils.math_utils import (
     ee_twist_body_6d,
@@ -18,6 +18,7 @@ from go1_gym.utils.math_utils import (
     pose_world_to_body_9d,
     quat_conjugate,
     quat_error_axis_angle,
+    quat_from_axis_angle_vec,
     quat_to_angle,
     quat_xyzw_to_rot6d,
 )
@@ -731,6 +732,29 @@ class WBCEnv(LeggedRobot):
         self.arm_goal_pos_world = torch.zeros_like(self.arm_target_pos_body)
         self.arm_goal_quat_world = torch.zeros_like(self.arm_target_quat_body)
         self.arm_goal_quat_world[:, 3] = 1.0
+        # Arm action interface (cfg.arm.action_mode; see set_arm_action_mode in
+        # config/core.py). Cached once -- it is read every control step and
+        # cannot change mid-run.
+        self.arm_action_mode = str(getattr(self.cfg.arm, "action_mode", "ik_residual"))
+        if self.arm_action_mode not in ARM_ACTION_MODES:
+            raise ValueError(
+                f"cfg.arm.action_mode is {self.arm_action_mode!r}; expected one of {sorted(ARM_ACTION_MODES)}"
+            )
+        # The SE(3) pose the DLS-IK solver is actually driving to. In
+        # 'ik_residual' / 'end_to_end' this equals the task target; in
+        # 'ik_waypoint' it is the policy's commanded intermediate waypoint,
+        # which is what the viewer overlay and the waypoint_* metrics report.
+        self.arm_waypoint_pos_world = torch.zeros_like(self.arm_target_pos_body)
+        self.arm_waypoint_quat_world = torch.zeros_like(self.arm_target_quat_body)
+        self.arm_waypoint_quat_world[:, 3] = 1.0
+        # waypoint-minus-task-target, captured at decode time. Kept as its own
+        # buffer rather than recomputed on demand because the only other place
+        # that could ask is post-physics, by which point the trajectory
+        # reference has already advanced (and may have been re-anchored by a
+        # reset) -- differencing across that boundary measures the reference's
+        # motion, not the policy's detour.
+        self.arm_waypoint_offset_pos = torch.zeros_like(self.arm_target_pos_body)
+        self.arm_waypoint_offset_rot = torch.zeros_like(self.arm_target_pos_body)
         self.arm_target_resample_steps = torch.full(
             (self.num_envs,), 10**9, dtype=torch.long, device=self.device, requires_grad=False
         )
@@ -748,8 +772,10 @@ class WBCEnv(LeggedRobot):
         # arm.arm_num_commands comment in wbc.py (stage1 checkpoint is frozen
         # on dog_num_observations=82).
         self.commands_arm_obs = torch.zeros(self.num_envs, self.cfg.arm.arm_num_commands, dtype=torch.float, device=self.device, requires_grad=False)
-        # Raw (pre-IK-combine) policy action for the arm, kept only for the
-        # arm_control_limits saturation reward -- see _apply_stage2_arm_ik_action.
+        # Raw (pre-decode) policy action for the arm -- the actor's own output
+        # before _apply_stage2_arm_action turns it into a joint target, in
+        # whichever cfg.arm.action_mode is active. Kept for the
+        # arm_control_limits saturation reward.
         self.arm_residual_raw = torch.zeros(self.num_envs, self.num_actions_arm, dtype=torch.float, device=self.device, requires_grad=False)
         self.arm_policy_actions = torch.zeros(
             self.num_envs,
@@ -934,7 +960,7 @@ class WBCEnv(LeggedRobot):
 
     def _arm_pre_step_hook(self):
         self._apply_stage1_arm_curriculum_actions()
-        self._apply_stage2_arm_ik_action()
+        self._apply_stage2_arm_action()
 
     def _arm_decimation_hook(self):
         self.add_continue_force()
@@ -1588,7 +1614,14 @@ class WBCEnv(LeggedRobot):
             self.goal_rho_prev[:] = self.goal_rho
 
     def _arm_init_performance_metrics_hook(self):
-        for name in ("ee_position_sq_error", "ee_orientation_sq_error", "ee_tracking_samples"):
+        names = ["ee_position_sq_error", "ee_orientation_sq_error", "ee_tracking_samples"]
+        if self.arm_action_mode == "ik_waypoint":
+            # How far (norm) the policy is pulling the IK setpoint off the
+            # reference: ~0 means it has learnt to just follow the target,
+            # while sitting near the box's sqrt(3)*waypoint.pos_scale diagonal
+            # means the bound is what limits it and probably wants raising.
+            names += ["waypoint_pos_offset", "waypoint_rot_offset"]
+        for name in names:
             self.performance_metric_sums[name] = torch.zeros(
                 self.num_envs,
                 dtype=torch.float,
@@ -1604,6 +1637,9 @@ class WBCEnv(LeggedRobot):
         sums["ee_position_sq_error"] += torch.sum(torch.square(self.ee_pos_err), dim=-1)
         sums["ee_orientation_sq_error"] += torch.sum(torch.square(self.ee_rot_err_axis_angle), dim=-1)
         sums["ee_tracking_samples"] += 1.0
+        if self.arm_action_mode == "ik_waypoint":
+            sums["waypoint_pos_offset"] += torch.linalg.vector_norm(self.arm_waypoint_offset_pos, dim=-1)
+            sums["waypoint_rot_offset"] += torch.linalg.vector_norm(self.arm_waypoint_offset_rot, dim=-1)
 
     def _arm_log_performance_metrics_hook(self, train_env_ids, episode_steps):
         samples = self.performance_metric_sums["ee_tracking_samples"][train_env_ids]
@@ -1622,6 +1658,11 @@ class WBCEnv(LeggedRobot):
         extras = self.extras["train/episode"]
         extras["perf_ee_position_rmse_m"] = self._mean_valid_metric(position_rmse, valid)
         extras["perf_ee_orientation_rmse_rad"] = self._mean_valid_metric(orientation_rmse, valid)
+
+        if self.arm_action_mode == "ik_waypoint":
+            for name, unit in (("waypoint_pos_offset", "m"), ("waypoint_rot_offset", "rad")):
+                mean_offset = self.performance_metric_sums[name][train_env_ids] / torch.clamp(samples, min=1.0)
+                extras[f"perf_{name}_{unit}"] = self._mean_valid_metric(mean_offset, valid)
 
         if self._traj_tracking_enabled():
             st = self.traj_curriculum.stats()
@@ -1691,10 +1732,29 @@ class WBCEnv(LeggedRobot):
         )
         self._draw_viewer_polyline(ee_to_target, (1.0, 0.1, 0.1), env_id)
 
+    def _draw_arm_waypoint(self, env_id=0):
+        """'ik_waypoint' mode only: the intermediate EE target the policy is
+        commanding (magenta), with the detour it represents drawn from the
+        task target (cyan, _draw_policy_trajectory) to it."""
+        if self.headless or self.viewer is None or self.arm_action_mode != "ik_waypoint":
+            return
+        wp = self.arm_waypoint_pos_world[env_id]
+        self.draw_sphere_and_axes(
+            (wp[0].item(), wp[1].item(), wp[2].item()),
+            self.arm_waypoint_quat_world[env_id],
+            0.025,
+            (1.0, 0.0, 1.0),
+            scale=0.08,
+        )
+        target = self._arm_target_pos_world(torch.tensor([env_id], device=self.device))[0]
+        segment = torch.stack((target, wp), dim=0).detach().cpu().numpy().astype(np.float32)
+        self._draw_viewer_polyline(segment, (1.0, 0.0, 1.0), env_id)
+
     def _arm_draw_overlay_hook(self):
         self._draw_ee_ori_coord()
         self._draw_command_ori_coord()
         self._draw_policy_trajectory()
+        self._draw_arm_waypoint()
         self._draw_trajectory_viewer()
 
     def _trajectory_path_points(self, env_id, max_points=80):
@@ -1968,10 +2028,12 @@ class WBCEnv(LeggedRobot):
             self.dof_vel[:, arm_slice] * self.dt
         )
 
-    def _solve_arm_dls_ik_step(self):
+    def _solve_arm_dls_ik_step(self, pos_err=None, rot_err=None):
         """One damped-least-squares differential correction toward the
-        current target, using this step's Jacobian and task-space error
-        (already refreshed in _arm_post_physics_hook). Not a converged
+        requested task-space error -- by default the current target's
+        (already refreshed in _arm_post_physics_hook), or an explicit
+        (pos_err, rot_err) pair, which is how 'ik_waypoint' mode aims the
+        same solver at the policy's waypoint instead. Not a converged
         Newton solve -- FK only updates via an actual physics step, so this
         is a per-control-step proportional correction that converges over
         several steps in simulated time, same as a real robot's IK loop
@@ -1995,7 +2057,11 @@ class WBCEnv(LeggedRobot):
         J_w = J[:, 3:6, :]  # (N, 3, num_actions_arm)
         J = J.clone()
         J[:, 0:3, :] = J[:, 0:3, :] + torch.cross(J_w, d_world.unsqueeze(-1).expand_as(J_w), dim=1)
-        err = torch.cat((self.ee_pos_err, self.ee_rot_err_axis_angle), dim=-1).unsqueeze(-1)  # (N, 6, 1)
+        if pos_err is None:
+            pos_err = self.ee_pos_err
+        if rot_err is None:
+            rot_err = self.ee_rot_err_axis_angle
+        err = torch.cat((pos_err, rot_err), dim=-1).unsqueeze(-1)  # (N, 6, 1)
         # Task-space weighting: trade off position vs orientation tracking by
         # scaling both the Jacobian rows and the error by sqrt(weight). This
         # solves the weighted damped least squares min ||W^.5 (J dq - err)||^2
@@ -2017,21 +2083,131 @@ class WBCEnv(LeggedRobot):
         max_step = self.cfg.arm.ik.max_step_rad
         return delta_q * torch.clamp(max_step / torch.clamp(norm, min=1e-8), max=1.0)
 
-    def _apply_stage2_arm_ik_action(self):
-        """Combine q_ik (DLS-IK toward arm_target_pos/quat_body) with the
-        policy's Δq residual (tanh-limited) into self.actions[:, arm_slice],
+    @property
+    def arm_dof_slice(self):
+        """Columns of dof_pos / default_dof_pos / self.actions owned by the arm."""
+        return slice(self.num_actions_loco, self.num_actions_loco + self.num_actions_arm)
+
+    def _apply_stage2_arm_action(self):
+        """Decode the actor's 6 arm action dims into self.actions[:, arm_slice],
         in the (target - default)/action_scale form _compute_torques already
-        expects -- same trick _apply_stage1_arm_curriculum_actions uses."""
+        expects -- same trick _apply_stage1_arm_curriculum_actions uses.
+
+        Which decoding runs is cfg.arm.action_mode (see set_arm_action_mode in
+        config/core.py). All three modes read the SAME 6-wide action head, so
+        the obs/action layout, the actor network shape and every checkpoint are
+        identical across modes; only the meaning of those 6 numbers changes.
+        """
         if not global_switch.switch_open:
             return
-        _, arm_slice = self._arm_jacobian()
-        delta_q_ik = self._solve_arm_dls_ik_step()
+        arm_slice = self.arm_dof_slice
+        # Pre-decode action, kept for the arm_control_limits saturation reward
+        # and the arm_actions obs channel in every mode.
         self.arm_residual_raw[:] = self.actions[:, arm_slice]
         self.arm_policy_actions[:, : self.num_actions_arm] = self.arm_residual_raw
-        delta_q_residual = torch.tanh(self.arm_residual_raw) * self.cfg.arm.ik.residual_scale
-        q_target = self.dof_pos[:, arm_slice] + delta_q_ik + delta_q_residual
+
+        if self.arm_action_mode == "end_to_end":
+            self._apply_arm_action_end_to_end(arm_slice)
+        elif self.arm_action_mode == "ik_waypoint":
+            self._apply_arm_action_ik_waypoint(arm_slice)
+        else:
+            self._apply_arm_action_ik_residual(arm_slice)
+
+    def _write_arm_joint_target(self, arm_slice, q_target):
+        """Convert absolute arm joint targets (rad) into the action encoding
+        _compute_torques consumes."""
         arm_default = self.default_dof_pos[:, arm_slice]
         self.actions[:, arm_slice] = (q_target - arm_default) / self.cfg.control.action_scale
+
+    def _apply_arm_action_ik_residual(self, arm_slice):
+        """'ik_residual' (default): DLS-IK drives the EE to the task target and
+        the policy only adds a small tanh-limited per-joint Δq on top."""
+        self._set_arm_waypoint_to_target()
+        delta_q_ik = self._solve_arm_dls_ik_step()
+        delta_q_residual = torch.tanh(self.arm_residual_raw) * self.cfg.arm.ik.residual_scale
+        self._write_arm_joint_target(arm_slice, self.dof_pos[:, arm_slice] + delta_q_ik + delta_q_residual)
+
+    def _set_arm_waypoint_to_target(self):
+        """The non-waypoint modes drive to (or are scored against) the task
+        target itself; record that as the waypoint so the overlay and the
+        waypoint_* metrics mean the same thing in every mode."""
+        self.arm_waypoint_pos_world[:] = self._arm_target_pos_world()
+        self.arm_waypoint_quat_world[:] = self._arm_target_quat_world()
+        self.arm_waypoint_offset_pos.zero_()
+        self.arm_waypoint_offset_rot.zero_()
+
+    def _compute_arm_waypoint(self):
+        """'ik_waypoint' mode: read the 6 action dims as an intermediate EE
+        waypoint -- Δpos(3) and an axis-angle Δrot(3), both in the BASE frame
+        (the frame the arm's own task error and obs live in, so the mapping
+        from action to EE motion does not rotate under the robot) -- offset
+        from arm.waypoint.anchor, and write it to arm_waypoint_pos/quat_world.
+
+        tanh-bounded per axis, so the commandable waypoint set is the
+        BASE-FRAME-aligned box of half-width pos_scale / rot_scale about the
+        anchor -- per-channel limits, same convention as
+        goal_reaching.delta_vel_limit. Note the frame: rotating that box into
+        the world mixes the axes, so the offset's NORM (which is what the
+        waypoint_* metrics report, being frame-invariant) is bounded by
+        sqrt(3)*pos_scale, not pos_scale. With anchor='target'
+        a zero action therefore reproduces the pure-IK baseline exactly, which
+        keeps the trajectory-mode termination thresholds (calibrated against
+        that baseline, see wbc.py) meaningful in this mode too.
+        """
+        wcfg = self.cfg.arm.waypoint
+        action = torch.tanh(self.arm_residual_raw)
+        delta_pos_world = quat_apply(self.base_quat, action[:, :3] * float(wcfg.pos_scale))
+        delta_rot_world = quat_apply(self.base_quat, action[:, 3:6] * float(wcfg.rot_scale))
+        delta_quat_world = quat_from_axis_angle_vec(delta_rot_world)
+
+        if str(getattr(wcfg, "anchor", "target")) == "ee":
+            anchor_pos = self.end_effector_state[:, :3]
+            anchor_quat = self.end_effector_state[:, 3:7]
+        else:
+            anchor_pos = self._arm_target_pos_world()
+            anchor_quat = self._arm_target_quat_world()
+
+        self.arm_waypoint_pos_world[:] = anchor_pos + delta_pos_world
+        # world-frame rotation offset => pre-multiply the anchor orientation
+        self.arm_waypoint_quat_world[:] = quat_mul(delta_quat_world, anchor_quat)
+        # detour vs the task target, sampled now (see arm_waypoint_offset_pos)
+        self.arm_waypoint_offset_pos[:] = self.arm_waypoint_pos_world - self._arm_target_pos_world()
+        self.arm_waypoint_offset_rot[:] = quat_error_axis_angle(
+            self.arm_waypoint_quat_world, self._arm_target_quat_world()
+        )
+
+    def _apply_arm_action_ik_waypoint(self, arm_slice):
+        """'ik_waypoint': the policy commands the EE waypoint, IK solves it.
+
+        The solver is aimed at the waypoint's task-space error rather than the
+        task target's, so ee_pos_err / ee_rot_err_axis_angle stay what they
+        always were -- the error against the REFERENCE, which the tracking
+        rewards, obs and metrics all read. The policy therefore gets no reward
+        for reaching its own waypoint, only for where that waypoint takes the
+        EE relative to the reference.
+        """
+        self._compute_arm_waypoint()
+        pos_err = self.arm_waypoint_pos_world - self.end_effector_state[:, :3]
+        rot_err = quat_error_axis_angle(self.arm_waypoint_quat_world, self.end_effector_state[:, 3:7])
+        delta_q_ik = self._solve_arm_dls_ik_step(pos_err, rot_err)
+        self._write_arm_joint_target(arm_slice, self.dof_pos[:, arm_slice] + delta_q_ik)
+
+    def _apply_arm_action_end_to_end(self, arm_slice):
+        """'end_to_end': no IK anywhere in the loop -- the action IS the arm
+        joint position target, q_target = default + a * end_to_end.action_scale,
+        exactly the interface the legs use.
+
+        Implemented as a rescale of self.actions rather than by leaving it
+        untouched, so arm.end_to_end.action_scale can give the arm a different
+        joint authority than the shared control.action_scale the legs are tuned
+        for; at the default (equal scales) it is an identity.
+        """
+        scale_ratio = float(self.cfg.arm.end_to_end.action_scale) / float(self.cfg.control.action_scale)
+        if scale_ratio != 1.0:
+            self.actions[:, arm_slice] = self.arm_residual_raw * scale_ratio
+        # No IK is solved, so there is no distinct "pose being driven to";
+        # report the task target for viewer/metric parity with the IK modes.
+        self._set_arm_waypoint_to_target()
 
     def reset(self):
         self.reset_idx(torch.arange(self.num_envs, device=self.device))

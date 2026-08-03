@@ -26,9 +26,11 @@ class Rewards:
         return torch.exp(-rot_err_sq / self.env.cfg.rewards.ee_rot_tracking_sigma)
 
     def _reward_arm_control_limits(self):
-        # self.env.actions[:, arm_slice] gets overwritten by the IK combine
-        # step (see _apply_stage2_arm_ik_action), so the raw pre-combine
-        # policy output is kept separately for this saturation check.
+        # self.env.actions[:, arm_slice] gets overwritten by the action-mode
+        # decode step (see _apply_stage2_arm_action), so the raw pre-decode
+        # policy output is kept separately for this saturation check. It means
+        # the same thing in every arm.action_mode: keep |a| <= 1, i.e. inside
+        # the residual / waypoint / joint-target range the mode was scaled for.
         return torch.sum(torch.square((torch.abs(self.env.arm_residual_raw) - 1.0).clip(min=0.0)), dim=1)
 
     def _reward_arm_energy(self):

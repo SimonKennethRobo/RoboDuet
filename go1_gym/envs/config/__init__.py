@@ -1,6 +1,7 @@
 """Public configuration API."""
 
 from .core import (
+    ARM_ACTION_MODES,
     ConfigNode,
     ConfigProfile,
     RoboDuetRuntimeOptions,
@@ -17,11 +18,14 @@ from .core import (
     dog_obs_dim_parts,
     env_obs_dim_parts,
     recompute_observation_dims,
+    set_arm_action_mode,
     set_cfg_value,
     sum_dim_parts,
+    validate_arm_action_mode,
 )
 
 __all__ = [
+    "ARM_ACTION_MODES",
     "ConfigNode",
     "ConfigProfile",
     "RoboDuetRuntimeOptions",
@@ -38,6 +42,8 @@ __all__ = [
     "dog_obs_dim_parts",
     "env_obs_dim_parts",
     "recompute_observation_dims",
+    "set_arm_action_mode",
     "set_cfg_value",
     "sum_dim_parts",
+    "validate_arm_action_mode",
 ]

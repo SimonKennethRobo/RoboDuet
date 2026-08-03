@@ -10,7 +10,7 @@ from datetime import datetime
 
 import wandb
 from go1_gym import MINI_GYM_ROOT_DIR
-from go1_gym.envs.config import build_roboduet_config, cfg_to_dict
+from go1_gym.envs.config import ARM_ACTION_MODES, build_roboduet_config, cfg_to_dict
 from go1_gym.envs.roboduet.utils import StageSchedule, apply_wbc_reward_settings
 from go1_gym.envs.roboduet.wbc_env import WBCEnv
 from go1_gym.envs.roboduet.wbc_env_wrapper import HistoryWrapper
@@ -312,6 +312,20 @@ if __name__ == "__main__":
         default=False,
         help="Train the whole-body upper policy to track a moving SE(3) trajectory "
         "(implies --goal_reaching; sets wbc.goal_reaching.target_mode='trajectory').",
+    )
+
+    parser.add_argument(
+        "--arm_action_mode",
+        type=str,
+        default=None,
+        choices=list(ARM_ACTION_MODES),
+        help="What the upper policy's 6 arm action dims mean. 'ik_residual': "
+        "DLS-IK tracks the target and the policy adds a per-joint delta_q. "
+        "'ik_waypoint': the policy outputs an intermediate EE waypoint "
+        "(dpos+drot in the base frame) and IK solves for that. 'end_to_end': "
+        "no IK -- the policy outputs arm joint position targets directly. "
+        "All three share the same action/obs layout. Omit to use the "
+        "arm.action_mode value set in config/wbc.py.",
     )
 
     parser.add_argument(

@@ -11,6 +11,12 @@ from typing import Any, Mapping
 
 from .legged_robot import LeggedRobotDefaults
 
+# Arm action interface selector (cfg.arm.action_mode). Defined here rather
+# than in wbc.py because both the CLI plumbing and validate_roboduet_cfg need
+# it and wbc.py is only imported lazily from inside this module's builders.
+# See the arm.action_mode block in wbc.py for what each mode means.
+ARM_ACTION_MODES = ("ik_residual", "ik_waypoint", "end_to_end")
+
 
 class ConfigNode:
     """Mutable attribute tree used by the simulator and learners."""
@@ -170,6 +176,11 @@ class RoboDuetRuntimeOptions:
     stage1_arm_curriculum: bool = True
     goal_reaching: bool = False
     traj_tracking: bool = False
+    # How the actor's 6 arm action dims are decoded into joint targets:
+    # 'ik_residual' | 'ik_waypoint' | 'end_to_end'. None (the default) keeps
+    # whatever STAGE2_OVERRIDES in wbc.py sets, so editing that table works;
+    # a value here overrides it. See ARM_ACTION_MODES.
+    arm_action_mode: str = None
     # False forces rho / v_ff back onto the legacy reach_radius sphere instead
     # of the M2 direction-dependent table -- the ablation the design doc's
     # A.3 calls for (2D table vs sphere approximation).
@@ -186,6 +197,7 @@ class RoboDuetRuntimeOptions:
             stage1_arm_curriculum=not getattr(args, "no_stage1_arm_curriculum", False),
             goal_reaching=getattr(args, "goal_reaching", False),
             traj_tracking=getattr(args, "traj_tracking", False),
+            arm_action_mode=getattr(args, "arm_action_mode", None),
             reach_table=not getattr(args, "no_reach_table", False),
         )
 
@@ -549,6 +561,42 @@ def enable_traj_tracking(cfg, layout):
         setattr(cfg.wbc.reward_scales, name, scale)
 
 
+def validate_arm_action_mode(cfg):
+    """Check cfg.arm.action_mode, wherever it came from -- the wbc.py override
+    table, a --arm_action_mode flag, or a restored checkpoint snapshot."""
+    mode = getattr(cfg.arm, "action_mode", None)
+    if mode not in ARM_ACTION_MODES:
+        raise ValueError(
+            "arm.action_mode is {!r}; expected one of {}".format(mode, sorted(ARM_ACTION_MODES))
+        )
+    if mode == "ik_waypoint" and cfg.arm.num_actions_arm != 6:
+        # The 6 dims are read as dpos(3) + axis-angle drot(3), not per-joint.
+        raise ValueError(
+            "arm.action_mode='ik_waypoint' needs exactly 6 arm action dims "
+            "(an SE(3) waypoint offset); arm.num_actions_arm is {}".format(cfg.arm.num_actions_arm)
+        )
+
+
+def set_arm_action_mode(cfg, mode):
+    """Override how the actor's 6 arm action dims become joint position targets.
+
+    ``mode=None`` is "leave it alone" -- the value already in cfg (from
+    STAGE2_OVERRIDES in wbc.py, or a restored snapshot) stands. That is what
+    makes the override table the default source of truth and --arm_action_mode
+    a genuine override, rather than the CLI's own default silently winning
+    every build.
+
+    Every mode keeps the same 6-wide arm action head, so this changes no
+    observation/action dimension and no checkpoint shape -- only WBCEnv's
+    decoding (``_apply_stage2_arm_action``). It is therefore safe to flip on a
+    resume, though the resulting policy is of course not transferable across
+    modes.
+    """
+    if mode is not None:
+        cfg.arm.action_mode = mode
+    validate_arm_action_mode(cfg)
+
+
 def configure_robot_asset(cfg, robot):
     from .wbc import ROBOT_ASSET_FILES, ROBOT_ARM_SPEC
 
@@ -582,6 +630,10 @@ def validate_roboduet_cfg(cfg):
     missing = [name for name, value in required_fields if value is None]
     if missing:
         raise ValueError("RoboDuet config has unset required fields: {}".format(", ".join(missing)))
+    # A checkpoint snapshot restore (apply_config_snapshot) writes arm.action_mode
+    # straight from the pickle, bypassing set_arm_action_mode -- so re-check here,
+    # which every build and every load_env path runs through.
+    validate_arm_action_mode(cfg)
 
 
 def build_roboduet_config(args=None, *, options=None, debug=False):
@@ -612,6 +664,7 @@ def build_roboduet_config(args=None, *, options=None, debug=False):
         enable_goal_reaching(cfg, layout)
     if options.traj_tracking:
         enable_traj_tracking(cfg, layout)
+    set_arm_action_mode(cfg, options.arm_action_mode)
     if not options.reach_table:
         cfg.wbc.goal_reaching.reach_table_path = ""
 

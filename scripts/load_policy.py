@@ -319,6 +319,11 @@ def load_env(logdir, wrapper, headless=False, device='cuda:0', robot=None):
     else:
         cfg.arm.checkpoint_observation_layout = "current"
 
+    # Every arm.action_mode has the same obs/action widths, so a checkpoint's
+    # shapes carry no hint of which one it was trained with -- announce it, or
+    # a waypoint policy silently gets replayed as a joint-residual one.
+    print(f"[RoboDuet] arm action mode: {cfg.arm.action_mode}")
+
     cfg.terrain.mesh_type = "plane"
     if cfg.terrain.mesh_type == "plane":
       cfg.terrain.teleport_robots = False

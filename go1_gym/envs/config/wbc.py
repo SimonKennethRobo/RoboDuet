@@ -17,8 +17,8 @@ stage/mode you'd touch them to tune**, not just by subsystem:
 - ``STAGE1_OVERRIDES``: only read while pretraining the dog with the arm as
   a disturbance source (``env.stage1_arm_*`` curriculum, ``domain_rand.stage1_arm.*``).
 - ``STAGE2_OVERRIDES``: shared substrate both stage-2 submodes below sit on
-  top of (DLS-IK controller, EE tracking reward/sigma, WBC termination,
-  ``domain_rand.stage2_arm.*``).
+  top of (the ``arm.action_mode`` action interface, DLS-IK controller, EE
+  tracking reward/sigma, WBC termination, ``domain_rand.stage2_arm.*``).
 - ``STAGE2_IK_OVERRIDES``: the default stage-2 submode (no ``--goal_reaching``)
   -- absolute-box SE(3) EE target sampling.
 - ``GOAL_REACHING_OVERRIDES`` / ``GOAL_REACHING_REWARD_SCALES``: the
@@ -283,8 +283,36 @@ STAGE1_OVERRIDES = {
 # further down).
 # ============================================================
 STAGE2_OVERRIDES = {
-    # arm DLS-IK controller (consumes the actor's first 6 action dims in
-    # both stage-2 submodes)
+    # ---- arm action interface: what the actor's first 6 action dims MEAN ----
+    # All three modes keep the same 6-wide arm action head (and therefore the
+    # same obs/action layout and checkpoint shapes); only the decoding from
+    # action to joint position target differs.
+    #   'ik_residual'  -- (default, legacy) DLS-IK drives the EE to the task
+    #                     target and the action is a per-joint delta_q residual
+    #                     scaled by arm.ik.residual_scale.
+    #   'ik_waypoint'  -- the action IS an intermediate EE waypoint (dpos(3),
+    #                     axis-angle drot(3), base frame) offset from
+    #                     arm.waypoint.anchor; DLS-IK solves for THAT pose
+    #                     instead of the task target. No joint residual.
+    #   'end_to_end'   -- no IK at all: the action is the arm joint position
+    #                     target in the usual (target - default)/scale form.
+    "arm.action_mode": "ik_waypoint",
+    # 'ik_waypoint' only. anchor='target' makes the action a bounded detour
+    # around the task/trajectory reference (zero action == the pure-IK
+    # baseline, which is what the termination thresholds are calibrated
+    # against); anchor='ee' makes it a bounded EE displacement command from
+    # where the EE is now, i.e. the policy fully owns the EE path and IK is
+    # only the velocity resolver.
+    "arm.waypoint.anchor": "target",
+    # PER-AXIS half-widths of the tanh-bounded offset box (m / rad), in the
+    # BASE frame -- not a radius. The offset's norm reaches sqrt(3)x these.
+    "arm.waypoint.pos_scale": 0.15,
+    "arm.waypoint.rot_scale": 0.50,
+    # 'end_to_end' only: joint-target scale for the arm slice, replacing the
+    # shared control.action_scale (0.25) that the legs use.
+    "arm.end_to_end.action_scale": 0.25,
+    # arm DLS-IK controller (drives the arm in both 'ik_*' action modes and in
+    # both stage-2 submodes; unused under 'end_to_end')
     "arm.ik.damping": 0.1,
     "arm.ik.step_gain": 1.0,
     "arm.ik.max_step_rad": 0.5,

@@ -89,6 +89,23 @@ def quat_error_axis_angle(quat_target, quat_current):
     return q_err[:, :3] * torch.sign(q_err[:, 3:4])
 
 
+def quat_from_axis_angle_vec(vec, eps=1e-8):
+    """xyzw quaternion of the rotation whose axis-angle vector is ``vec``
+    (N, 3) -- axis = vec/||vec||, angle = ||vec||.
+
+    Written out rather than composed from isaacgym's quat_from_angle_axis so
+    the zero-rotation case is exact: dividing by ``angle.clamp_min(eps)``
+    leaves a ~0 axis, and sin(0)=0 then makes the vector part exactly 0 with
+    w=1, instead of normalize() producing a NaN/arbitrary axis there. The
+    'ik_waypoint' arm action mode evaluates this every step with an action
+    that is legitimately zero at init, so that case is the common one.
+    """
+    angle = torch.linalg.vector_norm(vec, dim=-1, keepdim=True)
+    axis = vec / angle.clamp_min(eps)
+    half = 0.5 * angle
+    return torch.cat((axis * torch.sin(half), torch.cos(half)), dim=-1)
+
+
 def ee_twist_body_6d(end_effector_state, root_states, base_quat, num_envs):
     ee_lin_vel_world = end_effector_state[:, 7:10]
     ee_ang_vel_world = end_effector_state[:, 10:13]

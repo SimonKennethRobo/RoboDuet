@@ -231,11 +231,51 @@ wbc.goal_reaching.command_channels.roll
 
 ---
 
-## 9. stage-2 DLS-IK 控制器
+## 9. stage-2 臂动作接口与 DLS-IK 控制器
+
+### 9.0 臂动作接口 `arm.action_mode`
+
+同一套 6 维臂动作头（`arm.num_actions_arm=6`），**三种解释方式**，由 `arm.action_mode` 切换
+（CLI：`--arm_action_mode`）。三种模式的观测/动作维度、actor 网络形状、checkpoint 形状**完全相同**，
+只有 `WBCEnv._apply_stage2_arm_action` 里从 action 到关节位置目标的解码不同，因此可以在同一份
+config / 同一套 obs 上直接做消融对比。
+
+| 模式                | action 语义                                                                                  | IK 是否参与                | 相关参数                                          |
+| ------------------- | -------------------------------------------------------------------------------------------- | -------------------------- | ------------------------------------------------- |
+| `ik_residual`（默认，历史行为） | 每关节 `Δq` 残差，`tanh(a)*residual_scale`                                     | 是，IK 直接追任务目标      | `arm.ik.residual_scale`                           |
+| `ik_waypoint`       | **中间 EE 目标**：`Δpos(3)` + 轴角 `Δrot(3)`，**base 系**，从 anchor 偏移               | 是，但 IK 追的是这个 waypoint | `arm.waypoint.*`                                  |
+| `end_to_end`        | 臂关节位置目标本身，`q_target = default + a * scale`（与腿同一套编码）                     | **否**，回路里没有 IK      | `arm.end_to_end.action_scale`                     |
+
+| 参数                          | 含义                                                     | 当前值        | 备注                                                                                                       |
+| ----------------------------- | -------------------------------------------------------- | ------------- | ---------------------------------------------------------------------------------------------------------- |
+| `arm.action_mode`           | 动作接口选择                                             | `ik_residual` | `ik_residual` / `ik_waypoint` / `end_to_end`；非法值在 config 构建期报错                                 |
+| `arm.waypoint.anchor`       | waypoint 的锚点                                          | `target`    | `target`=以任务/轨迹参考点为中心的绕行量（**零动作 == 纯 IK baseline**）；`ee`=以当前 EE 为中心的位移指令 |
+| `arm.waypoint.pos_scale`    | 位置偏移在 **base 系每轴**的半宽（m）              | `0.15`      | 是 box 不是球；且 box 定义在 base 系，转到世界系会混轴，**范数**上界是 `√3×scale`（≈0.26）。日志 `perf_waypoint_pos_offset_m` 记的就是范数，贴近该值说明限幅是瓶颈、可放大 |
+| `arm.waypoint.rot_scale`    | 姿态偏移在 **base 系每轴**的半宽（rad）            | `0.50`      | 同上，作用在轴角向量上                                                                                     |
+| `arm.end_to_end.action_scale` | end-to-end 下臂关节目标幅度（rad）                     | `0.25`      | 替代腿共用的 `control.action_scale`；相等时为恒等变换                                                    |
+
+**选型提示**
+
+- `ik_waypoint` + `anchor=target`：零动作精确退化为纯 DLS-IK baseline（已验证，差异为 1e-6 rad 量级的
+  float32 舍入），所以 §10 里按该 baseline 标定的 `terminate_*` 阈值在这个模式下仍然成立。策略学的是
+  「相对参考轨迹绕多远」，奖励仍只看 EE 相对**参考**的误差（`ee_pos_err` 不受 waypoint 影响），
+  策略不会因为「到达自己设的 waypoint」拿到奖励。
+- `anchor=ee`：waypoint 相对当前 EE，IK 退化为纯速度解算器，策略完全掌管 EE 路径；自由度最大但没有
+  baseline 兜底，训练早期更容易漂。
+- `end_to_end`：回路里没有 IK，也就没有 `max_step_rad` 那样的天然步长限幅，随机动作下臂关节速度可
+  达 IK 模式的 ~2 倍（实测 12 vs 5–6 rad/s）。若发现动作太抖，先降 `arm.end_to_end.action_scale`，
+  再考虑加大 `wbc.reward_scales.arm_action_rate` / `arm_action_smoothness_*`。
+- 部署侧：`end_to_end` 的策略输出可直接下发关节目标；两种 IK 模式都要求真机侧复现同一个 DLS-IK 环
+  （同 Jacobian 列、同 `ee_local_pos` 点转移、同权重与限幅）。
+
+`wbc.reward_scales.arm_control_limits` 在三种模式下含义一致：惩罚 `|a|>1`，即让策略待在该模式
+标定的残差 / waypoint / 关节目标量程内。
+
+### 9.1 DLS-IK 控制器
 
 每个控制步做**一次**阻尼最小二乘（DLS）一阶修正（不是收敛求解器；FK 只在真实 `simulate()` 后更新，
 靠多步在仿真时间里收敛，等价于真实机器人的伺服环）。消费位置：`_solve_arm_dls_ik_step` /
-`_apply_stage2_arm_ik_action`。
+`_apply_arm_action_ik_residual` / `_apply_arm_action_ik_waypoint`（`end_to_end` 不调用）。
 
 ```
 err  = [pos_err(3); axis_angle_rot_err(3)]
@@ -244,8 +284,12 @@ J   ← W^.5 · J,   err ← W^.5 · err               # 同时缩放 J 行与 e
 dq  = Jᵀ (J Jᵀ + λ²I)⁻¹ · err                    # 加权阻尼最小二乘
 dq *= step_gain
 dq  = clamp_by_norm(dq, max_step_rad)             # 按范数裁剪，保方向
-q_target = dof_pos + dq + tanh(policy_raw) * residual_scale
+q_target = dof_pos + dq + tanh(policy_raw) * residual_scale   # ik_residual
+q_target = dof_pos + dq                                       # ik_waypoint（残差项不用）
 ```
+
+`err` 的来源随模式而变：`ik_residual` 用任务目标的误差（`ee_pos_err` / `ee_rot_err_axis_angle`），
+`ik_waypoint` 用策略 waypoint 的误差；其余数学完全相同。
 
 其中 Jacobian 取 IsaacGym 世界系 Jacobian 在 `ee_body_name` 行、机械臂 6 列，并把线速度行
 从连杆原点**点转移**到抓取点（`ee_local_pos` 偏移），使线性 Jacobian 与实际跟踪的抓取点一致。
@@ -260,8 +304,9 @@ q_target = dof_pos + dq + tanh(policy_raw) * residual_scale
 | `arm.ik.rot_weight`     | 姿态误差任务权重                                 | `3.0`                  | 同上，越大越优先姿态。两者只看**相对比例**（等值 = 未加权，与原行为完全一致）。当前 `3.0` = 姿态优先于位置                    |
 | `arm.ik.ee_local_pos`   | 抓取点在`ee_body_name` 系下的固定偏移（m）     | `[0.1424,0,0.0001057]` | URDF`gripper_center`（fixed joint 被 collapse），EE 状态每步按此平移。与 `ROBOT_ARM_SPEC` 保持一致，由 core 按机器人覆盖 |
 
-**架构说明**：DLS-IK 始终只消费 actor 前 6 维作为 `Δq` 残差；`--goal_reaching` 额外提供 7 个
-plan-action 通道，由 `WBCEnv.plan()` 转成四足速度/posture 命令，不进入 DLS。
+**架构说明**：actor 前 6 维按 §9.0 的 `arm.action_mode` 解码（默认作为 `Δq` 残差进 DLS）；
+`--goal_reaching` 额外提供 6 个 plan-action 通道，由 `WBCEnv.plan()` 转成四足速度/posture 命令，
+三种模式下都不进入 DLS。
 
 **已知精度**（`scripts/debug_ik_reach.py`，纯 IK、策略残差置零）
 

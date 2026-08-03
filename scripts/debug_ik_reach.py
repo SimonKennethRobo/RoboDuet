@@ -1,5 +1,9 @@
 """Standalone goal-reaching test bed for the stage-2 DLS-IK controller
-(WBCEnv._solve_arm_dls_ik_step / _apply_stage2_arm_ik_action).
+(WBCEnv._solve_arm_dls_ik_step / _apply_arm_action_ik_residual).
+
+Always runs the default arm.action_mode='ik_residual' -- it exists to tune the
+IK itself, so the modes that bypass it ('end_to_end') or aim it somewhere else
+('ik_waypoint') are deliberately out of scope here.
 
 Spawns a handful of envs, opens the stage-2 switch, and for each episode
 samples a fresh random SE(3) target the same way training does
