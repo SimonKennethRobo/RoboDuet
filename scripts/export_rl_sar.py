@@ -17,8 +17,10 @@ Deliberately does not import IsaacGym: ``go1_gym.envs.config`` is pure Python an
 
 Usage::
 
-    python scripts/export_rl_sar.py --logdir runs/<date>/<run> \
-        --rl_sar_root ../rl_sar --robot go2_x5
+    python scripts/export_rl_sar.py --logdir runs/<date>/<run>
+
+writes into ``<logdir>/rl_sar/``; pass ``--rl_sar_root`` to target an rl_sar
+checkout directly instead.
 """
 
 import argparse
@@ -39,6 +41,24 @@ from go1_gym.envs.config import (  # noqa: E402
     build_roboduet_config,
     recompute_observation_dims,
 )
+
+
+# Bundles are written inside the run they came from, under <logdir>/RL_SAR_DIR.
+# Keeping them with the checkpoint means a run directory stays self-contained:
+# the exported artifact can never outlive, or drift from, the weights it was
+# built from, and nothing is ever written outside runs/ unless the caller names
+# an explicit --rl_sar_root.
+RL_SAR_DIR = "rl_sar"
+
+
+def default_rl_sar_root(logdir):
+    """Where to write the bundle for `logdir`: inside the run itself.
+
+    The directory keeps rl_sar's own policy/<robot>/<config>/ layout, so it can
+    be consumed in place (point rl_sar at this path) or copied wholesale into a
+    checkout -- see docs/RL_SAR_DEPLOY.md §2.8.
+    """
+    return str(Path(logdir) / RL_SAR_DIR)
 
 
 def _load_dog_ac_module():
@@ -447,20 +467,53 @@ def write_config_yaml(path, robot, config_name, cfg, ctx):
 
 
 # ---------------------------------------------------------------------------
-def main():
-    parser = argparse.ArgumentParser(description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--logdir", type=str, required=True, help="RoboDuet run directory")
-    parser.add_argument("--ckptid", type=str, default="last")
-    parser.add_argument("--rl_sar_root", type=str, required=True,
-                        help="rl_sar checkout root (the dir containing policy/)")
-    parser.add_argument("--robot", type=str, default="go2_x5", choices=sorted(ARM_JOINTS))
-    parser.add_argument("--config_name", type=str, default="roboduet_stage1")
-    args = parser.parse_args()
+def robot_from_logdir(logdir, fallback="go2_x5"):
+    """Infer the robot key from the checkpoint's own recorded asset path.
 
-    cfg, _ = load_runtime_cfg(args.logdir, robot=args.robot)
+    The caller usually knows which robot it is playing, but not always in the
+    key this script uses (play_by_key_stage1's --robot has its own, shorter
+    choice list, and its default is not necessarily what the run was trained
+    with). Getting it wrong would export the wrong arm joint names and torque
+    limits, so read it from the snapshot instead of trusting a flag.
+    """
+    from go1_gym.envs.config.wbc import ROBOT_ASSET_FILES
 
-    training_joints, hardware_joints, arm_joints = joint_order_lists(cfg, args.robot)
+    try:
+        with open(Path(logdir) / "parameters.pkl", "rb") as handle:
+            asset_file = pkl.load(handle)["Cfg"]["asset"]["file"]
+    except (OSError, KeyError, pkl.UnpicklingError):
+        return fallback
+    for robot, template in ROBOT_ASSET_FILES.items():
+        if Path(template).name == Path(str(asset_file)).name and robot in ARM_JOINTS:
+            return robot
+    # mount-randomization buckets rewrite the URDF filename, so also match on
+    # the directory the asset lives in
+    parent = Path(str(asset_file)).parent.name
+    for robot, template in ROBOT_ASSET_FILES.items():
+        if Path(template).parent.name == parent and robot in ARM_JOINTS:
+            return robot
+    return fallback
+
+
+def export(logdir, rl_sar_root=None, ckpt_id="last", robot=None,
+           config_name="roboduet_stage1", quiet=False):
+    """Write the rl_sar bundle for one run. Returns the output directory.
+
+    ``rl_sar_root`` defaults to ``<logdir>/rl_sar`` -- the bundle lives with the
+    run that produced it. Pass an explicit path only to write somewhere else,
+    e.g. straight into an rl_sar checkout.
+
+    Importable so callers other than this script's CLI can export -- notably
+    scripts/play_by_key_stage1.py, which exports the same policy it is about
+    to play so the deployed bundle can never silently lag what was inspected.
+    """
+    rl_sar_root = rl_sar_root or default_rl_sar_root(logdir)
+    robot = robot or robot_from_logdir(logdir)
+    log = (lambda *a: None) if quiet else print
+
+    cfg, _ = load_runtime_cfg(logdir, robot=robot)
+
+    training_joints, hardware_joints, arm_joints = joint_order_lists(cfg, robot)
     num_leg = int(cfg.dog.num_actions_loco)
     num_arm = int(cfg.arm.num_actions_arm)
     num_dofs = num_leg + num_arm
@@ -478,9 +531,9 @@ def main():
             f"observation_terms() have diverged"
         )
 
-    out_dir = Path(args.rl_sar_root) / "policy" / args.robot / args.config_name
+    out_dir = Path(rl_sar_root) / "policy" / robot / config_name
     out_dir.mkdir(parents=True, exist_ok=True)
-    ckpt_path, num_actions = export_policy(args.logdir, args.ckptid, cfg, out_dir / "policy.pt")
+    ckpt_path, num_actions = export_policy(logdir, ckpt_id, cfg, out_dir / "policy.pt")
 
     ctx = {
         "num_dofs": num_dofs,
@@ -494,34 +547,57 @@ def main():
         "default_dof_pos": default_dof_pos(cfg, training_joints),
         "rl_kp": rl_kp,
         "rl_kd": rl_kd,
-        # Get-up needs more authority than the policy's running gains.
-        "fixed_kp": [60.0] * num_leg + rl_kp[num_leg:],
+        # Get-up / get-down gains. These are a deployment choice, not a training
+        # parameter: the interpolation states hold a static pose against gravity
+        # rather than tracking a policy. 80/3 is what rl_sar ships for the stock
+        # Go2 and leaves ~0.09 rad of calf droop at the standing pose. The arm
+        # keeps its running gains -- it is holding the same pose either way.
+        "fixed_kp": [80.0] * num_leg + rl_kp[num_leg:],
         "fixed_kd": [3.0] * num_leg + rl_kd[num_leg:],
-        "torque_limits": LEG_TORQUE_LIMITS + ARM_TORQUE_LIMITS[args.robot],
+        "torque_limits": LEG_TORQUE_LIMITS + ARM_TORQUE_LIMITS[robot],
         "action_scale": action_scale(cfg, num_leg, num_arm),
         "dog_commands_scale": dog_commands_scale,
         "dog_commands_extra": dog_commands_extra,
         "gait_frequency": gait_frequency,
         "gait_duration": gait_duration,
         "observations": observations,
-        "provenance": {"logdir": str(Path(args.logdir).resolve()), "ckpt": str(ckpt_path)},
+        "provenance": {"logdir": str(Path(logdir).resolve()), "ckpt": str(ckpt_path)},
     }
 
-    base_yaml = Path(args.rl_sar_root) / "policy" / args.robot / "base.yaml"
-    write_base_yaml(base_yaml, args.robot, cfg, ctx)
-    write_config_yaml(out_dir / "config.yaml", args.robot, args.config_name, cfg, ctx)
+    base_yaml = Path(rl_sar_root) / "policy" / robot / "base.yaml"
+    write_base_yaml(base_yaml, robot, cfg, ctx)
+    write_config_yaml(out_dir / "config.yaml", robot, config_name, cfg, ctx)
 
-    print(f"[export_rl_sar] observations : {width}  ({len(observations)} terms)")
-    print(f"[export_rl_sar] obs history  : {int(cfg.dog.dog_num_observation_history)}"
-          f" x {width} = {int(cfg.dog.dog_num_obs_history)}")
-    print(f"[export_rl_sar] actions      : {num_actions} over {num_dofs} DoFs")
-    print(f"[export_rl_sar] wrote {base_yaml}")
-    print(f"[export_rl_sar] wrote {out_dir / 'config.yaml'}")
-    print(f"[export_rl_sar] wrote {out_dir / 'policy.pt'}")
+    log(f"[export_rl_sar] robot        : {robot}  (ckpt {ckpt_path.name})")
+    log(f"[export_rl_sar] observations : {width}  ({len(observations)} terms)")
+    log(f"[export_rl_sar] obs history  : {int(cfg.dog.dog_num_observation_history)}"
+        f" x {width} = {int(cfg.dog.dog_num_obs_history)}")
+    log(f"[export_rl_sar] actions      : {num_actions} over {num_dofs} DoFs")
+    log(f"[export_rl_sar] wrote {base_yaml}")
+    log(f"[export_rl_sar] wrote {out_dir / 'config.yaml'}")
+    log(f"[export_rl_sar] wrote {out_dir / 'policy.pt'}")
     if bool(cfg.dog.observe_lin_vel) or bool(cfg.dog.observe_pose_actual):
-        print("[export_rl_sar] NOTE: this policy observes base linear velocity "
-              "and/or base height. rl_sar must be fed a state estimate "
-              "(RobotState::base.lin_vel in BODY frame, base.position in WORLD frame).")
+        log("[export_rl_sar] NOTE: this policy observes base linear velocity "
+            "and/or base height. rl_sar must be fed a state estimate "
+            "(RobotState::base.lin_vel in BODY frame, base.position in WORLD frame).")
+    return out_dir
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--logdir", type=str, required=True, help="RoboDuet run directory")
+    parser.add_argument("--ckptid", type=str, default="last")
+    parser.add_argument("--rl_sar_root", type=str, default=None,
+                        help="Output root (the dir that will contain policy/). "
+                             "Default: <logdir>/rl_sar")
+    parser.add_argument("--robot", type=str, default=None, choices=sorted(ARM_JOINTS),
+                        help="default: inferred from the checkpoint's recorded asset")
+    parser.add_argument("--config_name", type=str, default="roboduet_stage1")
+    args = parser.parse_args()
+
+    export(args.logdir, args.rl_sar_root, ckpt_id=args.ckptid, robot=args.robot,
+           config_name=args.config_name)
 
 
 if __name__ == "__main__":

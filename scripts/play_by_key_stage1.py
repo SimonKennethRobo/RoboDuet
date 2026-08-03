@@ -27,6 +27,39 @@ stance_length_cmd = 0.4
 gait_duration_cmd = 0.5
 
 
+def maybe_export_rl_sar(args, logdir, ckpt_id):
+    """Export the rl_sar deployment bundle for the policy we are about to play.
+
+    Running the export here, on every play, keeps the deployed bundle and the
+    policy you just watched in the viewer from drifting apart: the bundle is
+    regenerated from the same logdir + ckptid before a single sim step runs.
+
+    The bundle is written inside the run directory (``<logdir>/rl_sar/``), so a
+    run stays self-contained and nothing lands outside ``runs/`` unless you ask
+    for it with --rl_sar_root.
+
+    It happens BEFORE the env is built so the bundle exists even if IsaacGym
+    fails to start, and it never aborts the run -- playing is the point of this
+    script, and an export problem should not stop you from inspecting a policy.
+    """
+    if getattr(args, "no_rl_sar_export", False):
+        return
+    from scripts.export_rl_sar import export
+
+    try:
+        out_dir = export(
+            logdir,
+            args.rl_sar_root,  # None -> <logdir>/rl_sar
+            ckpt_id=ckpt_id,
+            robot=args.rl_sar_robot,
+            config_name=args.rl_sar_config_name,
+        )
+        print(f"[rl_sar] exported -> {out_dir}", flush=True)
+    except Exception as exc:  # noqa: BLE001 -- never block play on an export problem
+        print(f"[rl_sar] export FAILED ({type(exc).__name__}: {exc}); continuing to play",
+              flush=True)
+
+
 def main(args):
     global \
         x_vel_cmd, \
@@ -46,6 +79,8 @@ def main(args):
     lock_arm = bool(getattr(args, "lock_arm", False))
     ckpt_id_arg = str(args.ckptid)
     ckpt_id = "last" if ckpt_id_arg == "last" else ckpt_id_arg.zfill(6)
+
+    maybe_export_rl_sar(args, logdir, ckpt_id)
 
     from go1_gym.utils.global_switch import global_switch
 
@@ -172,6 +207,34 @@ if __name__ == "__main__":
         action="store_true",
         default=False,
         help="Send zero arm actions every step (hold arm at default position), ignoring any loaded arm policy.",
+    )
+    # rl_sar export: on by default, so the deployment bundle is always in sync
+    # with whatever policy was last played. See maybe_export_rl_sar().
+    parser.add_argument(
+        "--rl_sar_root",
+        type=str,
+        default=None,
+        help="Output root for the export (default: <logdir>/rl_sar). Point this "
+        "at an rl_sar checkout to write the bundle straight into it.",
+    )
+    parser.add_argument(
+        "--rl_sar_config_name",
+        type=str,
+        default="roboduet_stage1",
+        help="Policy subdirectory written under <rl_sar_root>/policy/<robot>/.",
+    )
+    parser.add_argument(
+        "--rl_sar_robot",
+        type=str,
+        default=None,
+        help="Robot key for the export. Default: inferred from the checkpoint's "
+        "recorded asset, which is more reliable than --robot here.",
+    )
+    parser.add_argument(
+        "--no_rl_sar_export",
+        action="store_true",
+        default=False,
+        help="Skip the automatic rl_sar export.",
     )
     add_rerun_args(parser)
 
