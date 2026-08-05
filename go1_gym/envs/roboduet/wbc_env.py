@@ -915,7 +915,7 @@ class WBCEnv(LeggedRobot):
         self.traj_bank = TrajectoryBank(
             self.traj_curriculum, per_cell=int(tcfg.bank_per_cell),
             max_gamma_points=self._traj_max_g, max_tl_points=self._traj_max_t,
-            device=self.device,
+            device=self.device, seed=int(getattr(tcfg, "bank_seed", 0)),
         )
         self.traj_batch = TrajectoryBatch(
             self.num_envs, self._traj_max_g, self._traj_max_t, device=self.device
@@ -1242,17 +1242,58 @@ class WBCEnv(LeggedRobot):
             self.traj_curriculum.rng,
         )
         self.traj_batch.load_from_stacked(env_ids, self.traj_bank.batch, rows)
+        self._place_and_reset_trajectories(env_ids)
 
-        # Anchor the origin-centered path in front of the shoulder (world axes
-        # -- the base yaws to follow via v_ff). anchor_offset_body supplies the
-        # DIRECTION; the distance along it is rho_star * R_max(that direction),
-        # so the path starts exactly at the comfortable stand-off the base
-        # feedforward will try to hold. Deriving it instead of trusting the
-        # configured length keeps the anchor consistent with whichever reach
-        # model is live -- with the M2 table the comfortable forward distance
-        # (~0.44 m on go2_x5) is not the sphere's 0.6*0.6 = 0.36 m, and an
-        # anchor at the wrong radius makes v_ff back the base away from the
-        # path on the very first step.
+    def load_custom_trajectories(self, env_ids, gammas, time_laws, offset=None):
+        """Load caller-supplied (Gamma, TimeLaw) pairs instead of bank rows.
+
+        This is the eval-side entry point (benchmark/wbc/): a probe trajectory --
+        a single-axis sinusoid for the bandwidth sweep, a straight reach for
+        the workspace scan -- is not something the curriculum bank contains,
+        but it has to go through exactly the same placement and progress-state
+        reset the training path uses or its s / d_lat / timing numbers are not
+        comparable to a training episode's.
+
+        ``offset`` (len(env_ids), 3) overrides the default reach-derived
+        stand-off anchor with an explicit world translation, for probes that
+        need to land on a specific point rather than the comfortable one.
+        """
+        if len(env_ids) == 0:
+            return
+        env_ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
+        self.traj_batch.load(env_ids.tolist(), gammas, time_laws)
+        self._place_and_reset_trajectories(env_ids, offset=offset)
+
+    def _place_and_reset_trajectories(self, env_ids, offset=None):
+        """Translate the freshly loaded origin-centered paths into the world
+        and clear the per-env progress state + episode accumulators."""
+        env_ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
+        if offset is None:
+            offset = self._default_trajectory_anchor(env_ids)
+        self.traj_batch.gamma_p[env_ids] += offset.unsqueeze(1)
+
+        for buf in (
+            self.traj_s, self.traj_s_prev, self.traj_sim_time, self.traj_d_lat,
+            self.traj_sdot_meas, self.traj_sdot_ref, self.traj_timing_err,
+            self.traj_twist_err,
+            self.traj_dlat_sum, self.traj_timing_abs_sum, self.traj_ik_jump_max,
+            self.traj_samples,
+        ):
+            buf[env_ids] = 0.0
+
+    def _default_trajectory_anchor(self, env_ids):
+        """World translation that puts an origin-centered path in front of the
+        shoulder (world axes -- the base yaws to follow via v_ff).
+
+        anchor_offset_body supplies the DIRECTION; the distance along it is
+        rho_star * R_max(that direction), so the path starts exactly at the
+        comfortable stand-off the base feedforward will try to hold. Deriving
+        it instead of trusting the configured length keeps the anchor
+        consistent with whichever reach model is live -- with the M2 table the
+        comfortable forward distance (~0.44 m on go2_x5) is not the sphere's
+        0.6*0.6 = 0.36 m, and an anchor at the wrong radius makes v_ff back the
+        base away from the path on the very first step.
+        """
         n = len(env_ids)
         sh_pos, sh_quat = self._shoulder_frame()
         sh_pos, sh_quat = sh_pos[env_ids], sh_quat[env_ids]
@@ -1264,18 +1305,7 @@ class WBCEnv(LeggedRobot):
             u_sh = quat_apply(quat_conjugate(sh_quat), dir_world)
             r_max = self.reach_table.query(u_sh).clamp_min(1e-3)
         distance = float(self.cfg.wbc.goal_reaching.rho_star) * r_max
-        anchor = sh_pos + dir_world * distance.unsqueeze(-1)
-        self.traj_batch.gamma_p[env_ids] += anchor.unsqueeze(1)
-
-        # clear per-env progress state + episode accumulators
-        for buf in (
-            self.traj_s, self.traj_s_prev, self.traj_sim_time, self.traj_d_lat,
-            self.traj_sdot_meas, self.traj_sdot_ref, self.traj_timing_err,
-            self.traj_twist_err,
-            self.traj_dlat_sum, self.traj_timing_abs_sum, self.traj_ik_jump_max,
-            self.traj_samples,
-        ):
-            buf[env_ids] = 0.0
+        return sh_pos + dir_world * distance.unsqueeze(-1)
 
     def _randomize_arm_dof_props(self, env_ids):
         """Override arm DOF slice in Kp/Kd/strength/offset buffers with stage-specific ranges."""

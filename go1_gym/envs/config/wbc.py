@@ -480,6 +480,12 @@ GOAL_REACHING_OVERRIDES = {
     "wbc.goal_reaching.trajectory.max_gamma_points": 1536,
     "wbc.goal_reaching.trajectory.max_tl_points": 512,
     "wbc.goal_reaching.trajectory.bank_per_cell": 64,
+    # Seed for the pre-generated trajectory bank. Training leaves this at 0;
+    # evaluation (benchmark/wbc/) sets a different value so the policy is scored
+    # on trajectories drawn from the same distribution but NOT the ones it
+    # trained on -- with a fixed seed the bank is byte-identical every run, so
+    # a same-seed eval is a training-set score.
+    "wbc.goal_reaching.trajectory.bank_seed": 0,
     # M10 curriculum grid
     "wbc.goal_reaching.trajectory.n_levels_A": 6,
     "wbc.goal_reaching.trajectory.n_levels_B": 6,
