@@ -296,7 +296,7 @@ STAGE2_OVERRIDES = {
     #                     instead of the task target. No joint residual.
     #   'end_to_end'   -- no IK at all: the action is the arm joint position
     #                     target in the usual (target - default)/scale form.
-    "arm.action_mode": "ik_waypoint",
+    "arm.action_mode": "end_to_end",
     # 'ik_waypoint' only. anchor='target' makes the action a bounded detour
     # around the task/trajectory reference (zero action == the pure-IK
     # baseline, which is what the termination thresholds are calibrated
@@ -446,16 +446,16 @@ GOAL_REACHING_OVERRIDES = {
     # When True, stage2→stage1 plan commands are passed through directly:
     # no high-speed posture scaling, no rate limiting, no low-pass filtering
     # (command smoothing + base feedforward filter both become identity).
-    "wbc.goal_reaching.bypass_post_processing": False,
+    "wbc.goal_reaching.bypass_post_processing": True,
     "wbc.goal_reaching.command_channels.vx": True,
     "wbc.goal_reaching.command_channels.vy": True,
     "wbc.goal_reaching.command_channels.yaw": True,
     "wbc.goal_reaching.command_channels.height": True,
     "wbc.goal_reaching.command_channels.pitch": True,
     "wbc.goal_reaching.command_channels.roll": True,
-    "wbc.goal_reaching.command_channels.gait_freq": True,
-    "wbc.goal_reaching.command_channels.stance_width": True,
-    "wbc.goal_reaching.command_channels.stance_length": True,
+    "wbc.goal_reaching.command_channels.gait_freq": False,
+    "wbc.goal_reaching.command_channels.stance_width": False,
+    "wbc.goal_reaching.command_channels.stance_length": False,
     "wbc.goal_reaching.posture_rate_limit": [0.05, 0.10, 0.10],
     "wbc.goal_reaching.gait_rate_limit": [0.50, 0.05, 0.05],
     "wbc.goal_reaching.high_speed_posture_scale": 0.50,

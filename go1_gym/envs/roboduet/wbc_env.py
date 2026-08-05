@@ -980,6 +980,19 @@ class WBCEnv(LeggedRobot):
         self.traj_timing_abs_sum = z()
         self.traj_ik_jump_max = z()
         self.traj_samples = z()
+        # arm–base coordination accumulators (logged as perf_traj_*)
+        self.traj_dlat_sq_sum = z()
+        self.traj_twist_err_sum = z()
+        self.traj_rho_sum = z()
+        self.traj_rho_max = z()
+        self.traj_rho_above_hi_count = z()
+        self.traj_rho_valid_count = z()
+        self.traj_base_util_sum = z()
+        self.traj_base_util_count = z()
+        self.traj_v_ff_sum = z()
+        self.traj_v_base_sum = z()
+        self.traj_motor_power_sum = z()
+        self.traj_manipulability_sum = z()
         self._traj_anchor_offset = torch.tensor(
             list(tcfg.anchor_offset_body), dtype=torch.float, device=self.device
         ).view(1, 3)
@@ -1085,6 +1098,26 @@ class WBCEnv(LeggedRobot):
         self.traj_dlat_sum += self.traj_d_lat
         self.traj_timing_abs_sum += self.traj_timing_err.abs()
         self.traj_samples += 1.0
+
+        # arm–base coordination accumulators (aligned with benchmark/wbc WBCAccumulator)
+        rho_hi = float(self.cfg.wbc.goal_reaching.rho_hi)
+        self.traj_dlat_sq_sum += self.traj_d_lat.square()
+        self.traj_twist_err_sum += self.traj_twist_err
+        self.traj_rho_sum += self.goal_rho
+        self.traj_rho_max[:] = torch.maximum(self.traj_rho_max, self.goal_rho)
+        self.traj_rho_above_hi_count += (self.goal_rho_valid & (self.goal_rho > rho_hi)).float()
+        self.traj_rho_valid_count += self.goal_rho_valid.float()
+        ff_norm = torch.linalg.vector_norm(self.base_feedforward_cmd[:, :2], dim=-1)
+        base_norm = torch.linalg.vector_norm(self.base_lin_vel[:, :2], dim=-1)
+        self.traj_v_ff_sum += ff_norm
+        self.traj_v_base_sum += base_norm
+        active = ff_norm > 0.05
+        ratio = base_norm / ff_norm.clamp_min(1e-6)
+        self.traj_base_util_sum += ratio * active.float()
+        self.traj_base_util_count += active.float()
+        power = (self.torques[:, arm_slice] * self.dof_vel[:, arm_slice]).abs().sum(dim=-1)
+        self.traj_motor_power_sum += power
+        self.traj_manipulability_sum += self.goal_manipulability
 
     def _arm_check_termination_hook(self):
         """Trajectory-mode early termination (design doc §8.4).
@@ -1311,6 +1344,13 @@ class WBCEnv(LeggedRobot):
             self.traj_twist_err,
             self.traj_dlat_sum, self.traj_timing_abs_sum, self.traj_ik_jump_max,
             self.traj_samples,
+            # arm–base coordination accumulators
+            self.traj_dlat_sq_sum, self.traj_twist_err_sum,
+            self.traj_rho_sum, self.traj_rho_max,
+            self.traj_rho_above_hi_count, self.traj_rho_valid_count,
+            self.traj_base_util_sum, self.traj_base_util_count,
+            self.traj_v_ff_sum, self.traj_v_base_sum,
+            self.traj_motor_power_sum, self.traj_manipulability_sum,
         ):
             buf[env_ids] = 0.0
 
@@ -1713,6 +1753,75 @@ class WBCEnv(LeggedRobot):
             for name, value in zip(self.TRAJ_TERM_CAUSES, self._traj_term_cause_ema):
                 extras["traj_early_termination_" + name] = torch.as_tensor(
                     float(value), device=self.device
+                )
+
+            # ---- trajectory performance metrics (arm–base coordination) ----
+            traj_samples = self.traj_samples[train_env_ids]
+            t_valid = traj_samples > 0
+            if torch.any(t_valid):
+                clamped_samples = torch.clamp(traj_samples, min=1.0)
+
+                def _traj_mean(buf):
+                    return self._mean_valid_metric(buf[train_env_ids] / clamped_samples, t_valid)
+
+                def _traj_scalar(value):
+                    return torch.as_tensor(float(value), device=self.device)
+
+                # path tracking accuracy
+                dlat_rmse = (self.traj_dlat_sq_sum[train_env_ids] / clamped_samples).sqrt()
+                extras["perf_traj_dlat_rmse_m"] = self._mean_valid_metric(dlat_rmse, t_valid)
+                extras["perf_traj_dlat_mean_m"] = _traj_mean(self.traj_dlat_sum)
+                extras["perf_traj_timing_err_mean_m"] = _traj_mean(self.traj_timing_abs_sum)
+                extras["perf_traj_twist_err_mean_mps"] = _traj_mean(self.traj_twist_err_sum)
+                extras["perf_traj_progress"] = _traj_mean(self.traj_s)
+
+                # reachability (arm–base coordination)
+                rho_valid = self.traj_rho_valid_count[train_env_ids]
+                rho_valid_mask = rho_valid > 0
+                if torch.any(rho_valid_mask):
+                    clamped_rho = torch.clamp(rho_valid, min=1.0)
+                    extras["perf_traj_rho_mean"] = self._mean_valid_metric(
+                        self.traj_rho_sum[train_env_ids] / clamped_rho, rho_valid_mask,
+                    )
+                    extras["perf_traj_rho_max"] = self._mean_valid_metric(
+                        self.traj_rho_max[train_env_ids], rho_valid_mask,
+                    )
+                    extras["perf_traj_rho_above_hi_rate"] = self._mean_valid_metric(
+                        self.traj_rho_above_hi_count[train_env_ids] / clamped_rho, rho_valid_mask,
+                    )
+
+                # base feedforward utilization
+                util_count = self.traj_base_util_count[train_env_ids]
+                util_valid = util_count > 0
+                if torch.any(util_valid):
+                    clamped_util = torch.clamp(util_count, min=1.0)
+                    extras["perf_traj_base_util_ratio"] = self._mean_valid_metric(
+                        self.traj_base_util_sum[train_env_ids] / clamped_util, util_valid,
+                    )
+                extras["perf_traj_v_ff_xy_mean_mps"] = _traj_mean(self.traj_v_ff_sum)
+                extras["perf_traj_v_base_xy_mean_mps"] = _traj_mean(self.traj_v_base_sum)
+
+                # efficiency
+                extras["perf_traj_motor_power_mean_w"] = _traj_mean(self.traj_motor_power_sum)
+                extras["perf_traj_manipulability_mean"] = _traj_mean(self.traj_manipulability_sum)
+
+                # episode outcome
+                final_progress = self.traj_s[train_env_ids] / self.traj_batch.L[train_env_ids].clamp_min(1e-6)
+                tcfg = self.cfg.wbc.goal_reaching.trajectory
+                mean_dlat = self.traj_dlat_sum[train_env_ids] / clamped_samples
+                mean_timing = self.traj_timing_abs_sum[train_env_ids] / clamped_samples
+                success = (
+                    (final_progress > float(tcfg.success_progress))
+                    & (mean_dlat < float(tcfg.success_dlat))
+                    & (mean_timing < float(tcfg.success_timing))
+                    & (self.traj_ik_jump_max[train_env_ids] < float(tcfg.ik_jump_threshold))
+                    & self.time_out_buf[train_env_ids]
+                )
+                extras["perf_traj_success_rate"] = _traj_scalar(
+                    success.float().mean().item() if torch.any(t_valid) else 0.0
+                )
+                extras["perf_traj_early_term_rate"] = _traj_scalar(
+                    self.traj_early_term[train_env_ids].float().mean().item() if torch.any(t_valid) else 0.0
                 )
 
     def _arm_privileged_obs_hook(self, privileged_obs_buf):
