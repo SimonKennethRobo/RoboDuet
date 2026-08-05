@@ -43,7 +43,7 @@ dog_cmd_idx = {
     "gait_params": slice(6, 11),
 }
 
-goal_plan_channel_names = ("vx", "vy", "yaw", "height", "pitch", "roll")
+goal_plan_channel_names = ("vx", "vy", "yaw", "height", "pitch", "roll", "gait_freq", "stance_width", "stance_length")
 
 
 class WBCEnv(LeggedRobot):
@@ -132,7 +132,7 @@ class WBCEnv(LeggedRobot):
         return bool(
             goal_cfg is not None
             and getattr(goal_cfg, "enabled", False)
-            and getattr(self, "num_plan_actions", 0) == 6
+            and getattr(self, "num_plan_actions", 0) in (6, 9)
         )
 
     def _traj_tracking_enabled(self):
@@ -261,7 +261,8 @@ class WBCEnv(LeggedRobot):
         return previous + torch.clamp(target - previous, -float(max_delta), float(max_delta))
 
     def _smooth_goal_commands(self, indices, values):
-        alpha = float(self.cfg.wbc.goal_reaching.command_smoothing_alpha)
+        bypass = bool(getattr(self.cfg.wbc.goal_reaching, "bypass_post_processing", False))
+        alpha = 1.0 if bypass else float(self.cfg.wbc.goal_reaching.command_smoothing_alpha)
         self.goal_command_targets[:, indices] = values
         smoothed = alpha * values + (1.0 - alpha) * self.goal_command_smoothed[:, indices]
         self.goal_command_smoothed[:, indices] = smoothed
@@ -277,9 +278,9 @@ class WBCEnv(LeggedRobot):
             dog_cmd_idx["body_pitch"]: 0.0,
             dog_cmd_idx["body_roll"]: 0.0,
             dog_cmd_idx["body_height"]: 0.0,
-            dog_cmd_idx["gait_frequency"]: self.cfg.wbc.goal_reaching.fixed_gait_frequency,
+            dog_cmd_idx["gait_frequency"]: 0.5 * sum(self.cfg.commands.limit_gait_frequency),
             dog_cmd_idx["footswing_height"]: self.cfg.wbc.goal_reaching.fixed_footswing_height,
-            dog_cmd_idx["stance_width"]: self.cfg.wbc.goal_reaching.fixed_stance_width,
+            dog_cmd_idx["stance_width"]: 0.5 * sum(self.cfg.commands.limit_stance_width),
             dog_cmd_idx["stance_length"]: 0.5 * sum(self.cfg.commands.limit_stance_length),
             dog_cmd_idx["gait_duration"]: 0.49,
         }
@@ -410,6 +411,8 @@ class WBCEnv(LeggedRobot):
 
         rc = 1.0 / (2.0 * np.pi * max(float(cfg.base_nom_filter_hz), 1e-3))
         alpha = self.dt / (rc + self.dt)
+        if bool(getattr(cfg, "bypass_post_processing", False)):
+            alpha = 1.0
         velocity_body = quat_apply(quat_conjugate(self.base_quat), velocity_world)
         target_body = quat_apply(quat_conjugate(self.base_quat), displacement_world)
         yaw_rate = torch.atan2(target_body[:, 1], target_body[:, 0]) / max(float(cfg.response_time_s), 1e-3)
@@ -419,9 +422,9 @@ class WBCEnv(LeggedRobot):
     def plan(self, upper_action):
         """Apply the document-aligned upper-policy coordination channels.
 
-        ``upper_action`` is either the full 12D actor output or its final 6D
-        plan slice: dv(3), posture(h/pitch/roll). Gait frequency, swing height
-        and stance width are fixed configurable commands.
+        ``upper_action`` is either the full actor output (15D for 9-plan mode) or
+        its plan slice: dv(3), posture(h/pitch/roll), gait(freq/width/length).
+        Footswing height and gait duration remain fixed configurable commands.
         This must run before dog observations/inference for the current step.
         """
         if not self._goal_reaching_enabled():
@@ -466,20 +469,25 @@ class WBCEnv(LeggedRobot):
             (dog_cmd_idx["body_pitch"], self.cfg.commands.limit_body_pitch),
             (dog_cmd_idx["body_roll"], self.cfg.commands.limit_body_roll),
         )
-        speed = torch.linalg.vector_norm(self.commands_dog[:, :2], dim=-1)
-        high_speed = torch.clamp(
-            speed / max(float(self.cfg.wbc.goal_reaching.high_speed_threshold), 1e-3), 0.0, 1.0
-        )
-        posture_scale = 1.0 - high_speed * (1.0 - float(self.cfg.wbc.goal_reaching.high_speed_posture_scale))
+        bypass = bool(getattr(self.cfg.wbc.goal_reaching, "bypass_post_processing", False))
+        if bypass:
+            posture_scale = 1.0
+        else:
+            speed = torch.linalg.vector_norm(self.commands_dog[:, :2], dim=-1)
+            high_speed = torch.clamp(
+                speed / max(float(self.cfg.wbc.goal_reaching.high_speed_threshold), 1e-3), 0.0, 1.0
+            )
+            posture_scale = 1.0 - high_speed * (1.0 - float(self.cfg.wbc.goal_reaching.high_speed_posture_scale))
         posture_values = []
         for column, (index, limits) in enumerate(posture_specs):
             if self.goal_command_channel_enabled[3 + column]:
                 target = self._map_unit_action(bounded[:, 3 + column] * posture_scale, limits)
-                target = self._rate_limit_command(
-                    target,
-                    self.goal_command_smoothed[:, index],
-                    self.cfg.wbc.goal_reaching.posture_rate_limit[column],
-                )
+                if not bypass:
+                    target = self._rate_limit_command(
+                        target,
+                        self.goal_command_smoothed[:, index],
+                        self.cfg.wbc.goal_reaching.posture_rate_limit[column],
+                    )
             else:
                 target = torch.zeros_like(bounded[:, 3 + column])
             posture_values.append(target)
@@ -487,10 +495,39 @@ class WBCEnv(LeggedRobot):
             [spec[0] for spec in posture_specs], torch.stack(posture_values, dim=-1)
         )
 
+        gait_specs = (
+            (dog_cmd_idx["gait_frequency"], self.cfg.commands.limit_gait_frequency),
+            (dog_cmd_idx["stance_width"], self.cfg.commands.limit_stance_width),
+            (dog_cmd_idx["stance_length"], self.cfg.commands.limit_stance_length),
+        )
+        gait_rate_limits = self.cfg.wbc.goal_reaching.gait_rate_limit
+        gait_values = []
+        for column, (index, limits) in enumerate(gait_specs):
+            plan_col = 6 + column
+            if plan_col < self.num_plan_actions and self.goal_command_channel_enabled[plan_col]:
+                target = self._map_unit_action(bounded[:, plan_col], limits)
+                if not bypass:
+                    target = self._rate_limit_command(
+                        target,
+                        self.goal_command_smoothed[:, index],
+                        gait_rate_limits[column],
+                    )
+            else:
+                # fall back to the fixed config value when the channel is
+                # disabled or not present in a smaller plan-action layout
+                fallback = {
+                    dog_cmd_idx["gait_frequency"]: self.cfg.wbc.goal_reaching.fixed_gait_frequency,
+                    dog_cmd_idx["stance_width"]: self.cfg.wbc.goal_reaching.fixed_stance_width,
+                    dog_cmd_idx["stance_length"]: 0.5 * sum(self.cfg.commands.limit_stance_length),
+                }[index]
+                target = torch.full_like(bounded[:, 0], float(fallback))
+            gait_values.append(target)
+        self._smooth_goal_commands(
+            [spec[0] for spec in gait_specs], torch.stack(gait_values, dim=-1)
+        )
+
         fixed_commands = {
-            dog_cmd_idx["gait_frequency"]: self.cfg.wbc.goal_reaching.fixed_gait_frequency,
             dog_cmd_idx["footswing_height"]: self.cfg.wbc.goal_reaching.fixed_footswing_height,
-            dog_cmd_idx["stance_width"]: self.cfg.wbc.goal_reaching.fixed_stance_width,
         }
         for index, value in fixed_commands.items():
             self.goal_command_targets[:, index] = value
@@ -695,10 +732,10 @@ class WBCEnv(LeggedRobot):
         self.arm_time_buf = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
         self.force_time_buf = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
         self.num_plan_actions = self.cfg.arm.num_actions_arm_cd - self.num_actions_arm
-        if self.num_plan_actions not in (0, 6):
+        if self.num_plan_actions not in (0, 6, 9):
             raise ValueError(
                 "Upper policy must use either the legacy 6D arm layout or the "
-                f"12D goal-reaching layout; got {self.cfg.arm.num_actions_arm_cd} actions"
+                f"12D (6-plan) or 15D (9-plan) goal-reaching layout; got {self.cfg.arm.num_actions_arm_cd} actions"
             )
         if self.num_plan_actions:
             channel_cfg = getattr(self.cfg.wbc.goal_reaching, "command_channels", None)

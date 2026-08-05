@@ -443,13 +443,21 @@ GOAL_REACHING_OVERRIDES = {
     "wbc.goal_reaching.response_time_s": 0.50,
     "wbc.goal_reaching.base_nom_filter_hz": 1.50,
     "wbc.goal_reaching.command_smoothing_alpha": 0.20,
+    # When True, stage2→stage1 plan commands are passed through directly:
+    # no high-speed posture scaling, no rate limiting, no low-pass filtering
+    # (command smoothing + base feedforward filter both become identity).
+    "wbc.goal_reaching.bypass_post_processing": False,
     "wbc.goal_reaching.command_channels.vx": True,
     "wbc.goal_reaching.command_channels.vy": True,
     "wbc.goal_reaching.command_channels.yaw": True,
     "wbc.goal_reaching.command_channels.height": True,
     "wbc.goal_reaching.command_channels.pitch": True,
     "wbc.goal_reaching.command_channels.roll": True,
+    "wbc.goal_reaching.command_channels.gait_freq": True,
+    "wbc.goal_reaching.command_channels.stance_width": True,
+    "wbc.goal_reaching.command_channels.stance_length": True,
     "wbc.goal_reaching.posture_rate_limit": [0.05, 0.10, 0.10],
+    "wbc.goal_reaching.gait_rate_limit": [0.50, 0.05, 0.05],
     "wbc.goal_reaching.high_speed_posture_scale": 0.50,
     "wbc.goal_reaching.high_speed_threshold": 0.80,
     "wbc.goal_reaching.fixed_gait_frequency": 4.0,
@@ -590,7 +598,7 @@ ROBODUET_OVERRIDES = {
 FEATURE_LAYOUT = {
     "rot6d_command_dims": 3,
     "dynamic_gait_command_dims": 5,
-    "goal_reaching_plan_action_dims": 6,
+    "goal_reaching_plan_action_dims": 9,
 }
 
 
