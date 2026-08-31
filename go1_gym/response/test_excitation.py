@@ -373,3 +373,96 @@ def test_chirp_phase_is_continuous_across_the_sweep():
     # a 2 Hz sine at dt=0.02 moves at most sin(2*pi*2*0.02) = 25% of amplitude
     assert float(jump) < 0.3 * amplitude + 1e-6
     assert math.isfinite(float(jump))
+
+
+# --- R5 interaction: group-shared excitation --------------------------------
+
+
+def test_block_multiple_rounds_the_identification_block_to_whole_groups():
+    """Half a group excited and half not would break R5's shared command."""
+    sampler = make(num_envs=100, pool_envs=100, env_fraction=0.25, block_multiple=4)
+    assert sampler.identification_ids.numel() == 24     # 25 -> 24
+    assert int(sampler.identification_ids.min()) % 4 == 0
+    with pytest.raises(ValueError, match="block_multiple"):
+        make(block_multiple=0)
+
+
+def _group_share(num_envs, group_size=4):
+    index = torch.arange(num_envs)
+    return (index // group_size) * group_size
+
+
+def test_shared_envs_receive_an_identical_command_every_step():
+    share = _group_share(256)
+    sampler = make(num_envs=256, block_multiple=4, share_with=share)
+    history, _ = rollout(sampler, steps=400)
+    ids = sampler.identification_ids
+    for env in ids.tolist():
+        leader = int(share[env])
+        assert torch.equal(history[:, env], history[:, leader]), f"env {env} drifted"
+
+
+def test_sharing_survives_a_mid_rollout_replan():
+    share = _group_share(256)
+    sampler = make(num_envs=256, block_multiple=4, share_with=share)
+    commands = torch.zeros(256, 11)
+    for step in range(300):
+        if step == 150:
+            sampler.plan(sampler.identification_ids)
+        sampler.step(commands)
+        if step > 150:
+            for env in sampler.identification_ids.tolist():
+                assert commands[env].tolist() == commands[int(share[env])].tolist()
+
+
+def test_sharing_leaves_the_signal_mix_intact():
+    """Members inherit the leader's signal, so counts collapse onto leaders."""
+    share = _group_share(4096)
+    sampler = make(num_envs=4096, block_multiple=4, share_with=share)
+    ids = sampler.identification_ids
+    leaders = ids[sampler.is_identification[ids] & (share[ids] == ids)]
+    assert leaders.numel() * 4 == ids.numel()
+    for env in ids.tolist():
+        assert int(sampler.signal[env]) == int(sampler.signal[int(share[env])])
+        assert int(sampler.channel[env]) == int(sampler.channel[int(share[env])])
+
+
+def test_jump_mask_is_shared_too():
+    """R4.2/4.3's settle counter must reset for the whole group at once."""
+    share = _group_share(64)
+    sampler = make(num_envs=64, block_multiple=4, share_with=share)
+    commands = torch.zeros(64, 11)
+    for _ in range(200):
+        jumped = sampler.step(commands)
+        for env in sampler.identification_ids.tolist():
+            assert bool(jumped[env]) == bool(jumped[int(share[env])])
+
+
+def test_bad_share_with_shape_rejected():
+    with pytest.raises(ValueError, match="one entry per env"):
+        make(num_envs=64, share_with=torch.arange(32))
+
+
+def test_plan_generation_distinguishes_a_redraw_of_the_same_signal():
+    """(signal, channel) is not a plan identity; the counter is."""
+    sampler = make(num_envs=64)
+    ids = sampler.identification_ids
+    before = sampler.plan_generation[ids].clone()
+    sampler.plan(ids)
+    assert torch.all(sampler.plan_generation[ids] == before + 1)
+    # forcing an identical redraw must still change the generation
+    sampler.signal[ids] = PRBS
+    sampler.channel[ids] = 0
+    marker = sampler.plan_generation[ids].clone()
+    sampler.plan(ids)
+    assert torch.all(sampler.plan_generation[ids] > marker)
+
+
+def test_plan_generation_is_shared_within_a_group():
+    share = _group_share(64)
+    sampler = make(num_envs=64, block_multiple=4, share_with=share)
+    sampler.plan(sampler.identification_ids)
+    for env in sampler.identification_ids.tolist():
+        assert int(sampler.plan_generation[env]) == int(
+            sampler.plan_generation[int(share[env])]
+        )

@@ -657,6 +657,18 @@ class WBCEnv(LeggedRobot):
 
         self.actions[:, arm_slice] = (target - arm_default) / self.cfg.control.action_scale
 
+        # R5: "arm fixed" is part of the twin's definition -- a moving arm is a
+        # disturbance, and the twin is the no-disturbance reference.  Applied
+        # after the curriculum so the twin is unaffected by its intensity ramp.
+        if self._grouping_active():
+            twins = self.is_nominal_twin
+            self.stage1_arm_target_offset[twins] = 0.0
+            self.stage1_arm_target_vel[twins] = 0.0
+            self.stage1_arm_target_accel[twins] = 0.0
+            self.actions[twins, arm_slice] = (
+                self.stage1_arm_fixed_dof_pos[twins] - arm_default[twins]
+            ) / self.cfg.control.action_scale
+
     def _resample_stage1_ee_payload(self, env_ids):
         """Sample a per-env EE payload mass for the episode. Scaled by the
         same stage1 curriculum intensity as the rest of the arm disturbance
@@ -1186,6 +1198,11 @@ class WBCEnv(LeggedRobot):
     def _sample_arm_rigid_body_props(self, env_id):
         if not self.arm_body_indices:
             return
+        # R5: the nominal twin keeps the URDF's own link masses and COMs.  This
+        # runs once per env during _create_envs and is never revisited, which is
+        # why the twin assignment has to exist before the actor loop.
+        if self._is_nominal_twin_env(env_id):
+            return
         arm_dr = self.cfg.domain_rand.stage1_arm if not global_switch.switch_open else self.cfg.domain_rand.stage2_arm
         n_arm = len(self.arm_body_indices)
         if arm_dr.randomize_link_mass:
@@ -1240,6 +1257,15 @@ class WBCEnv(LeggedRobot):
         self.stage1_arm_fixed_dof_pos[env_ids] = self.dof_pos[env_ids, arm_slice].clone()
 
         arm_default = self.default_dof_pos[:, arm_slice]  # (1, num_actions_arm)
+        # R5: arm configuration is one of the dimensions randomised across a
+        # group, so the twin holds the default pose rather than the reset's
+        # noisy one.  Without this the twin's "fixed" arm is fixed at a random
+        # offset, and the group's alignment target carries a disturbance of its
+        # own.
+        if self._grouping_active():
+            twin_ids = env_ids[self.is_nominal_twin[env_ids]]
+            if twin_ids.numel() > 0:
+                self.stage1_arm_fixed_dof_pos[twin_ids] = arm_default
         self.stage1_arm_target_offset[env_ids] = self.stage1_arm_fixed_dof_pos[env_ids] - arm_default
         self.stage1_arm_target_vel[env_ids] = 0.0
         self.stage1_arm_target_accel[env_ids] = 0.0
@@ -1385,6 +1411,19 @@ class WBCEnv(LeggedRobot):
 
     def _arm_post_dof_randomization_hook(self, env_ids):
         self._randomize_arm_dof_props(env_ids)
+
+    def _arm_nominalize_twins_hook(self, twins):
+        """R5: arm-side domain parameters held at nominal for the twins.
+
+        The Kp/Kd/strength/offset arm slice writes into the same buffers the dog
+        side uses, so LeggedRobot._nominalize_twins already covers it.  What is
+        left is the end-effector payload, which is arm-only.
+        """
+        if hasattr(self, "stage1_ee_payload_mass"):
+            self.stage1_ee_payload_mass[twins] = 0.0
+        if hasattr(self, "arm_link_mass_scales"):
+            self.arm_link_mass_scales[twins] = 1.0
+            self.arm_link_com_offsets[twins] = 0.0
 
     def _randomize_arm_rigid_body_props(self, env_ids):
         """Deprecated: arm link mass/COM DR is applied per-env during actor creation."""

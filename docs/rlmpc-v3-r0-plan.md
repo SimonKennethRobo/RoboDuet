@@ -716,6 +716,113 @@ twin 一侧不回传梯度（`.detach()`，且 twin 自身该项为 0）。
 人为触发一个 env 摔倒，断言 `group_valid_mask[g]` 变 0 并在下次组重采样恢复；
 断言 twin 的 friction/mass/motor_strength 等于标称值。
 
+### 实现结果（2026-09-01，第 7a 步：分组骨架，奖励项在 7b）
+
+新增 `go1_gym/response/grouping.py` 的 `EnvGrouping`（纯 tensor，CPU 可测），
+env 侧挂载点见下。**本步不含 `_reward_domain_consistency`**——
+按方案 §13 的建议分两次提交，先让分组本身可验证。
+
+#### twin 标称化：用「事后恢复」而不是「逐点跳过」
+
+方案原表列了 7 个采样点要跳过 twin。实现时改为在每个采样器**之后**
+统一恢复（`_nominalize_twins`），理由是失效模式不同：
+
+- 逐点加掩码：跨 2 个文件 10 个采样点，**将来新增一个采样点会静默地漏掉**；
+- 事后恢复：漏掉的采样点直接表现为「twin 的该参数不等于标称值」，
+  而这正是 `--check r5` 逐参数断言的东西。
+
+只有两处无法用恢复处理，单独加了掩码：
+`randomize_action_delay`（每步重抽，不落在任何缓冲区里）、
+以及 `_sample_arm_rigid_body_props` / mount TF bucket（`_create_envs` 期间一次性确定）。
+后者也是**分组必须在建环境之前确定**的原因——方案已标注，实现照此执行：
+`_ensure_grouping()` 在 actor 循环之前调用。
+
+#### 时钟：先判后进（check-then-advance）
+
+`groups_due()` 必须在 `advance()` 之前调用。若反过来，
+新建的 grouping 要等满一个 interval 才第一次采命令，
+**开局 10 秒全组零命令**——看起来像策略不动，实际是时钟错位。
+
+#### ⚠️ R5 × R6：一个由本步暴露的真实 bug
+
+R6 原本用「**抑制**辨识 env 的 episode 中段重采样」来保证 chirp 不被打断。
+R5 让「摔倒的分组 env 复制 twin 的命令而不是新采」之后，
+**辨识组的 twin 也被抑制 ⇒ 整组永远拿不到命令，全程零**。
+R1/R6 两个真环境检查同时报错抓到了它
+（冻结通道 min=0、`no identification env was ever resampled`）。
+
+改法不是打补丁，是换机制：**辨识组改用更长的重采样周期**
+（= chirp 时长 = 1000 步 = 一个 episode），而不是抑制。
+于是「命令基线」和「激励计划」在同一时刻一起换，
+记录天然不会被切成两半，且每组一定拿得到命令。
+`EnvGrouping.groups_due()` 因此接受 per-group 的 interval 张量。
+
+#### plan generation 计数器
+
+`--check r6` 用 `(signal, channel)` 判定「同一个 plan」，
+3 信号 × 5 通道 ⇒ **重抽约 1/15 概率落回同一对**，
+此时伴随的基线换命令就被读成「plan 内被动通道动了」。
+新增 `ExcitationSampler.plan_generation`（每次 `plan()` 自增、组内共享）
+作为 plan 的真实身份。这不只是测试用：R9 按 plan 切分记录需要同一个量。
+
+#### 挂载点
+
+| 位置 | 改动 |
+| --- | --- |
+| `_create_envs` | `_ensure_grouping()` + `_nominalize_twins()`，**在 actor 循环之前**；twin 强制 mount bucket 0 并记录 `arm_mount_bucket_of_env` |
+| `reset_idx` | 分组 env 走 `_adopt_group_commands()`（复制 twin 命令 + 标记 desync），未分组 env 保持原 `_resample_commands` |
+| `_resample_commands` | 新增 `_group_source_rows()`：课程抽样、bin、以及「10% 站立」的硬币**全部**按组重映射 |
+| `_post_physics_step_callback` | 组时钟驱动重采样；之后 `_sync_groups()` 同步 `gait_indices` 并清 desync；末尾 `grouping.advance()` |
+| `step()` | twin 的 `actions_start_decimation = 0` |
+| `wbc_env` | twin 跳过 arm link mass/com；`_arm_nominalize_twins_hook` 清 ee payload；stage-1 arm 曲线对 twin 冻结在默认位姿 |
+
+#### 已知偏差：重力随机化无法对 twin 豁免
+
+`_randomize_gravity` 写的是 **sim 级** `sim_params.gravity`，IsaacGym 下不是 per-env。
+影响评估：它对**组内所有 env 完全相同**，所以不构成跨域差异，R5 的组内比较不受影响。
+但它意味着 twin 的响应不是严格的「标称域响应」——
+R9 用 twin 数据做标称辨识时，要么把 `gravities` 当协变量记录，
+要么标定 run 关掉 `randomize_gravity`。**已记入 R9 的待办。**
+
+#### 新增指标（两处统计口径的坑，都是实测发现后改的）
+
+- `perf_group_desync_fraction` —— 一致性项被关掉的比例。
+  **必须用瞬时总体比例，不能用 episode 均值。**
+  第一版按 episode 归一化，结果被它自己要测的东西污染：
+  env 一摔倒，累加器就被清零，于是「组失步最久」的 env 恰恰贡献最短的 episode。
+  实测读数随 episode 变长从 **0.03 漂到 0.62**——量的不是失步率，是 episode 长度。
+  改为瞬时口径后稳定在 **0.36–0.38**。
+  它和 `perf_phase_variance_raw` 一样是 R8 阶段 3 的启动判据。
+- `perf_twin_early_termination_rate` / `perf_twin_episode_count` ——
+  twin 跑的是组内最容易的域，**twin 在摔就说明问题在策略不在随机化**（R5 自己点明的用法）。
+  同样踩了 R6 那次的「零稀释」坑：twin 占 1/4，多数 reset 批次里一个都没有，
+  无保护地写入会把 0 平均进去——实测让 twin 摔倒率读成 **0.0000**，
+  而总体是 0.6。加上 `if torch.any(twin)` 后读 **0.47–0.63**，与总体 0.55–0.62 一致。
+
+  > 顺带：twin 摔得和大家一样多，本身就是 R5 说的那个诊断——
+  > 80 iter 时的瓶颈是策略，不是域随机化。
+
+#### 验收结果
+
+18 项 grouping 单测 + 8 项 excitation 共享单测（全包 135 项）；
+`--check r1/r2/r5/r6` 全过：
+
+```
+64 envs -> 16 groups of 4; twins at [0, 4, 8, 12]
+friction        twin [1.00000, 1.00000]   others [0.18925, 2.99069]
+motor_strength  twin [1.00000, 1.00000]   others [0.71684, 1.29604]
+arm_link_mass   twin [1.00000, 1.00000]   others [0.10065, 1.99853]
+over 1000 steps with a synchronised group: 0 command mismatches, 0 phase mismatches
+forced a fall in env 1 (group 0): valid 1 -> 0
+group 0 recovered after 499 steps (shared resample interval is 500)
+```
+
+终止不对称是**主动制造**的（把 env 传送到终止高度以下）而不是等它自然摔——
+等自然摔会让验收门限的通过与否取决于策略有多差。
+
+200 iter 训练（4096 env、seed 42）：**327.4 s，0 NaN、0 报错、无发散**，
+mean episode length 269.9。
+
 ---
 
 ## 8. R6 — 富激励命令信号
@@ -1280,7 +1387,8 @@ gait frequency、arm 状态、domain 特权参数、地形标签（v1 恒为 pla
 | 4 ✅ | R3 残差估计 + 双路去趋势（**已完成**） | 64 项单测 + 3 项变异；真环境 δ̂ 谐波分布物理正确（vx 偶次主导、pitch h1=98%）；相位查表零延迟 vs 低通滞后 330× |
 | 5 ✅ | R4 四项 + σ 标定（**已完成**） | 83 项单测；σ 复现文档算例（t=0.1 参考 0.0361 / 激进误差 0.2015 / 奖励 0.0065）；1000 iter 无 NaN；R4.2/4.3 实测必须默认关闭 |
 | 6 ✅ | R6 富激励（先不分组）（**已完成**） | 109 项单测；辨识组 660 跳变/episode；chirp 带内能量 92.4%；课程 spy 精确排除 16/161；PRBS 12.2 次（文档自相矛盾，已记录） |
-| 7  | **R5 分组 + twin**（最高风险，分两步）                         | 组内命令/相位一致；失效逻辑            |
+| 7a ✅ | **R5 分组骨架 + twin 标称化**（**已完成**） | 135 项单测；`--check r5` 全过：twin 逐参数标称、0 命令/相位失配、强制摔倒后 valid 1→0 并在 499 步恢复 |
+| 7b | R5 `_reward_domain_consistency` 奖励项 | twin 侧 detach；权重按实测量级定 |
 | 8  | R7 观测（90→112）+ 历史窗口 30→50 + R7.3 的 4 条结构性约束            | obs 宽度断言通过；旧 ckpt 显式报错；历史布局连续性测试通过；`temporal_encoder` 开关就位 |
 | 9  | R8 四阶段课程 + 参考模型标定                                         | 四个 checkpoint；无步频同频波动        |
 | 10 | R9 评测与导出                                                        | 主图产出                               |

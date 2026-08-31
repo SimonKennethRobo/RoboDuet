@@ -94,6 +94,8 @@ class ExcitationSampler:
         low: Sequence[float],
         high: Sequence[float],
         pool_envs: Optional[int] = None,
+        block_multiple: int = 1,
+        share_with: Optional[torch.Tensor] = None,
         env_fraction: float = 0.25,
         signal_weights: Optional[Dict[str, float]] = None,
         channel_weights: Optional[Dict[str, float]] = None,
@@ -179,11 +181,34 @@ class ExcitationSampler:
             raise ValueError(
                 f"pool_envs must be in [0, {self.num_envs}], got {self.pool_envs}"
             )
+        # R5 grouping, when enabled, requires the identification block to be a
+        # whole number of groups: half a group excited and half not would break
+        # the "one command vector per group" invariant outright.
+        if block_multiple < 1:
+            raise ValueError(f"block_multiple must be >= 1, got {block_multiple}")
         num_identification = int(self.pool_envs * float(env_fraction))
+        num_identification = (num_identification // block_multiple) * block_multiple
         self.is_identification = torch.zeros(self.num_envs, dtype=torch.bool, device=device)
         if num_identification > 0:
             self.is_identification[self.pool_envs - num_identification:self.pool_envs] = True
         self.identification_ids = self.is_identification.nonzero(as_tuple=False).flatten()
+
+        # R5: every env in a group must see an identical command, excitation
+        # included, so the plan is drawn for the group leader and copied.  The
+        # per-step state is copied too, not just the plan -- PRBS redraws and
+        # the chirp clock would otherwise drift the members apart within a step
+        # or two, and the drift would be invisible in the plan itself.
+        if share_with is None:
+            share_with = torch.arange(self.num_envs, device=device)
+        else:
+            share_with = share_with.to(device=device, dtype=torch.long)
+            if share_with.shape != (self.num_envs,):
+                raise ValueError(
+                    f"share_with must have one entry per env ({self.num_envs}), "
+                    f"got {tuple(share_with.shape)}"
+                )
+        self.share_with = share_with
+        self._shares = bool((share_with != torch.arange(self.num_envs, device=device)).any())
 
         zeros_l = lambda: torch.zeros(self.num_envs, dtype=torch.long, device=device)  # noqa: E731
         zeros_f = lambda: torch.zeros(self.num_envs, dtype=torch.float, device=device)  # noqa: E731
@@ -197,6 +222,11 @@ class ExcitationSampler:
         self.value = zeros_f()
         self.chirp_t = zeros_f()
         self.ramp_slope = zeros_f()
+        # Increments on every plan draw.  (signal, channel) is NOT a plan
+        # identity: with 3 signals and 5 channels a redraw lands on the same
+        # pair about one time in fifteen, and anything downstream that segments
+        # a recording by "same plan" then silently welds two plans together.
+        self.plan_generation = zeros_l()
 
         if self.identification_ids.numel() > 0:
             self.plan(self.identification_ids)
@@ -268,6 +298,9 @@ class ExcitationSampler:
         is_ramp = signal == RAMP
         self.value[env_ids] = torch.where(is_ramp, ramp_start, self.value[env_ids])
         self.ramp_slope[env_ids] = ramp_slope
+        self.plan_generation[env_ids] += 1
+
+        self._share_from_leader()
 
     # -- per-step advance ---------------------------------------------------
 
@@ -339,10 +372,27 @@ class ExcitationSampler:
 
         value = torch.where(is_prbs, value_prbs, torch.where(is_chirp, value_chirp, value_ramp))
         self.value[ids] = value
-        commands[ids, self.cmd_index[self.channel[ids]]] = value
+        self._share_from_leader()
+
+        ids_all = self.identification_ids
+        commands[ids_all, self.cmd_index[self.channel[ids_all]]] = self.value[ids_all]
 
         jumped[ids] = switching | is_chirp | is_ramp
+        if self._shares:
+            jumped = jumped[self.share_with] & self.is_identification
         return jumped
+
+    def _share_from_leader(self) -> None:
+        """Copy every shared env's plan AND running state from its leader."""
+        if not self._shares:
+            return
+        source = self.share_with
+        for name in (
+            "signal", "channel", "center", "amplitude", "env_low", "env_high",
+            "prbs_hold", "value", "chirp_t", "ramp_slope", "plan_generation",
+        ):
+            buffer = getattr(self, name)
+            buffer[:] = buffer[source]
 
     # -- introspection ------------------------------------------------------
 

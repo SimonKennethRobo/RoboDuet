@@ -14,6 +14,9 @@ R2  the reference model's position never advances faster than its rate limit,
     peaks exactly at the limit, and holds unit steady-state gain.
 R3  the phase-conditioned residual is a clean low-order periodic waveform.
     Needs a walking policy, so pass --policy; without one this check is skipped.
+R5  a group shares one command vector and one gait phase, its twin really is
+    nominal, and a fall really does switch the group's consistency term off
+    until the next shared resample.
 R6  the identification environments really are excited (jump count, chirp band),
     really are excluded from the curriculum, and really are the only ones
     touched.
@@ -25,6 +28,7 @@ import os
 import sys
 
 import isaacgym  # noqa: F401  must precede torch
+from isaacgym import gymtorch
 import torch
 
 from go1_gym.envs.config import build_roboduet_config
@@ -415,6 +419,143 @@ def check_r4(env, cfg, policy_path, seconds=40.0):
 
 
 # ---------------------------------------------------------------------------
+# R5
+# ---------------------------------------------------------------------------
+
+
+def check_r5(env, cfg, steps=1200):
+    """R5's three acceptance criteria, plus the twin's nominal domain.
+
+    The termination-asymmetry criterion is checked by *causing* a fall rather
+    than waiting for one: an env is teleported below the termination height, and
+    the group's validity mask has to drop to zero and stay there until the next
+    shared resample.  Waiting for a natural fall makes the check depend on how
+    bad the policy is, which is exactly the kind of flakiness an acceptance gate
+    should not have.
+    """
+    base = env.env
+    grouping = base.grouping
+    if grouping.num_groups == 0:
+        return ["grouping is disabled or there are too few envs to form a group"]
+
+    env.reset()
+    dog_a, arm_a = zero_actions(env, cfg)
+    failures = []
+    size = grouping.group_size
+    print(f"  {cfg.env.num_envs} envs -> {grouping.num_groups} groups of {size}; "
+          f"{int(grouping.is_grouped.sum())} grouped, twins at "
+          f"{grouping.is_twin.nonzero().flatten()[:4].tolist()}...")
+
+    # -- 1. the twin's domain parameters are nominal ------------------------
+    twins = grouping.is_twin
+    others = grouping.is_grouped & ~twins
+    nominal = [
+        ("friction", base.friction_coeffs, base.default_friction),
+        ("restitution", base.restitutions, base.default_restitution),
+        ("payload", base.payloads, 0.0),
+        ("com_displacement", base.com_displacements, 0.0),
+        ("motor_strength", base.motor_strengths, 1.0),
+        ("motor_offset", base.motor_offsets, 0.0),
+        ("Kp_factor", base.Kp_factors, 1.0),
+        ("Kd_factor", base.Kd_factors, 1.0),
+    ]
+    if hasattr(base, "stage1_ee_payload_mass"):
+        nominal.append(("ee_payload", base.stage1_ee_payload_mass, 0.0))
+    if hasattr(base, "arm_link_mass_scales"):
+        nominal.append(("arm_link_mass_scale", base.arm_link_mass_scales, 1.0))
+        nominal.append(("arm_link_com_offset", base.arm_link_com_offsets, 0.0))
+
+    print(f"  {'parameter':<22}{'twin span':>26}{'others span':>26}")
+    for name, buffer, want in nominal:
+        twin_values = buffer[twins]
+        other_values = buffer[others]
+        twin_span = (float(twin_values.min()), float(twin_values.max()))
+        other_span = (float(other_values.min()), float(other_values.max()))
+        print(f"  {name:<22}[{twin_span[0]:>10.5f},{twin_span[1]:>10.5f}]  "
+              f"[{other_span[0]:>10.5f},{other_span[1]:>10.5f}]")
+        if abs(twin_span[0] - want) > 1e-5 or abs(twin_span[1] - want) > 1e-5:
+            failures.append(
+                f"twin {name} is {twin_span}, expected exactly {want} -- a "
+                "randomisation site is not covered by _nominalize_twins()"
+            )
+        # A parameter that is not randomised at all makes its row vacuous; say
+        # so rather than passing silently on a comparison that proves nothing.
+        if abs(other_span[1] - other_span[0]) < 1e-9 and abs(other_span[0] - want) < 1e-5:
+            print(f"      note: {name} is not randomised, so this row proves nothing")
+
+    twin_bucket = base.arm_mount_bucket_of_env[twins] if hasattr(
+        base, "arm_mount_bucket_of_env") else None
+    if twin_bucket is not None and int(twin_bucket.max()) != 0:
+        failures.append(f"twin mount TF bucket is not 0: max {int(twin_bucket.max())}")
+
+    # -- 2. shared command vector and gait phase ----------------------------
+    command_mismatch = 0
+    phase_mismatch = 0
+    synced_samples = 0
+    for _ in range(steps):
+        env.step(dog_a, arm_a)
+        healthy = grouping.valid > 0
+        if not healthy.any():
+            continue
+        synced_samples += 1
+        twin_row = base.commands_dog[grouping.twin_of]
+        command_mismatch += int(
+            ((base.commands_dog != twin_row).any(dim=-1) & healthy).sum()
+        )
+        twin_phase = base.gait_indices[grouping.twin_of]
+        phase_mismatch += int(
+            (((base.gait_indices - twin_phase).abs() > 1e-6) & healthy).sum()
+        )
+    print(f"  over {synced_samples} steps with a synchronised group: "
+          f"{command_mismatch} command mismatches, {phase_mismatch} phase mismatches")
+    if synced_samples == 0:
+        failures.append("no group was ever synchronised -- the check is vacuous")
+    if command_mismatch:
+        failures.append(
+            f"{command_mismatch} env-steps where a synchronised group's command "
+            "differed from its twin's"
+        )
+    if phase_mismatch:
+        failures.append(
+            f"{phase_mismatch} env-steps where a synchronised group's gait phase "
+            "differed from its twin's"
+        )
+
+    # -- 3. a fall switches the group off until the next shared resample ----
+    victim = int((grouping.is_grouped & ~grouping.is_twin).nonzero().flatten()[0])
+    group = int(grouping.group_of[victim])
+    # Wait for the group to be freshly synchronised so the observation is clean.
+    interval = int(cfg.commands.resampling_time / base.dt)
+    while bool(grouping.group_desync[group]):
+        env.step(dog_a, arm_a)
+    before = float(grouping.valid[victim])
+
+    base.root_states[victim, 2] = -5.0
+    base.gym.set_actor_root_state_tensor(base.sim, gymtorch.unwrap_tensor(base.root_states))
+    env.step(dog_a, arm_a)
+    after = float(grouping.valid[victim])
+    print(f"  forced a fall in env {victim} (group {group}): "
+          f"valid {before:.0f} -> {after:.0f}")
+    if not (before == 1.0 and after == 0.0):
+        failures.append(
+            f"forcing env {victim} to fall did not invalidate group {group} "
+            f"(valid {before} -> {after})"
+        )
+
+    recovered_at = None
+    for step in range(1, interval + 2):
+        env.step(dog_a, arm_a)
+        if grouping.valid[victim] > 0:
+            recovered_at = step
+            break
+    print(f"  group {group} recovered after {recovered_at} steps "
+          f"(shared resample interval is {interval})")
+    if recovered_at is None:
+        failures.append(f"group {group} never recovered within one resample interval")
+    return failures
+
+
+# ---------------------------------------------------------------------------
 # R6
 # ---------------------------------------------------------------------------
 
@@ -460,12 +601,14 @@ def check_r6(env, cfg, steps=1100):
         seen["updated"].clear()
         dog_a, arm_a = zero_actions(env, cfg)
         history, signal_history, channel_history, episode_history = [], [], [], []
+        generation_history = []
         for _ in range(steps):
             env.step(dog_a, arm_a)
             # Read after the step: this is the plan that produced these commands.
             history.append(base.commands_dog.clone())
             signal_history.append(sampler.signal.clone())
             channel_history.append(sampler.channel.clone())
+            generation_history.append(sampler.plan_generation.clone())
             episode_history.append(base.episode_length_buf.clone())
     finally:
         base._resample_commands = original_resample
@@ -475,6 +618,7 @@ def check_r6(env, cfg, steps=1100):
     signals = torch.stack(signal_history)            # (T, E)
     channels = torch.stack(channel_history)          # (T, E)
     episodes = torch.stack(episode_history)          # (T, E)
+    generations = torch.stack(generation_history)    # (T, E)
     is_identification = sampler.is_identification
     failures = []
 
@@ -487,7 +631,11 @@ def check_r6(env, cfg, steps=1100):
           + ", ".join(f"{k}={v}" for k, v in sampler.channel_counts().items()))
 
     # Steps k -> k+1 that stayed inside a single plan and a single episode.
-    steady = (signals[1:] == signals[:-1]) & (channels[1:] == channels[:-1])
+    # Plan identity is the generation counter, not (signal, channel): a redraw
+    # hits the same pair about one time in fifteen, and the baseline command
+    # step that accompanies it then reads as a passive channel moving inside a
+    # plan.  That false positive is what this counter exists to remove.
+    steady = generations[1:] == generations[:-1]
     steady &= episodes[1:] > episodes[:-1]
     changed = commands[1:] != commands[:-1]                    # (T-1, E, C)
     decision = torch.tensor(list(DECISION_CMD_INDEX), device=commands.device)
@@ -547,7 +695,7 @@ def check_r6(env, cfg, steps=1100):
               "U(0.5, 3.0) s shortfall no longer applies, check the config")
 
     # -- 4. chirp band coverage, over one uninterrupted sweep ----------------
-    segment = _longest_plan_segment(signals, channels, episodes, is_identification, CHIRP)
+    segment = _longest_plan_segment(generations, signals, episodes, is_identification, CHIRP)
     if segment is None:
         failures.append("no uninterrupted chirp segment was produced")
     else:
@@ -599,18 +747,17 @@ def check_r6(env, cfg, steps=1100):
     return failures
 
 
-def _longest_plan_segment(signals, channels, episodes, is_identification, wanted_signal):
-    """Longest ``(env, start, stop)`` run with one plan, one episode, one signal."""
+def _longest_plan_segment(generations, signals, episodes, is_identification, wanted_signal):
+    """Longest ``(env, start, stop)`` run inside one plan and one episode."""
     best = None
     for env_index in is_identification.nonzero().flatten().tolist():
+        generation = generations[:, env_index]
         signal = signals[:, env_index]
-        channel = channels[:, env_index]
         episode = episodes[:, env_index]
         start = 0
         for k in range(1, signal.numel() + 1):
             broken = k == signal.numel() or not (
-                signal[k] == signal[start]
-                and channel[k] == channel[start]
+                generation[k] == generation[start]
                 and episode[k] > episode[k - 1]
             )
             if not broken:
@@ -628,7 +775,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--check", default="all",
-                        choices=["r1", "r2", "r3", "r4", "r6", "all"])
+                        choices=["r1", "r2", "r3", "r4", "r5", "r6", "all"])
     parser.add_argument("--num_envs", type=int, default=64)
     parser.add_argument("--sim_device", type=str, default="cuda:0")
     parser.add_argument("--robot", type=str, default="go2_x5")
@@ -638,7 +785,7 @@ def main():
     args = parser.parse_args()
 
     env, cfg = build_env(args.num_envs, args.sim_device, args.robot)
-    wanted = ["r1", "r2", "r3", "r4", "r6"] if args.check == "all" else [args.check]
+    wanted = ["r1", "r2", "r3", "r4", "r5", "r6"] if args.check == "all" else [args.check]
 
     results = {}
     for name in wanted:
@@ -659,6 +806,8 @@ def main():
                 print("  skipped: needs a walking policy, pass --policy <ckpt.pt>")
                 continue
             results[name] = check_r4(env, cfg, args.policy)
+        elif name == "r5":
+            results[name] = check_r5(env, cfg)
         elif name == "r6":
             results[name] = check_r6(env, cfg)
 

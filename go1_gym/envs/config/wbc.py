@@ -740,9 +740,36 @@ RESPONSE_EXCITATION_OVERRIDES = {
 }
 
 
+# ============================================================
+# R5 -- environment grouping and the nominal twin.
+#
+# A group shares its command sequence, gait phase clock and resample instants;
+# its members differ only in domain (friction, mass, payload, motor strength,
+# arm configuration).  One member -- the group leader -- is held at nominal
+# values so the others have something to be consistent WITH.
+#
+# R5 states the choice of a twin over a within-group variance penalty as an
+# invariant, and the reason is a degenerate solution: variance is minimised
+# just as well by being equally sluggish everywhere, which collapses
+# consistency and bandwidth together.
+#
+# The twin block is fixed for the run and cannot be reshuffled: arm link
+# mass/COM, the mount-TF bucket and base mass are drawn once during
+# _create_envs and never redrawn.
+# ============================================================
+RESPONSE_GROUPING_OVERRIDES = {
+    "response.grouping.enabled": True,
+    # 4 is the requirements figure. It buys 3 cross-domain comparisons per
+    # nominal env; larger groups amortise the twin better but cut the number of
+    # distinct command sequences the curriculum sees by the same factor.
+    "response.grouping.group_size": 4,
+}
+
+
 ROBODUET_OVERRIDES = {
     **RESPONSE_MODEL_OVERRIDES,
     **RESPONSE_EXCITATION_OVERRIDES,
+    **RESPONSE_GROUPING_OVERRIDES,
     **COMMON_OVERRIDES,
     **STAGE1_OVERRIDES,
     **STAGE2_OVERRIDES,

@@ -28,6 +28,7 @@ from go1_gym.envs.config import ConfigNode
 from go1_gym.response import (
     DECISION_CHANNEL_UNITS,
     GAIT_FREQUENCY,
+    EnvGrouping,
     ExcitationSampler,
     PhaseResidualEstimator,
     ReferenceModel,
@@ -267,6 +268,11 @@ class LeggedRobot(BaseTask):
                 (self.num_envs, 1),
                 device=self.device,
             )
+            # R5: actuation delay is a domain parameter like any other, and it
+            # is redrawn every step -- so unlike the rest it cannot be handled
+            # by _nominalize_twins and has to be zeroed here.
+            if self._grouping_active():
+                actions_start_decimation[self.is_nominal_twin] = 0
         for i in range(self.cfg.control.decimation):
             self._arm_decimation_hook()
             if randomize_action_delay:
@@ -461,13 +467,27 @@ class LeggedRobot(BaseTask):
         completed_episode_steps = self.episode_length_buf[env_ids].clone()
         completed_episode_timeouts = self.time_out_buf[env_ids].clone()
 
-        # reset robot states
-        self._resample_commands(env_ids)
+        # reset robot states.
+        # R5: a grouped env that reset mid-window adopts its group's command
+        # instead of drawing a new one -- drawing would break the shared command
+        # vector the group exists to hold constant.  Ungrouped envs (the
+        # evaluation block, and the remainder that does not fill a group) keep
+        # the original behaviour exactly.
+        if self._grouping_active():
+            grouped = self.grouping.is_grouped[env_ids]
+            self._adopt_group_commands(env_ids[grouped])
+            self._resample_commands(env_ids[~grouped])
+        else:
+            self._resample_commands(env_ids)
         self._arm_reset_hook(env_ids)
         self._randomize_dof_props(env_ids, self.cfg)
         self._arm_post_dof_randomization_hook(env_ids)
         if self.cfg.domain_rand.randomize_rigids_after_start:
             self._randomize_rigid_body_props(env_ids, self.cfg)
+        # R5: after every per-reset sampler, dog and arm alike, and before the
+        # shape props are pushed to the simulator.
+        self._nominalize_twins(env_ids)
+        if self.cfg.domain_rand.randomize_rigids_after_start:
             self.refresh_actor_rigid_shape_props(env_ids, self.cfg)
 
         self._reset_dofs(env_ids, self.cfg)
@@ -1041,6 +1061,81 @@ class LeggedRobot(BaseTask):
 
         self._create_envs()
 
+    # ---- R5: environment grouping and the nominal twin --------------------
+
+    def _ensure_grouping(self):
+        """Build the R5 grouping.  Called from _create_envs, before any actor.
+
+        It has to exist that early because three domain-randomisation draws --
+        the arm mount-TF bucket, arm link mass/COM, and base mass -- happen once
+        during actor creation and are never redrawn.  A twin chosen afterwards
+        would already be non-nominal in exactly the properties that are hardest
+        to notice.
+        """
+        if getattr(self, "grouping", None) is not None:
+            return self.grouping
+        cfg = self.cfg.response.grouping
+        enabled = bool(cfg.enabled)
+        self.grouping = EnvGrouping(
+            num_envs=self.num_envs,
+            group_size=int(cfg.group_size),
+            # pool 0 disables grouping outright: is_grouped is all False and
+            # every env keeps the original per-env resample clock, so turning
+            # this off restores the pre-R5 behaviour exactly rather than
+            # approximately.
+            pool_envs=self.num_train_envs if enabled else 0,
+            device=self.device,
+        )
+        self.is_nominal_twin = self.grouping.is_twin
+        return self.grouping
+
+    def _grouping_active(self):
+        return getattr(self, "grouping", None) is not None and self.grouping.num_groups > 0
+
+    def _is_nominal_twin_env(self, env_id):
+        """Scalar form, for the per-env callbacks IsaacGym drives at creation."""
+        grouping = self._ensure_grouping()
+        return grouping.num_groups > 0 and bool(grouping.is_twin[int(env_id)])
+
+    def _arm_nominalize_twins_hook(self, twins):
+        """Reset arm-side domain randomisation for the twin rows."""
+        pass
+
+    def _nominalize_twins(self, env_ids=None):
+        """Hold the nominal twins at nominal domain values.
+
+        Written as a restore *after* each sampler rather than a mask threaded
+        *through* every sampler.  There are ten randomisation sites across two
+        files and three of them run only during _create_envs; a mask has to be
+        added at each one and silently does nothing if a new site is added
+        later.  A restore cannot miss a site the same way -- anything it does
+        not cover shows up directly as the twin's parameter differing from
+        nominal, which is what ``--check r5`` asserts.
+
+        The nominal values are exactly the initialisation defaults in
+        _init_custom_buffers__; this method and that one have to agree.
+        """
+        if not self._grouping_active():
+            return
+        twins = self.is_nominal_twin
+        if env_ids is not None:
+            selected = torch.zeros_like(twins)
+            selected[env_ids] = True
+            twins = twins & selected
+        if not torch.any(twins):
+            return
+        self.friction_coeffs[twins] = self.default_friction
+        self.restitutions[twins] = self.default_restitution
+        self.payloads[twins] = 0.0
+        self.com_displacements[twins] = 0.0
+        self.motor_strengths[twins] = 1.0
+        self.motor_offsets[twins] = 0.0
+        self.Kp_factors[twins] = 1.0
+        self.Kd_factors[twins] = 1.0
+        self.dof_frictions[twins] = self.default_dof_frictions
+        self.dof_dampings[twins] = self.default_dof_dampings
+        self._arm_nominalize_twins_hook(twins)
+
     def _randomize_gravity(self, external_force=None):
 
         if external_force is not None:
@@ -1400,6 +1495,43 @@ class LeggedRobot(BaseTask):
         )
         extras["perf_early_termination_rate"] = mean_valid((~timeouts).float())
         extras["perf_episode_duration_s"] = mean_valid(steps * self.dt)
+
+        # R5 health.  Two numbers, and the second is the one to watch.
+        #
+        # perf_group_desync_fraction is how much of an episode the consistency
+        # term is switched off for.  It is driven by falls, so early in training
+        # it is near 1 and R5 is effectively absent; it has to come down before
+        # the term means anything, which makes it the gate for R8's stage 3 in
+        # the same way perf_phase_variance_raw is.
+        #
+        # perf_twin_early_termination_rate is the twin's own fall rate.  R5
+        # points out that this doubles as a training-health monitor: the twin
+        # runs the easiest domain in its group, so if the twin is falling, the
+        # problem is the policy, not the randomisation.
+        if self._grouping_active():
+            # Instantaneous population fraction, NOT an episode average.  The
+            # episode-averaged version is biased by exactly what it measures: a
+            # fall zeroes that env's accumulator, so the envs whose groups spend
+            # the most time desynchronised are the ones contributing the
+            # shortest episodes.  Measured, it read 0.03 while the policy was
+            # falling almost every episode.
+            scoreable = self.grouping.is_grouped & ~self.is_nominal_twin
+            extras["perf_group_desync_fraction"] = (
+                1.0 - self.grouping.valid[scoreable].mean()
+                if bool(scoreable.any())
+                else torch.zeros((), device=self.device)
+            )
+            # Guarded, like the R6 metrics above and for the same reason: twins
+            # are one env in four, so most reset batches contain none and an
+            # unguarded write puts a 0 into the average.  Measured, that made
+            # the twin's fall rate read 0.0000 against a population rate of 0.6
+            # -- a number that looks like great news and means nothing.
+            twin = finished & self.is_nominal_twin[train_env_ids]
+            if torch.any(twin):
+                extras["perf_twin_episode_count"] = twin.float().sum()
+                extras["perf_twin_early_termination_rate"] = self._mean_valid_metric(
+                    (~timeouts).float(), twin
+                )
         self._arm_log_performance_metrics_hook(train_env_ids, steps)
 
     def _init_reset_curriculum(self):
@@ -1553,6 +1685,17 @@ class LeggedRobot(BaseTask):
         new_commands, new_bin_inds = curriculum.sample(batch_size=len(env_ids))
         new_commands = torch.as_tensor(new_commands, dtype=self.commands_dog.dtype, device=self.device)
 
+        # R5: one draw per GROUP, not per env.  Every random choice below has to
+        # go through this same remap -- the curriculum draw, its bin, and the
+        # "10% of envs stand still" coin -- or the group's command vectors differ
+        # and every cross-domain comparison in the group is comparing two
+        # different tasks.  The deterministic parts (the 0.07 m/s deadband, the
+        # standing gait-frequency rule) follow the command and need no remap.
+        take = self._group_source_rows(env_ids)
+        if take is not None:
+            new_commands = new_commands[take]
+            new_bin_inds = new_bin_inds[take.cpu().numpy()]
+
         self.env_command_bins[env_ids.cpu().numpy()] = new_bin_inds
         self.env_command_categories[env_ids.cpu().numpy()] = 0
 
@@ -1562,6 +1705,8 @@ class LeggedRobot(BaseTask):
             self.commands_dog[env_ids, 2] = new_commands[:, 2]
 
         zero_mask = torch.rand(len(env_ids), device=self.device) < 0.1
+        if take is not None:
+            zero_mask = zero_mask[take]
         if not arm_controls_commands and len(zero_mask.nonzero()) > 0:
             self.commands_dog[env_ids[zero_mask], :3] = 0
 
@@ -1581,6 +1726,8 @@ class LeggedRobot(BaseTask):
                 # self.commands_dog[env_ids[zero_env_ids], :3] = 0
 
                 zero_mask = torch.rand(len(env_ids), device=self.device) < 0.1
+                if take is not None:
+                    zero_mask = zero_mask[take]
                 if len(zero_mask.nonzero()) > 0:
                     self.commands_dog[env_ids[zero_mask], :3] = 0
 
@@ -1617,6 +1764,67 @@ class LeggedRobot(BaseTask):
         for key in self.command_sums.keys():
             self.command_sums[key][env_ids] = 0.0
 
+    def _group_source_rows(self, env_ids):
+        """Row remap that turns a per-env draw into one draw per group.
+
+        Returns an index into ``env_ids`` such that every grouped env takes the
+        row its twin drew, or ``None`` when nothing is grouped.  Envs whose twin
+        is not in this batch keep their own row -- that only happens on a
+        partial-group resample, which the group clock does not produce, but
+        falling back to the env's own draw is the safe answer if it ever does.
+        """
+        if not self._grouping_active() or env_ids.numel() == 0:
+            return None
+        position = torch.full(
+            (self.num_envs,), -1, dtype=torch.long, device=self.device
+        )
+        position[env_ids] = torch.arange(env_ids.numel(), device=self.device)
+        source = position[self.grouping.twin_of[env_ids]]
+        own = torch.arange(env_ids.numel(), device=self.device)
+        return torch.where(source >= 0, source, own)
+
+    def _sync_groups(self, group_ids):
+        """Re-establish a group's shared gait phase and clear its desync flag.
+
+        R5 invariant: "the phase clocks within a group must be synchronised --
+        once the phase drifts apart the cross-domain comparison is meaningless".
+        The residual model is indexed by phase bin, so two envs a half cycle
+        apart are being asked to match oscillations that are, correctly,
+        opposite in sign.
+        """
+        if group_ids.numel() == 0:
+            return
+        env_ids = self.grouping.envs_of_groups(group_ids)
+        self.gait_indices[env_ids] = self.gait_indices[self.grouping.twin_of[env_ids]]
+        self.grouping.resync(group_ids)
+
+    def _adopt_group_commands(self, env_ids):
+        """Reset path for a grouped env: take the group's command, don't draw one.
+
+        This is the substantive change to ``_resample_commands``' semantics that
+        R5 forces.  An env that fell mid-window would otherwise draw a fresh
+        command and immediately break the one thing its group exists to hold
+        constant.  It adopts the twin's current command instead, and the group
+        is marked desynchronised so its consistency term stays off until the
+        next shared resample restores the phase too.
+
+        No curriculum interaction: the env keeps the group's bin, and scoring it
+        here would credit a bin for an episode that ended in a fall partway
+        through someone else's window.
+        """
+        if env_ids.numel() == 0:
+            return
+        source = self.grouping.twin_of[env_ids]
+        self.commands_dog[env_ids] = self.commands_dog[source]
+        self.env_command_bins[env_ids.cpu().numpy()] = self.env_command_bins[
+            source.cpu().numpy()
+        ]
+        self.env_command_categories[env_ids.cpu().numpy()] = 0
+        self.steps_since_command_change[env_ids] = 0.0
+        for key in self.command_sums.keys():
+            self.command_sums[key][env_ids] = 0.0
+        self.grouping.mark_desync(env_ids)
+
     def _init_command_distribution(self, env_ids):
         # new style curriculum
         self.category_names = ["trot"]
@@ -1642,20 +1850,47 @@ class LeggedRobot(BaseTask):
 
         # resample commands
         sample_interval = int(self.cfg.commands.resampling_time / self.dt)
-        due = self.episode_length_buf % sample_interval == 0
-        # R6: identification envs keep the baseline they were reset with for the
-        # whole episode.  A mid-episode resample would step the four passive
-        # channels in the middle of a chirp, which is precisely the disturbance
-        # that makes the resulting record un-identifiable as SISO.  They still
-        # resample on reset, via reset_idx().
-        env_ids = (due & ~self.is_identification_env).nonzero(as_tuple=False).flatten()
+        # R5: grouped envs resample on the GROUP clock, ungrouped ones on their
+        # own episode counter.  Both paths end in _resample_commands; what
+        # differs is who decides when.
+        #
+        # R6 rides on the same mechanism.  An identification group needs its
+        # four passive channels to hold still for a whole excitation plan --
+        # stepping them mid-chirp is exactly the disturbance that makes the
+        # record un-identifiable as SISO -- so it gets a LONGER period rather
+        # than having its resample suppressed.  Suppression was the first
+        # implementation and it was wrong: once R5 made a reset env adopt its
+        # twin's command, an identification group whose twin was also suppressed
+        # never drew a command at all and sat at zeros for the whole run.
+        due = (
+            (self.episode_length_buf % sample_interval == 0)
+            & ~self.grouping.is_grouped
+            & ~self.is_identification_env
+        )
+        due_groups = self.grouping.groups_due(self.group_resample_interval)
+        if due_groups.numel() > 0:
+            due[self.grouping.envs_of_groups(due_groups)] = True
+        env_ids = due.nonzero(as_tuple=False).flatten()
         self._resample_commands(env_ids)
+        # Phase sync and the desync clear come after the commands, because
+        # _resample_commands is what re-establishes the shared command vector.
+        # Note this runs for identification groups too, which are filtered out
+        # of env_ids above: they must not have their commands stepped
+        # mid-episode (R6), but they still need their phase clocks realigned
+        # (R5), and the two requirements are independent.
+        if due_groups.numel() > 0:
+            self._sync_groups(due_groups)
 
         # Excitation is written after the resample and before anything reads the
         # commands, so the excited channel wins over the baseline draw.
         excitation_jumped = self.response_excitation.step(self.commands_dog)
         self.steps_since_command_change[excitation_jumped] = 0.0
         self.performance_metric_sums["excitation_jumps"] += excitation_jumped.float()
+
+        # Check-then-advance: see EnvGrouping's clock contract.  Advancing here
+        # rather than beside episode_length_buf is what makes every group due on
+        # its first step instead of holding zeros for a full interval.
+        self.grouping.advance()
 
         self._step_contact_targets()
 
@@ -2141,6 +2376,12 @@ class LeggedRobot(BaseTask):
             # Eval envs are the tail of the full range; the identification block
             # is the tail of the TRAINING range so the two never overlap.
             pool_envs=self.num_train_envs,
+            # R5 x R6: the identification block must be a whole number of
+            # groups, and every env in a group must see the same excitation --
+            # otherwise "one command vector per group" is false for exactly the
+            # groups whose commands are most interesting.
+            block_multiple=self.grouping.group_size if self._grouping_active() else 1,
+            share_with=self.grouping.twin_of if self._grouping_active() else None,
             env_fraction=(
                 float(excitation_cfg.env_fraction) if bool(excitation_cfg.enabled) else 0.0
             ),
@@ -2154,6 +2395,23 @@ class LeggedRobot(BaseTask):
             device=self.device,
         )
         self.is_identification_env = self.response_excitation.is_identification
+        # Per-group resample period.  The identification groups get the
+        # excitation plan's own period so a plan is never cut in half by a
+        # command step; everyone else gets commands.resampling_time.
+        sample_interval = int(self.cfg.commands.resampling_time / self.dt)
+        identification_interval = max(
+            sample_interval,
+            int(round(float(excitation_cfg.chirp_duration_s) / self.dt)),
+        )
+        self.group_resample_interval = torch.full(
+            (self.grouping.num_groups,), sample_interval, dtype=torch.long, device=self.device
+        )
+        if self._grouping_active() and self.response_excitation.active:
+            twins = self.grouping.is_twin.nonzero(as_tuple=False).flatten()
+            identification_groups = self.grouping.group_of[
+                twins[self.is_identification_env[twins]]
+            ]
+            self.group_resample_interval[identification_groups] = identification_interval
         self.rew_buf_dog = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
         self.rew_buf_pos_dog = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
         self.rew_buf_neg_dog = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
@@ -2598,6 +2856,15 @@ class LeggedRobot(BaseTask):
         self.default_restitution = rigid_shape_props_asset[1].restitution
         self._init_custom_buffers__()
         self._randomize_rigid_body_props(torch.arange(self.num_envs, device=self.device), self.cfg)
+        # R5: the twins have to be nominal BEFORE the actor loop below, because
+        # _process_rigid_shape_props and _process_rigid_body_props read
+        # friction/restitution/payload per env as each actor is created and
+        # those values are never revisited (randomize_rigids_after_start is off).
+        self._ensure_grouping()
+        self._nominalize_twins()
+        self.arm_mount_bucket_of_env = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
         self._randomize_gravity()
 
         for i in range(self.num_envs):
@@ -2617,6 +2884,15 @@ class LeggedRobot(BaseTask):
 
             bucket_index = i % self.asset_bucket_cycle_length if self.asset_bucket_cycle_length > 0 else i
             bucket_id = bucket_index % len(self.robot_assets)
+            # R5: bucket 0 is the deterministic nominal mount TF (its position
+            # and rpy offsets are forced to zero when the buckets are built), so
+            # the twin takes it regardless of where the cycle would land.
+            if self._is_nominal_twin_env(i):
+                bucket_id = 0
+            # Recorded because this is a create-time choice that can never be
+            # revisited, which makes it the one twin property an assertion
+            # cannot reconstruct after the fact.
+            self.arm_mount_bucket_of_env[i] = bucket_id
             robot_asset = self.robot_assets[bucket_id]
             rigid_shape_props = self._process_rigid_shape_props(rigid_shape_props_asset, i)
             self.gym.set_asset_rigid_shape_properties(robot_asset, rigid_shape_props)
