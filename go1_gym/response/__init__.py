@@ -26,6 +26,13 @@ from .command_layout import (
     SEMI_FREE_CMD_INDEX,
     assert_partition_is_complete,
 )
+from .calibration import (
+    DEFAULT_TARGET_DISCRIMINATION,
+    SigmaCalibration,
+    calibrate_channels,
+    calibrate_sigma,
+    discrimination_for_sigma,
+)
 from .residual import PhaseResidualEstimator
 from .reference import (
     DEFAULT_CHANNELS,
@@ -50,6 +57,11 @@ __all__ = [
     "DEFAULT_CHANNELS",
     "ChannelSpec",
     "PhaseResidualEstimator",
+    "DEFAULT_TARGET_DISCRIMINATION",
+    "SigmaCalibration",
+    "calibrate_channels",
+    "calibrate_sigma",
+    "discrimination_for_sigma",
     "ReferenceModel",
     "build_channels",
     "critically_damped_step_response",

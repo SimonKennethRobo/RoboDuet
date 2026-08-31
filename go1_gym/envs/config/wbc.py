@@ -219,6 +219,37 @@ COMMON_OVERRIDES = {
     # namespace shared by pretrained-dog and WBC reward tables alike (see
     # LeggedRobot._prepare_reward_function's pretrained -> wbc fallback merge)
     "rewards.terminal_body_height": 0.17,
+    # ---- R4.4: keep the instantaneous posture terms, down-weighted to 15% ----
+    # NOT deleted. They guard a real failure mode: a policy can swing the body
+    # violently inside a gait cycle and still look correct to R4.1, which sees
+    # only the detrended (oscillation-removed) signal.
+    #   orientation_control  -5.0 -> -0.75   (pitch/roll attitude)
+    #   jump                 10.0 ->  1.5    (body height, despite the name)
+    "reward_scales.orientation_control": -0.75,
+    "reward_scales.jump": 1.5,
+    # ---- R4.1/4.2/4.3 -------------------------------------------------------
+    # ref_tracking is the task term (positive -> multiplies); the other two are
+    # aux factors (negative -> attenuate). Weights are set from measured term
+    # magnitudes; see docs/rlmpc-v3-r0-plan.md.
+    "reward_scales.ref_tracking": 2.0,
+    # OFF until R8's stage-3 ramp exists. This is not caution, it is measured:
+    # enabling them at their end-of-ramp weight from iteration 0 destroys the
+    # reward signal. Against a TRAINED policy the raw phase-variance term is
+    # 0.0036; against a from-scratch policy it is 0.34 -- 95x larger -- and at
+    # weight -20 that puts the exponent at -6.8 to -8.6, multiplying the whole
+    # reward by ~1e-3. That is exactly the "consistency reward is a constant
+    # negative floor" failure the requirements document lists, and it is why R8
+    # mandates a slow ramp rather than a switch.
+    #
+    # Note the R3 convergence gate does NOT protect against this: it opens after
+    # ~45 visits per phase bin, a few seconds of walking, long before the policy
+    # is any good. It guards an unconverged ESTIMATE, not an untrained POLICY.
+    #
+    # End-of-ramp targets, from the measured magnitudes (weight =
+    # -ln(attenuation) / mean_term_value, ~10% attenuation against a trained
+    # policy): phase_variance -20.0, steady_gain -0.5.
+    "reward_scales.phase_variance": 0.0,
+    "reward_scales.steady_gain": 0.0,
     "reward_scales.loco_energy": -0.00004,
     # domain randomization: base & mount
     "domain_rand.dog_obs_frame_drop_prob": 0.0,
@@ -619,6 +650,42 @@ RESPONSE_MODEL_OVERRIDES = {
     # Steps after a reset during which samples are discarded and the low-pass is
     # snapped: the robot is still settling and the filter holds a stale level.
     "response.residual.warmup_steps": 25,
+    # ---- R4: reward terms ---------------------------------------------------
+    # sigma is CALIBRATED, never guessed: scripts/calibrate_reward_sigma.py
+    # solves for the value that makes an "omega_n doubled" candidate differ from
+    # the reference by 45% of the largest achievable integrated-reward gap.
+    # Re-run it whenever omega_n, rate_limit or the command ranges change.
+    "response.reward.sigma": {
+        "vx": 0.1546, "vy": 0.0870, "wyaw": 0.2883, "height": 0.0921, "pitch": 0.1152,
+    },
+    "response.reward.channel_weights": {
+        "vx": 1.0, "vy": 1.0, "wyaw": 1.0, "height": 1.0, "pitch": 1.0,
+    },
+    # Step size each channel is calibrated at: the half-width of its sampling
+    # range. Kept in config so the calibration script and the training run
+    # cannot disagree about what "a representative step" means.
+    "response.reward.calibration_amplitudes": {
+        "vx": 0.5, "vy": 0.3, "wyaw": 1.0, "height": 0.25, "pitch": 0.4,
+    },
+    # R4.2 is not counted for 2/omega_n after a command step, R4.3 not for
+    # 3/omega_n. Per channel, because omega_n differs -- pitch is deliberately
+    # the slowest and therefore stays masked longest.
+    "response.reward.phase_variance_settle_factor": 2.0,
+    "response.reward.steady_gain_settle_factor": 3.0,
+    # R4.1's soft target: consistency is dropped for this long after a large
+    # disturbance or a bad slip, so the policy is never asked to trade stability
+    # for predictability.
+    "response.reward.soft_gate_hold_s": 0.5,
+    # Tail thresholds, not typical values. Each trigger holds the gate shut for
+    # 25 steps, so a trigger firing on x% of steps shuts the gate for ~25x% of
+    # the time -- measured: a 0.5 m/s slip threshold fires on 2.05% of steps and
+    # ends up shutting the gate 36% of the time, which would leave the
+    # consistency term inactive most of the time. Measured slip percentiles
+    # while walking: p50 0.057, p90 0.139, p99 0.740, p99.9 1.626 m/s (the tail
+    # is touchdown/liftoff transients, not real slipping), and horizontal
+    # acceleration p99.9 9.6 m/s^2.
+    "response.reward.soft_gate_slip_speed": 1.5,
+    "response.reward.soft_gate_accel": 20.0,
 }
 
 

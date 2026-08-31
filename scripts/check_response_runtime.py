@@ -309,12 +309,97 @@ def check_r3(env, cfg, policy_path, seconds=60.0, held_speed=0.5):
 
 
 # ---------------------------------------------------------------------------
+# R4
+# ---------------------------------------------------------------------------
+
+
+def check_r4(env, cfg, policy_path, seconds=40.0):
+    """Report the raw magnitude of each R4 term and how the gate behaves.
+
+    Weights for the two penalties cannot be guessed: the total reward is
+    ``positive * exp(negative / sigma_rew_neg)``, and because the reward scales
+    are multiplied by dt (0.02) while sigma_rew_neg is also 0.02, a penalty's
+    configured weight IS its coefficient in the exponent.  So the weight that
+    produces a given attenuation is ``-ln(attenuation) / mean_term_value``, and
+    that needs the measured term value.
+    """
+    base = env.env
+    policy = load_dog_policy(policy_path, cfg, base.device)
+    container = base.reward_container
+
+    env.reset()
+    _, arm_a = zero_actions(env, cfg)
+    totals = {"ref_tracking": 0.0, "phase_variance": 0.0, "steady_gain": 0.0}
+    gate_shut = 0.0
+    slip_samples, accel_samples = [], []
+    steps = int(seconds / base.dt)
+    reward_cfg = cfg.response.reward
+    with torch.no_grad():
+        for _ in range(steps):
+            observations = env.get_dog_observations()
+            actions = policy.act_inference({"obs_history": observations["obs_history"]})
+            previous = base.prev_base_lin_vel.clone()
+            env.step(actions, arm_a)
+            totals["ref_tracking"] += container._reward_ref_tracking().mean().item()
+            totals["phase_variance"] += container._reward_phase_variance().mean().item()
+            totals["steady_gain"] += container._reward_steady_gain().mean().item()
+            gate_shut += (base.response_soft_gate == 0).float().mean().item()
+            # Recompute the two trigger quantities so their distributions can be
+            # inspected; the gate itself only exposes the combined result.
+            contact = (base.contact_forces[:, base.feet_indices, 2] > 1.0).float()
+            slip = torch.norm(base.foot_velocities[:, :, :2], dim=-1)
+            slip_samples.append(
+                ((slip * contact).sum(-1) / torch.clamp(contact.sum(-1), min=1.0)).cpu()
+            )
+            accel_samples.append(
+                torch.norm((base.base_lin_vel[:, :2] - previous[:, :2]) / base.dt, dim=-1).cpu()
+            )
+    for key in totals:
+        totals[key] /= steps
+
+    slip = torch.cat(slip_samples)
+    accel = torch.cat(accel_samples)
+    print(f"  {seconds:.0f}s rollout, {cfg.env.num_envs} envs")
+    print(f"  soft gate shut for {gate_shut / steps:.1%} of samples "
+          f"(hold {base.soft_gate_hold_steps} steps)")
+    print(f"\n  {'trigger':<22}{'p50':>9}{'p90':>9}{'p99':>9}{'p99.9':>9}"
+          f"{'threshold':>11}{'fires':>8}")
+    for name, values, threshold in (
+        ("mean contact slip m/s", slip, float(reward_cfg.soft_gate_slip_speed)),
+        ("horiz accel m/s^2", accel, float(reward_cfg.soft_gate_accel)),
+    ):
+        quantiles = torch.quantile(values, torch.tensor([0.5, 0.9, 0.99, 0.999]))
+        rate = (values > threshold).float().mean().item()
+        print(f"  {name:<22}{quantiles[0]:>9.3f}{quantiles[1]:>9.3f}{quantiles[2]:>9.3f}"
+              f"{quantiles[3]:>9.3f}{threshold:>11.2f}{rate:>7.2%}")
+    print(f"\n  {'term':<18}{'mean raw':>12}{'sign':>7}   weight for 5% / 10% / 20% attenuation")
+    for name, value in totals.items():
+        if name == "ref_tracking":
+            print(f"  {name:<18}{value:>12.4f}{'+':>7}   (task term, positive)")
+            continue
+        weights = [f"{-math.log(1 - a) / max(value, 1e-12):7.1f}" for a in (0.05, 0.10, 0.20)]
+        print(f"  {name:<18}{value:>12.6f}{'-':>7}   " + " ".join(weights))
+
+    failures = []
+    if totals["ref_tracking"] <= 0.0:
+        failures.append("reference-tracking reward is identically zero")
+    gate_rate = gate_shut / steps
+    if gate_rate > 0.15:
+        failures.append(
+            f"soft gate is shut {gate_rate:.1%} of the time -- thresholds are too "
+            "sensitive; remember each trigger holds it for 25 steps, so a trigger "
+            "firing on x% of steps shuts the gate for ~25x% of the time"
+        )
+    return failures
+
+
+# ---------------------------------------------------------------------------
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--check", default="all", choices=["r1", "r2", "r3", "all"])
+    parser.add_argument("--check", default="all", choices=["r1", "r2", "r3", "r4", "all"])
     parser.add_argument("--num_envs", type=int, default=64)
     parser.add_argument("--sim_device", type=str, default="cuda:0")
     parser.add_argument("--robot", type=str, default="go2_x5")
@@ -324,7 +409,7 @@ def main():
     args = parser.parse_args()
 
     env, cfg = build_env(args.num_envs, args.sim_device, args.robot)
-    wanted = ["r1", "r2", "r3"] if args.check == "all" else [args.check]
+    wanted = ["r1", "r2", "r3", "r4"] if args.check == "all" else [args.check]
 
     results = {}
     for name in wanted:
@@ -340,6 +425,11 @@ def main():
             if not os.path.exists(args.policy):
                 raise SystemExit(f"checkpoint not found: {args.policy}")
             results[name] = check_r3(env, cfg, args.policy, seconds=args.seconds)
+        elif name == "r4":
+            if not args.policy:
+                print("  skipped: needs a walking policy, pass --policy <ckpt.pt>")
+                continue
+            results[name] = check_r4(env, cfg, args.policy)
 
     print("\n=== summary ===")
     failed = False

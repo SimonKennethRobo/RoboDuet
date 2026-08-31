@@ -165,8 +165,13 @@ class PhaseResidualEstimator:
         speed_bin: torch.Tensor,
         phase_bin: torch.Tensor,
         active: Optional[torch.Tensor] = None,
-    ) -> None:
-        """Advance the estimate by one step.
+    ) -> torch.Tensor:
+        """Advance the estimate by one step and return the residual it used.
+
+        The returned ``y - y_lp`` is what R4.2 compares against ``delta_hat``.
+        Returning it rather than letting the caller recompute keeps the two
+        exactly consistent -- recomputing on either side of this call would use
+        a different ``y_lp`` and quietly bias the comparison.
 
         ``active`` marks environments whose sample is meaningful.  Where it is
         false the low-pass is *snapped* to the measurement and ``delta_hat`` is
@@ -197,6 +202,7 @@ class PhaseResidualEstimator:
         blended = current + self.estimate_alpha * (residual - current)
         flat_delta[self._env_index, index] = torch.where(active_c, blended, current)
         flat_count[self._env_index, index] = flat_count[self._env_index, index] + active.to(self.dtype)
+        return residual
 
     # ------------------------------------------------------------------ misc
 

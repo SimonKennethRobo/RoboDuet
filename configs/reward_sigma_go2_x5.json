@@ -1,0 +1,54 @@
+{
+  "target_discrimination": 0.45,
+  "faster_multiple": 2.0,
+  "window_factor": 4.0,
+  "dt": 0.02,
+  "robot": "go2_x5",
+  "channels": {
+    "vx": {
+      "sigma": 0.15462936373173847,
+      "omega_n": 8.0,
+      "rate_limit": 1.2,
+      "amplitude": 0.5,
+      "window_s": 0.5,
+      "peak_gap": 0.18756406902251246,
+      "discrimination": 0.4500006937901225
+    },
+    "vy": {
+      "sigma": 0.08702935035439645,
+      "omega_n": 6.0,
+      "rate_limit": 0.8,
+      "amplitude": 0.3,
+      "window_s": 0.6666666666666666,
+      "peak_gap": 0.10809025541638143,
+      "discrimination": 0.4500002675252933
+    },
+    "wyaw": {
+      "sigma": 0.28833173221372294,
+      "omega_n": 8.0,
+      "rate_limit": 3.0,
+      "amplitude": 1.0,
+      "window_s": 0.5,
+      "peak_gap": 0.36030085138793755,
+      "discrimination": 0.45000032153360037
+    },
+    "height": {
+      "sigma": 0.09208585362429775,
+      "omega_n": 7.0,
+      "rate_limit": 0.25,
+      "amplitude": 0.25,
+      "window_s": 0.5714285714285714,
+      "peak_gap": 0.10898577774603092,
+      "discrimination": 0.4500012855456957
+    },
+    "pitch": {
+      "sigma": 0.11519524680619961,
+      "omega_n": 5.0,
+      "rate_limit": 0.8,
+      "amplitude": 0.4,
+      "window_s": 0.8,
+      "peak_gap": 0.14430179019361147,
+      "discrimination": 0.4499996120806705
+    }
+  }
+}

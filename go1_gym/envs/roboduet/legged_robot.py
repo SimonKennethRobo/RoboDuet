@@ -32,6 +32,12 @@ from go1_gym.response import (
     ReferenceModel,
     build_channels,
 )
+from go1_gym.response.reward_terms import (
+    phase_variance,
+    settled_mask,
+    soft_gate_from_events,
+    steady_gain,
+)
 from go1_gym.utils import global_switch, quaternion_to_rpy
 from go1_gym.utils.math_utils import get_scale_shift, quat_apply_yaw
 from go1_gym.utils.terrain import Terrain
@@ -458,6 +464,8 @@ class LeggedRobot(BaseTask):
         # measurement buffers here still hold pre-reset values -- they are
         # refreshed at the top of the next post_physics_step().
         self.response_ref.request_alignment(env_ids)
+        self.response_soft_gate_timer[env_ids] = 0.0
+        self.prev_base_lin_vel[env_ids] = 0.0
         self.feet_air_time[env_ids] = 0.0
         self.episode_length_buf[env_ids] = 0
         self.reset_buf[env_ids] = 1
@@ -816,6 +824,35 @@ class LeggedRobot(BaseTask):
             dim=-1,
         )
 
+    def _update_response_soft_gate(self):
+        """R4.1's soft target: drop consistency while recovering from a hit.
+
+        Response consistency is a soft objective -- under a large disturbance the
+        policy must be free to prioritise staying upright. Two triggers, both
+        read from quantities the env already computes:
+
+        * a bad slip, measured as the mean horizontal speed of the feet that are
+          actually in contact;
+        * a large body acceleration, which is what an external push looks like
+          from the base.
+        """
+        reward_cfg = self.cfg.response.reward
+        contact = (self.contact_forces[:, self.feet_indices, 2] > 1.0).float()
+        slip_speed = torch.norm(self.foot_velocities[:, :, :2], dim=-1)
+        mean_slip = (slip_speed * contact).sum(dim=-1) / torch.clamp(contact.sum(dim=-1), min=1.0)
+
+        acceleration = torch.norm(
+            (self.base_lin_vel[:, :2] - self.prev_base_lin_vel[:, :2]) / self.dt, dim=-1
+        )
+        triggered = (mean_slip > float(reward_cfg.soft_gate_slip_speed)) | (
+            acceleration > float(reward_cfg.soft_gate_accel)
+        )
+        self.response_soft_gate_timer = soft_gate_from_events(
+            self.response_soft_gate_timer, triggered, self.soft_gate_hold_steps
+        )
+        self.response_soft_gate = (self.response_soft_gate_timer == 0).float()
+        self.prev_base_lin_vel[:] = self.base_lin_vel
+
     def _residual_sample_active(self):
         """Environments whose current sample may enter the residual estimate.
 
@@ -867,9 +904,23 @@ class LeggedRobot(BaseTask):
         # nothing useful for a freshly reset env, and it is a one-off snap.
         self.response_ref.step(commands, measured=self.response_measured)
 
-        # UPDATE path last.
-        self.response_residual.update(
+        # UPDATE path last. It returns the residual it folded in, so R4.2's
+        # oscillation and the estimate it is compared against are guaranteed to
+        # be built from the same low-pass state.
+        self.response_oscillation = self.response_residual.update(
             self.response_measured, speed_bin, phase_bin, active=self._residual_sample_active()
+        )
+        self.response_delta_hat = self.response_measured - self.response_detrended
+
+        self.steps_since_command_change += 1.0
+        self._update_response_soft_gate()
+        converged = self.response_residual_converged.unsqueeze(-1).float()
+        self.response_phase_variance_mask = (
+            settled_mask(self.steps_since_command_change, self.phase_variance_settle_steps)
+            * converged
+        )
+        self.response_steady_gain_mask = settled_mask(
+            self.steps_since_command_change, self.steady_gain_settle_steps
         )
 
     def compute_reward(self):
@@ -1166,6 +1217,8 @@ class LeggedRobot(BaseTask):
             "locomotion_power_sum",
             *(f"ref_abs_err_{name}" for name in self.response_ref.channel_names),
             *(f"ref_abs_err_detrended_{name}" for name in self.response_ref.channel_names),
+            "phase_variance_raw",
+            "steady_gain_raw",
         )
         self.performance_metric_sums = {
             name: torch.zeros(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
@@ -1225,6 +1278,23 @@ class LeggedRobot(BaseTask):
             sums[f"ref_abs_err_{name}"] += ref_abs_err[:, index]
             sums[f"ref_abs_err_detrended_{name}"] += ref_abs_err_detrended[:, index]
 
+        # R4.2 / R4.3 raw magnitudes, logged whatever their reward scale is --
+        # including 0. Their scale cannot be chosen without these numbers, and
+        # they are 95x larger for an untrained policy than a trained one, so
+        # watching them is how the R8 ramp gets timed.
+        sums["phase_variance_raw"] += phase_variance(
+            self.response_oscillation,
+            self.response_delta_hat,
+            self.response_channel_weights,
+            mask=self.response_phase_variance_mask,
+        )
+        sums["steady_gain_raw"] += steady_gain(
+            self.response_detrended,
+            self.response_ref.gather_commands(self.commands_dog),
+            self.response_channel_weights,
+            mask=self.response_steady_gain_mask,
+        )
+
         self._arm_update_performance_metrics_hook()
 
     @staticmethod
@@ -1275,6 +1345,11 @@ class LeggedRobot(BaseTask):
             extras[f"perf_ref_mae_detrended_{name}{suffix}"] = mean_valid(
                 episode_mean(f"ref_abs_err_detrended_{name}")
             )
+        extras["perf_phase_variance_raw"] = mean_valid(episode_mean("phase_variance_raw"))
+        extras["perf_steady_gain_raw"] = mean_valid(episode_mean("steady_gain_raw"))
+        extras["perf_soft_gate_open_fraction"] = mean_valid(
+            torch.full_like(steps, float(self.response_soft_gate.mean()))
+        )
         extras["perf_early_termination_rate"] = mean_valid((~timeouts).float())
         extras["perf_episode_duration_s"] = mean_valid(steps * self.dt)
         self._arm_log_performance_metrics_hook(train_env_ids, steps)
@@ -1474,6 +1549,10 @@ class LeggedRobot(BaseTask):
             standing_mask = torch.norm(self.commands_dog[env_ids, :3], dim=1) < 0.1
             if len(standing_mask.nonzero()) > 0:
                 self.commands_dog[env_ids[standing_mask], 6] = 0.0
+
+        # R4.2 / R4.3 are masked relative to the last command step, so the
+        # counter has to be zeroed wherever commands actually change.
+        self.steps_since_command_change[env_ids] = 0.0
 
         # reset command sums
         for key in self.command_sums.keys():
@@ -1930,6 +2009,37 @@ class LeggedRobot(BaseTask):
         # oscillation. Feeds two things that must not share a data path -- the
         # zero-delay detrend the tracking rewards need, and the target the
         # phase-variance penalty compares against.
+        reward_cfg = self.cfg.response.reward
+        names = self.response_ref.channel_names
+
+        def _row(mapping):
+            return torch.tensor(
+                [float(mapping[name]) for name in names], device=self.device, dtype=torch.float
+            ).unsqueeze(0)
+
+        self.response_sigma = _row(reward_cfg.sigma)
+        self.response_channel_weights = _row(reward_cfg.channel_weights)
+        # R4.2 / R4.3 are masked for 2/omega_n and 3/omega_n after a command
+        # step, per channel: omega_n differs, and pitch -- the slowest by design
+        # -- therefore stays masked longest.
+        omega_n = self.response_ref.omega_n
+        self.phase_variance_settle_steps = (
+            float(reward_cfg.phase_variance_settle_factor) / omega_n / self.dt
+        )
+        self.steady_gain_settle_steps = (
+            float(reward_cfg.steady_gain_settle_factor) / omega_n / self.dt
+        )
+        self.soft_gate_hold_steps = int(round(float(reward_cfg.soft_gate_hold_s) / self.dt))
+
+        self.steps_since_command_change = torch.zeros(
+            self.num_envs, device=self.device, dtype=torch.float
+        )
+        self.response_soft_gate_timer = torch.zeros(
+            self.num_envs, device=self.device, dtype=torch.float
+        )
+        self.response_soft_gate = torch.ones(self.num_envs, device=self.device, dtype=torch.float)
+        self.prev_base_lin_vel = torch.zeros(self.num_envs, 3, device=self.device, dtype=torch.float)
+
         residual_cfg = self.cfg.response.residual
         self.response_residual = PhaseResidualEstimator(
             num_envs=self.num_envs,

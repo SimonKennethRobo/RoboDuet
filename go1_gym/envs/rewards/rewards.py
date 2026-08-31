@@ -5,6 +5,7 @@ from go1_gym.utils.math_utils import quat_apply_yaw, wrap_to_pi, get_scale_shift
 from isaacgym.torch_utils import *
 from isaacgym import gymapi
 from go1_gym.envs.roboduet.legged_robot import LeggedRobot
+from go1_gym.response.reward_terms import phase_variance, reference_tracking, steady_gain
 
 class Rewards:
     def __init__(self, env):
@@ -78,6 +79,50 @@ class Rewards:
         # Tracking of angular velocity commands (yaw)
         ang_vel_error = torch.square(self.env.commands_dog[:, 2] - self.env.base_ang_vel[:, 2])
         return torch.exp(-ang_vel_error / self.env.cfg.rewards.tracking_sigma_yaw)
+
+    # --- R4: response-consistency terms ---------------------------------
+    # Thin wrappers; the maths and its rationale live in
+    # go1_gym/response/reward_terms.py, where they are unit-tested against
+    # synthetic trajectories.
+
+    def _reward_ref_tracking(self):
+        # R4.1, the core term. Positive, so it enters the ji22 composition as a
+        # task factor. Note it tracks the reference STATE, not the command: at
+        # t=0.1 s into a 0.4 rad step the target is 0.036 rad, so arriving early
+        # costs exactly as much as arriving late.
+        env = self.env
+        return reference_tracking(
+            env.response_detrended,
+            env.response_ref.xi,
+            env.response_sigma,
+            env.response_channel_weights,
+            gate=env.response_soft_gate,
+        )
+
+    def _reward_phase_variance(self):
+        # R4.2. Penalises the variance about the phase-conditioned mean, NOT the
+        # oscillation amplitude: a large but repeatable ripple is predictable and
+        # the arm can cancel it; a small but wandering one leaks straight through
+        # to the end effector.
+        env = self.env
+        return phase_variance(
+            env.response_oscillation,
+            env.response_delta_hat,
+            env.response_channel_weights,
+            mask=env.response_phase_variance_mask,
+        )
+
+    def _reward_steady_gain(self):
+        # R4.3. Once a command has been held long enough, compare against the
+        # COMMAND rather than the reference state, pinning the DC gain the MPC
+        # will assume to 1.
+        env = self.env
+        return steady_gain(
+            env.response_detrended,
+            env.response_ref.gather_commands(env.commands_dog),
+            env.response_channel_weights,
+            mask=env.response_steady_gain_mask,
+        )
 
     def _reward_lin_vel_z(self):
         # Penalize z axis base linear velocity
