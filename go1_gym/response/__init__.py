@@ -1,0 +1,31 @@
+"""Pure-tensor state machines for the response-consistent locomotion policy.
+
+Everything in this package is deliberately free of IsaacGym and of any
+``LeggedRobot``/``WBCEnv`` coupling: these objects hold their own tensors and
+are advanced by the env, never the other way round.  That keeps the numerical
+acceptance criteria in ``docs/project-design-rlmpc-v3-coding.md`` (R2/R3/R4)
+testable on CPU without starting a simulator.
+
+Note on placement: the R0 plan originally put this at
+``go1_gym/envs/roboduet/response.py``.  That location cannot work -- importing
+any submodule of ``go1_gym.envs.roboduet`` executes its ``__init__``, which
+imports ``wbc_env`` and therefore IsaacGym, defeating the entire reason for
+splitting these classes out.  ``go1_gym/__init__.py`` only does ``import os``,
+so this package is reachable from a bare ``torch`` environment.
+"""
+
+from .reference import (
+    DEFAULT_CHANNELS,
+    ChannelSpec,
+    ReferenceModel,
+    critically_damped_step_response,
+    validate_channels,
+)
+
+__all__ = [
+    "DEFAULT_CHANNELS",
+    "ChannelSpec",
+    "ReferenceModel",
+    "critically_damped_step_response",
+    "validate_channels",
+]

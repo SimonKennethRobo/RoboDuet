@@ -70,7 +70,7 @@ tmp
 *.tar
 resources/robots/**/urdf/*_mount_bucket_*.urdf
 
-wandb/*
+wandb
 
 benchmark/results/
 
