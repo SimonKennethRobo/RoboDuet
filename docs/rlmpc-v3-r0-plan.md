@@ -762,6 +762,125 @@ twin 一侧不回传梯度（`.detach()`，且 twin 自身该项为 0）。
 chirp env 的命令序列 FFT 覆盖 0.1–2.0 Hz；
 对比开启前后课程 `command_curriculum_weight` 的推进速度。
 
+### 实现结果（2026-08-31，已完成）
+
+新增 `go1_gym/response/excitation.py` 的 `ExcitationSampler`，
+纯 tensor、CPU 可测；env 侧只有三处挂载：
+`_init_buffers` 构造、`_resample_commands` 末尾 `plan()`、
+`_post_physics_step_callback` 中 `_resample_commands` 之后 `step()`。
+
+**辨识块取训练环境的尾部**，不是全部环境的尾部——
+本仓库把 held-out 评测环境放在 `[num_train_envs, num_envs)`，
+按全体尾部切会正好激励那些本该保持可比的环境。
+`pool_envs=num_train_envs` 是这条的唯一实现。
+
+#### 三个偏离需求文档字面的设计决定
+
+| 决定 | 理由 |
+| --- | --- |
+| **每 env 每 episode 只激励一个通道** | 下游全是 SISO（R9 的 Bode、R8.2 的逐通道 ωₙ）。多通道同时激励得到的是 MIMO 数据，用不了 |
+| **chirp 保持恒定压摆率而非恒定幅值** | 定幅扫频会把**参考模型自己**推进限幅：vx 通道 0.5 m/s @ 2 Hz 要 6.3 m/s² 对 1.2 m/s² 的限幅。扫频上半段测到的就不是带宽而是饱和。改为 `A(f)=min(A0, 0.8·ṙmax/(2πf))`。代价真实：2 Hz 处幅值只有 0.1 Hz 处的 ~15%，高频端信噪比更差 |
+| **辨识 env 关闭 episode 中段的命令重采样** | 否则 10 s 处那次重采样会在 chirp 中途阶跃另外四个通道，正是让这段记录无法当 SISO 用的那种扰动。它们仍在 reset 时重采样 |
+
+#### ⚠️ 需求文档内部不自洽：PRBS 保持区间 vs 跳变次数
+
+R6 表格要求 PRBS 切换间隔 `U(0.5, 3.0)` s，验收要求单 episode 跳变 ≥ 20。
+20 s episode 下**二者不可同时成立**：均值保持 1.75 s ⇒ 约 11.4 次。
+
+处理：**按表格实现**，实测 12.2 次（比 11.4 略高，因为第一次切换在 step 0 就发生），
+并把这个数钉进单测 `test_prbs_switch_count_matches_the_specified_hold_interval`，
+同时用 `test_narrowing_the_hold_interval_clears_twenty` 验证
+改成 `[0.5, 1.5]` 即可满足 ≥ 20——一行配置的取舍，留给使用者决定。
+chirp / ramp 每步都变，辨识组整体 660 次/episode，验收在组级别通过。
+
+#### 课程排除的实现与证据
+
+`_resample_commands` 内部按 `~is_identification_env[env_ids]` 过滤
+`curriculum.update` 的 `old_bins` 与 `task_rewards`，以及
+`_update_reset_curriculum` 的 `tracking_task_rewards`。
+过滤放在函数**内部**而非调用点：reset 路径也会把辨识 env 送进来。
+
+R6 不变量 2（课程判据不含一致性奖励）从注释升级为启动断言：
+`CURRICULUM_PROGRESS_REWARDS` 与 `CONSISTENCY_REWARDS` 两个模块级常量
+在 `_prepare_reward_function` 里检查不相交。
+
+运行期证据用 spy 记录：`curriculum.update()` 收到 145 个 env，
+同期 `_resample_commands` 收到 161 个、其中 16 个是辨识 env——精确相等。
+
+#### 性能指标按角色拆分
+
+`_log_performance_metrics` 的全部既有指标改为**只统计一致性环境**。
+辨识环境是被故意扫频的，混进去会让每条跟踪曲线在开启激励的那一刻跳变，
+从此与之前的 run 不可比——而 R8 ramp 的启动时机恰恰要靠盯
+`perf_phase_variance_raw` 的曲线转平。
+
+新增三条只统计辨识环境的：
+`perf_excitation_jumps_per_episode`（验收判据本身）、
+`perf_excitation_env_count`、
+`perf_excitation_early_termination_rate`——
+**富激励把机器人激励摔了就不是辨识数据，是摔倒**，这条是说出这件事的那个数。
+
+注：`rew_*` 仍统计全部训练环境，因为那才是优化器实际看到的信号。
+
+### 验收结果
+
+26 项新单测（全包 109 项）+ `--check r6` 真环境：
+
+```
+1100 steps x 64 envs; 16 identification (25.0%), train pool 64
+passive decision-channel moves inside a plan: 0 (must be 0)
+prbs   command jumps per 20 s episode:   12.2
+chirp  command jumps per 20 s episode: 1000.0
+ramp   command jumps per 20 s episode:  971.6
+identification group mean: 660.0
+chirp env 48 (body_height), 20.0s uninterrupted: 92.4% of spectral energy inside 0.1-2.0 Hz
+curriculum: 145 envs scored out of 161 resampled (16 of them identification)
+```
+
+#### 每步开销：实测 ~+1%（上界 2%）
+
+`ExcitationSampler.step()` 写成**无数据依赖形状**的形式：
+三种信号对全部辨识 env 都算一遍，再用 `torch.where` 选。
+显而易见的写法（`ids[signal == CHIRP]` + 每个分支一个 `numel()` 判空）
+会在**每个控制步**上产生 3 次 GPU→CPU 同步——
+远超这个版本在几百个元素的张量上多花的那点 FLOP。
+
+4096 env、600 步、交替执行各 5 次：
+
+| | mean | median | sd | min–max |
+| --- | --- | --- | --- | --- |
+| excitation off | 31.840 | 31.762 | 0.172 | 31.641–32.061 |
+| excitation on | 32.220 | 32.018 | 0.362 | 31.915–32.778 |
+
+**均值差 +0.38 ms/step（+1.2%），SE 0.18，t = 2.12**；中位数差 +0.81%。
+即 **1% 量级，上界 2%**。
+
+> ⚠️ 这个数只能给到这个精度，原因值得记下来：
+> **开启态的方差是关闭态的 2 倍**（sd 0.362 vs 0.172）。
+> 不是采样器本身抖，而是被激励的机器人在做不同的运动——
+> PhysX 的求解代价随之改变。这个 A/B 测的是「开启 R6 之后整个 env step 变贵多少」，
+> **不是「采样器本身多少开销」**，二者在这里无法分离。
+> 我最初只跑了一对就写下 +3.2%，重复实验直接推翻了它（+0.5%），
+> 单次对照在这个噪声水平上没有意义。
+
+> 顺带澄清一个容易误挂账的数：本步 200 iter 耗时 342.6 s，
+> 而 R0 基线是 287.5 s。差额落在 **learning 阶段**（0.672 s vs 基线 0.270 s），
+> 不在 collection（0.915 s vs 0.885 s）。R6 不改观测维度、网络与 batch 划分，
+> 所以这 55 s **不是 R6 的开销**；collection 侧的实际增量就是上表的 ~1%。
+
+#### 验收脚本自身的两个 bug（本步暴露并修复）
+
+1. **R6 检查按最终 plan 评估整段 rollout。** plan 在每次 reset 重抽，
+   1100 步跨多个 plan，上一个 plan 的激励通道于是被读成"变了 1000 次的被动通道"。
+   改为逐 plan 分段统计（`_longest_plan_segment`），全部指标只在
+   同一 plan + 同一 episode 内测量。
+2. **R2 的稳态增益检查只比较窗口两端。** 这是 R6 之前就存在的潜在错误：
+   当时命令只在重采样时变，端点相等实际上蕴含全程恒定。
+   chirp 命令每周期两次回到旧值而中间扫遍全带，
+   于是报出 `|ξ−u| = 0.3227` 的假失败。
+   改为用 cumsum 判定"连续 200 步无变化且无 reset"，
+   实测 24000 个合格样本、误差 0.00000。
+
 ---
 
 ## 9. R7 — 观测与适应能力
@@ -1160,7 +1279,7 @@ gait frequency、arm 状态、domain 特权参数、地形标签（v1 恒为 pla
 | 3 ✅ | 接入 `ReferenceModel`，删除一阶版本，跟踪误差进性能指标（**已完成**） | 50 项单测通过；真环境 5 通道位置增量 = ṙmax·dt、峰值速率 = 限幅、稳态增益 1.000；200 iter 无 NaN |
 | 4 ✅ | R3 残差估计 + 双路去趋势（**已完成**） | 64 项单测 + 3 项变异；真环境 δ̂ 谐波分布物理正确（vx 偶次主导、pitch h1=98%）；相位查表零延迟 vs 低通滞后 330× |
 | 5 ✅ | R4 四项 + σ 标定（**已完成**） | 83 项单测；σ 复现文档算例（t=0.1 参考 0.0361 / 激进误差 0.2015 / 奖励 0.0065）；1000 iter 无 NaN；R4.2/4.3 实测必须默认关闭 |
-| 6  | R6 富激励（先不分组）                                                | 跳变次数 ≥ 20；课程速度不退化         |
+| 6 ✅ | R6 富激励（先不分组）（**已完成**） | 109 项单测；辨识组 660 跳变/episode；chirp 带内能量 92.4%；课程 spy 精确排除 16/161；PRBS 12.2 次（文档自相矛盾，已记录） |
 | 7  | **R5 分组 + twin**（最高风险，分两步）                         | 组内命令/相位一致；失效逻辑            |
 | 8  | R7 观测（90→112）+ 历史窗口 30→50 + R7.3 的 4 条结构性约束            | obs 宽度断言通过；旧 ckpt 显式报错；历史布局连续性测试通过；`temporal_encoder` 开关就位 |
 | 9  | R8 四阶段课程 + 参考模型标定                                         | 四个 checkpoint；无步频同频波动        |

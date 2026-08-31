@@ -537,7 +537,7 @@ python scripts/auto_train.py --train_stage stage1 --dyna_gait --headless \
 | 5 | 跨域一致性用 nominal twin | ❌ 不存在，无 env 分组机制 |
 | 6 | 组内相位同步；终止不对称时失效 | ❌ 不存在 |
 | 7 | 参考模型参数取 20 分位数，姿态按相位联合分桶 | ❌ 无标定流程，`T=0.4` 是拍的 |
-| 8 | 课程判据不含一致性奖励；辨识环境排除 | ⚠️ 前半自动满足（判据写死 4 个 key）；后半无机制 |
+| 8 | 课程判据不含一致性奖励；辨识环境排除 | ✅ 已实现（R6）。前半从「自动满足」升级为启动断言（`CURRICULUM_PROGRESS_REWARDS` ∩ `CONSISTENCY_REWARDS` = ∅）；后半在 `_resample_commands` 内部按 `~is_identification_env` 过滤，运行期 spy 验证 145/161 精确排除 |
 | 9 | 崎岖地形用相对地形高度 | ⚠️ 平地下无害；`_reward_jump` 硬编码 0 是定时炸弹 |
 | 10 | 一致性奖励在乘性结构下作为 aux 因子 | ✅ 结构已就位（ji22 style） |
 | 11 | σ 由标定得出，每通道独立 | ❌ 无标定 |

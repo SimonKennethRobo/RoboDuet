@@ -23,11 +23,12 @@ import torch
 
 from go1_gym import MINI_GYM_ROOT_DIR
 from go1_gym.envs.base.base_task import BaseTask
-from go1_gym.envs.base.curriculum import command_curriculum_local_range
+from go1_gym.envs.base.curriculum import command_curriculum_bounds, command_curriculum_local_range
 from go1_gym.envs.config import ConfigNode
 from go1_gym.response import (
     DECISION_CHANNEL_UNITS,
     GAIT_FREQUENCY,
+    ExcitationSampler,
     PhaseResidualEstimator,
     ReferenceModel,
     build_channels,
@@ -41,6 +42,24 @@ from go1_gym.response.reward_terms import (
 from go1_gym.utils import global_switch, quaternion_to_rpy
 from go1_gym.utils.math_utils import get_scale_shift, quat_apply_yaw
 from go1_gym.utils.terrain import Terrain
+
+#: The reward terms the adaptive command curriculum reads as its progress
+#: signal.  R6 invariant 2: only the original tracking terms may appear here --
+#: a consistency reward in this list would let the curriculum stall at low
+#: difficulty because consistency is hard everywhere, not because the command
+#: range is too wide.
+CURRICULUM_PROGRESS_REWARDS = (
+    "tracking_lin_vel",
+    "tracking_ang_vel",
+    "tracking_contacts_shaped_force",
+    "tracking_contacts_shaped_vel",
+)
+
+#: Reward terms introduced by the response-consistency work (R4).  Asserted to
+#: be disjoint from CURRICULUM_PROGRESS_REWARDS at startup, which is the whole
+#: enforcement mechanism for the invariant above.
+CONSISTENCY_REWARDS = ("ref_tracking", "phase_variance", "steady_gain")
+
 
 class LeggedRobot(BaseTask):
     def __init__(
@@ -1219,6 +1238,7 @@ class LeggedRobot(BaseTask):
             *(f"ref_abs_err_detrended_{name}" for name in self.response_ref.channel_names),
             "phase_variance_raw",
             "steady_gain_raw",
+            "excitation_jumps",
         )
         self.performance_metric_sums = {
             name: torch.zeros(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
@@ -1304,13 +1324,41 @@ class LeggedRobot(BaseTask):
         return torch.zeros((), dtype=values.dtype, device=values.device)
 
     def _log_performance_metrics(self, train_env_ids, episode_steps, timeouts):
-        valid = episode_steps > 0
-        if not torch.any(valid):
-            return
+        # R6: every metric below is reported over the CONSISTENCY environments
+        # only.  The identification environments are being swept on purpose, so
+        # folding them in would make every tracking curve here jump the moment
+        # excitation was switched on and stop being comparable with the runs
+        # that came before it.  Their own metrics are emitted separately.
+        finished = episode_steps > 0
+        identification = self.is_identification_env[train_env_ids]
+        valid = finished & ~identification
+        excited = finished & identification
 
         steps = torch.clamp(episode_steps.float(), min=1.0)
         sums = self.performance_metric_sums
         extras = self.extras["train/episode"]
+
+        # R6 acceptance criterion, measured rather than assumed: command jumps
+        # per identification episode.  Alongside it the early-termination rate
+        # for those envs on its own -- rich excitation that makes the robot fall
+        # is not identification data, it is a fall, and this is the number that
+        # says so.
+        #
+        # Both groups are written only when that group actually finished an
+        # episode in this batch.  Emitting a 0 instead would be averaged in by
+        # the logger as if it were a measurement: with 25% of envs in
+        # identification mode, a small reset batch is all-identification often
+        # enough to drag every consistency metric down by a visible margin.
+        if torch.any(excited):
+            extras["perf_excitation_env_count"] = excited.float().sum()
+            extras["perf_excitation_jumps_per_episode"] = self._mean_valid_metric(
+                sums["excitation_jumps"][train_env_ids], excited
+            )
+            extras["perf_excitation_early_termination_rate"] = self._mean_valid_metric(
+                (~timeouts).float(), excited
+            )
+        if not torch.any(valid):
+            return
 
         def episode_mean(name):
             return sums[name][train_env_ids] / steps
@@ -1471,12 +1519,7 @@ class LeggedRobot(BaseTask):
         # update curricula based on terminated environment bins and categories
         task_rewards, success_thresholds = [], []
         tracking_task_rewards, tracking_reward_scales = {}, {}
-        for key in [
-            "tracking_lin_vel",
-            "tracking_ang_vel",
-            "tracking_contacts_shaped_force",
-            "tracking_contacts_shaped_vel",
-        ]:
+        for key in CURRICULUM_PROGRESS_REWARDS:
             if key in self.command_sums.keys():
                 task_reward = self.command_sums[key][env_ids] / ep_len
                 task_rewards.append(task_reward)
@@ -1486,15 +1529,25 @@ class LeggedRobot(BaseTask):
                     tracking_reward_scales[key] = self.pretrained_reward_scales[key]
 
         old_bins = self.env_command_bins[env_ids.cpu().numpy()]
-        if len(success_thresholds) > 0:
+        # R6 invariant: the identification environments are driven by designed
+        # excitation, not by the curriculum's samples, and their tracking reward
+        # is low BY CONSTRUCTION.  Feeding it to the adaptive curriculum would be
+        # read as "this command bin is too hard" and would ratchet the command
+        # range down for every environment, identification or not.
+        scores = ~self.is_identification_env[env_ids]
+        scored = scores.cpu().numpy()
+        if len(success_thresholds) > 0 and bool(scored.any()):
             local_range = command_curriculum_local_range(self.cfg)
             curriculum.update(
-                old_bins,
-                task_rewards,
+                old_bins[scored],
+                [reward[scores] for reward in task_rewards],
                 success_thresholds,
                 local_range=local_range,
             )
-        self._update_reset_curriculum(tracking_task_rewards, tracking_reward_scales)
+        self._update_reset_curriculum(
+            {key: value[scores] for key, value in tracking_task_rewards.items()},
+            tracking_reward_scales,
+        )
 
         # sample from new category curricula
         new_commands, new_bin_inds = curriculum.sample(batch_size=len(env_ids))
@@ -1550,6 +1603,12 @@ class LeggedRobot(BaseTask):
             if len(standing_mask.nonzero()) > 0:
                 self.commands_dog[env_ids[standing_mask], 6] = 0.0
 
+        # R6: a fresh excitation plan for whichever of these are identification
+        # envs.  Paired with the baseline draw above deliberately -- the four
+        # passive channels must be constant for the whole identification record,
+        # so a new baseline and a new plan always happen together.
+        self.response_excitation.plan(env_ids)
+
         # R4.2 / R4.3 are masked relative to the last command step, so the
         # counter has to be zeroed wherever commands actually change.
         self.steps_since_command_change[env_ids] = 0.0
@@ -1583,8 +1642,21 @@ class LeggedRobot(BaseTask):
 
         # resample commands
         sample_interval = int(self.cfg.commands.resampling_time / self.dt)
-        env_ids = (self.episode_length_buf % sample_interval == 0).nonzero(as_tuple=False).flatten()
+        due = self.episode_length_buf % sample_interval == 0
+        # R6: identification envs keep the baseline they were reset with for the
+        # whole episode.  A mid-episode resample would step the four passive
+        # channels in the middle of a chirp, which is precisely the disturbance
+        # that makes the resulting record un-identifiable as SISO.  They still
+        # resample on reset, via reset_idx().
+        env_ids = (due & ~self.is_identification_env).nonzero(as_tuple=False).flatten()
         self._resample_commands(env_ids)
+
+        # Excitation is written after the resample and before anything reads the
+        # commands, so the excited channel wins over the baseline draw.
+        excitation_jumped = self.response_excitation.step(self.commands_dog)
+        self.steps_since_command_change[excitation_jumped] = 0.0
+        self.performance_metric_sums["excitation_jumps"] += excitation_jumped.float()
+
         self._step_contact_targets()
 
         # measure terrain heights
@@ -2052,6 +2124,36 @@ class LeggedRobot(BaseTask):
             min_cycles=float(residual_cfg.min_cycles),
             device=self.device,
         )
+
+        # R6: designed excitation for the identification subset of environments.
+        # Built from the curriculum's *initial* active window rather than the
+        # hard command limits -- identification data is only informative where
+        # the policy is competent, and +-1.5 m/s from iteration 0 mostly
+        # produces falls.
+        excitation_cfg = self.cfg.response.excitation
+        curriculum_low, curriculum_high = command_curriculum_bounds(self.cfg)
+        self.response_excitation = ExcitationSampler(
+            self.response_ref.channels,
+            num_envs=self.num_envs,
+            dt=self.dt,
+            low=[float(curriculum_low[c.cmd_index]) for c in self.response_ref.channels],
+            high=[float(curriculum_high[c.cmd_index]) for c in self.response_ref.channels],
+            # Eval envs are the tail of the full range; the identification block
+            # is the tail of the TRAINING range so the two never overlap.
+            pool_envs=self.num_train_envs,
+            env_fraction=(
+                float(excitation_cfg.env_fraction) if bool(excitation_cfg.enabled) else 0.0
+            ),
+            signal_weights=dict(excitation_cfg.signal_weights),
+            channel_weights=dict(excitation_cfg.channel_weights),
+            prbs_hold_s=tuple(excitation_cfg.prbs_hold_s),
+            chirp_hz=tuple(excitation_cfg.chirp_hz),
+            chirp_duration_s=float(excitation_cfg.chirp_duration_s),
+            chirp_slew_fraction=float(excitation_cfg.chirp_slew_fraction),
+            ramp_slope_multiple=tuple(excitation_cfg.ramp_slope_multiple),
+            device=self.device,
+        )
+        self.is_identification_env = self.response_excitation.is_identification
         self.rew_buf_dog = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
         self.rew_buf_pos_dog = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
         self.rew_buf_neg_dog = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
@@ -2126,6 +2228,17 @@ class LeggedRobot(BaseTask):
         """Prepares a list of reward functions, whcih will be called to compute the total reward.
         Looks for self._reward_<REWARD_NAME>, where <REWARD_NAME> are names of all non zero reward scales in the cfg.
         """
+        # R6 invariant 2, enforced rather than commented: the curriculum's
+        # progress signal must stay the original tracking terms.  A consistency
+        # reward that took one of those names would silently become a curriculum
+        # criterion, and the curriculum would stop advancing.
+        overlap = set(CURRICULUM_PROGRESS_REWARDS) & set(CONSISTENCY_REWARDS)
+        if overlap:
+            raise AssertionError(
+                f"consistency rewards {sorted(overlap)} collide with the command "
+                "curriculum's progress keys (R6 invariant 2)"
+            )
+
         # reward containers
         from go1_gym.envs.rewards.rewards import Rewards
 

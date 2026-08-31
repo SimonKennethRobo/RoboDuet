@@ -33,6 +33,13 @@ from .calibration import (
     calibrate_sigma,
     discrimination_for_sigma,
 )
+from .excitation import (
+    CHIRP,
+    PRBS,
+    RAMP,
+    SIGNAL_NAMES,
+    ExcitationSampler,
+)
 from .residual import PhaseResidualEstimator
 from .reference import (
     DEFAULT_CHANNELS,
@@ -54,6 +61,11 @@ __all__ = [
     "FROZEN_CMD_INDEX",
     "SEMI_FREE_CMD_INDEX",
     "assert_partition_is_complete",
+    "CHIRP",
+    "PRBS",
+    "RAMP",
+    "SIGNAL_NAMES",
+    "ExcitationSampler",
     "DEFAULT_CHANNELS",
     "ChannelSpec",
     "PhaseResidualEstimator",

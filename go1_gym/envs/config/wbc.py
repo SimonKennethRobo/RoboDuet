@@ -689,8 +689,60 @@ RESPONSE_MODEL_OVERRIDES = {
 }
 
 
+# ============================================================
+# R6 -- rich excitation for the identification environments.
+#
+# The original setup resamples commands every 10 s into a 20 s episode: one
+# command step per episode, which is nowhere near enough transient data to fit
+# a reference model to, let alone to calibrate one (R8.2) or to draw a Bode
+# plot from (R9).
+#
+# The two R6 invariants are enforced elsewhere, in LeggedRobot:
+#   * identification envs are filtered out of curriculum.update() and
+#     _update_reset_curriculum() -- otherwise their (deliberately) low tracking
+#     reward would be read as "this command bin is too hard" and the curriculum
+#     would shrink the command range for everybody;
+#   * the curriculum's progress keys stay the four original tracking terms, and
+#     _prepare_reward_function asserts no consistency reward ever takes one of
+#     those names.
+# ============================================================
+RESPONSE_EXCITATION_OVERRIDES = {
+    "response.excitation.enabled": True,
+    # Tail block of the TRAINING envs (the eval envs sit past them and are left
+    # alone).  25% is the requirements figure.
+    "response.excitation.env_fraction": 0.25,
+    "response.excitation.signal_weights": {"prbs": 0.5, "chirp": 0.3, "ramp": 0.2},
+    # Posture channels get 55% of the draw between them against 45% for the
+    # three velocity channels, i.e. ~3x the per-channel share.  The requirements
+    # document singles them out: the original command distribution barely steps
+    # body height or pitch at all, so they are the channels whose reference
+    # model is least supported by data.
+    "response.excitation.channel_weights": {
+        "vx": 0.15, "vy": 0.15, "wyaw": 0.15, "height": 0.275, "pitch": 0.275,
+    },
+    # Straight from the requirements table.  Note the arithmetic: a hold drawn
+    # from U(0.5, 3.0) s averages 1.75 s, so a 20 s episode gets ~11 PRBS
+    # switches, not the >= 20 the acceptance criterion asks for.  The two
+    # numbers in the requirements document are not simultaneously satisfiable
+    # at a 20 s episode; the interval is kept as specified and the shortfall is
+    # reported.  Narrowing this to [0.5, 1.5] is the one-line fix if the >= 20
+    # figure turns out to be the binding one.
+    "response.excitation.prbs_hold_s": [0.5, 3.0],
+    "response.excitation.chirp_hz": [0.1, 2.0],
+    # One full sweep per episode.  Anything shorter and the low-frequency end
+    # of the sweep does not complete a single cycle.
+    "response.excitation.chirp_duration_s": 20.0,
+    # Fraction of the channel's rate limit the chirp is allowed to demand.  Below
+    # 1.0 so the *reference model* never saturates during a sweep -- a saturated
+    # reference turns the Bode measurement into a measurement of the saturation.
+    "response.excitation.chirp_slew_fraction": 0.8,
+    "response.excitation.ramp_slope_multiple": [0.2, 3.0],
+}
+
+
 ROBODUET_OVERRIDES = {
     **RESPONSE_MODEL_OVERRIDES,
+    **RESPONSE_EXCITATION_OVERRIDES,
     **COMMON_OVERRIDES,
     **STAGE1_OVERRIDES,
     **STAGE2_OVERRIDES,

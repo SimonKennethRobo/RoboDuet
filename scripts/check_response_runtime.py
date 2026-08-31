@@ -14,6 +14,9 @@ R2  the reference model's position never advances faster than its rate limit,
     peaks exactly at the limit, and holds unit steady-state gain.
 R3  the phase-conditioned residual is a clean low-order periodic waveform.
     Needs a walking policy, so pass --policy; without one this check is skipped.
+R6  the identification environments really are excited (jump count, chirp band),
+    really are excluded from the curriculum, and really are the only ones
+    touched.
 """
 
 import argparse
@@ -33,6 +36,7 @@ from go1_gym.response import (
     FROZEN_CMD_INDEX,
     SEMI_FREE_CMD_INDEX,
 )
+from go1_gym.response.excitation import CHIRP, SIGNAL_NAMES
 from go1_gym.utils import global_switch
 
 
@@ -215,12 +219,29 @@ def check_r2(env, cfg, steps=900):
                 f"= {bound:.5f}"
             )
 
-    held = (commands[200:] == commands[:-200]).all(dim=-1)
+    # Steady-state gain, over windows where the command was genuinely constant
+    # for 200 consecutive steps AND no reset realigned the reference.  Comparing
+    # only the two endpoints of the window -- which is what this did before R6 --
+    # is not the same statement: a chirp command returns to its old value twice
+    # per cycle having swept the whole band in between, and the reference is
+    # then correctly nowhere near it.
+    window = 200
+    quiet = (commands[1:] != commands[:-1]).any(dim=-1) | resets[1:] | resets[:-1]
+    cumulative = torch.cat(
+        [torch.zeros(1, quiet.shape[1], device=quiet.device), quiet.float().cumsum(dim=0)]
+    )
+    held = (cumulative[window:] - cumulative[:-window]) == 0
     if held.any():
-        error = (xi[200:] - commands[200:]).abs()[held].max().item()
-        print(f"  steady-state |xi - u| after 200 held steps: {error:.5f}")
+        error = (xi[window:] - commands[window:]).abs()[held].max().item()
+        print(f"  steady-state |xi - u| after {window} held steps: {error:.5f} "
+              f"({int(held.sum())} qualifying samples)")
         if error > 0.02:
             failures.append(f"steady-state gain is not 1 (|xi - u| = {error:.4f})")
+    else:
+        failures.append(
+            f"no command stayed constant for {window} steps -- the steady-state "
+            "gain was not tested"
+        )
     return failures
 
 
@@ -394,12 +415,220 @@ def check_r4(env, cfg, policy_path, seconds=40.0):
 
 
 # ---------------------------------------------------------------------------
+# R6
+# ---------------------------------------------------------------------------
+
+
+def check_r6(env, cfg, steps=1100):
+    """Excitation reaches only the identification envs, and the curriculum never
+    sees them.
+
+    Everything here is measured **within one excitation plan**.  A plan is
+    redrawn on every reset, so a rollout longer than an episode contains several
+    of them, and comparing a whole trace against the plan that happens to be
+    current at the end mixes channels: the previous plan's excited channel then
+    reads as a passive channel that moves 1000 times.  (That is not a
+    hypothetical -- it is what the first version of this check reported.)
+
+    The curriculum exclusion is the invariant worth spending a spy on: it fails
+    *silently*, and the symptom -- the command range slowly ratcheting shut for
+    every environment, identification or not -- looks nothing like its cause.
+    """
+    base = env.env
+    sampler = base.response_excitation
+    if not sampler.active:
+        return ["no identification environments -- run with more --num_envs"]
+
+    curriculum = base.curricula[0]
+    original_update = curriculum.update
+    original_resample = base._resample_commands
+    seen = {"resampled": [], "updated": []}
+
+    def spy_resample(env_ids):
+        seen["resampled"].append(env_ids.clone())
+        return original_resample(env_ids)
+
+    def spy_update(old_bins, *rest, **kwargs):
+        seen["updated"].append(len(old_bins))
+        return original_update(old_bins, *rest, **kwargs)
+
+    base._resample_commands = spy_resample
+    curriculum.update = spy_update
+    try:
+        env.reset()
+        seen["resampled"].clear()
+        seen["updated"].clear()
+        dog_a, arm_a = zero_actions(env, cfg)
+        history, signal_history, channel_history, episode_history = [], [], [], []
+        for _ in range(steps):
+            env.step(dog_a, arm_a)
+            # Read after the step: this is the plan that produced these commands.
+            history.append(base.commands_dog.clone())
+            signal_history.append(sampler.signal.clone())
+            channel_history.append(sampler.channel.clone())
+            episode_history.append(base.episode_length_buf.clone())
+    finally:
+        base._resample_commands = original_resample
+        curriculum.update = original_update
+
+    commands = torch.stack(history)                  # (T, E, C)
+    signals = torch.stack(signal_history)            # (T, E)
+    channels = torch.stack(channel_history)          # (T, E)
+    episodes = torch.stack(episode_history)          # (T, E)
+    is_identification = sampler.is_identification
+    failures = []
+
+    n_id = int(is_identification.sum())
+    print(f"  {steps} steps x {cfg.env.num_envs} envs; "
+          f"{n_id} identification ({n_id / cfg.env.num_envs:.1%}), "
+          f"train pool {base.num_train_envs}")
+    print("  signals: " + ", ".join(f"{k}={v}" for k, v in sampler.signal_counts().items())
+          + "  |  channels: "
+          + ", ".join(f"{k}={v}" for k, v in sampler.channel_counts().items()))
+
+    # Steps k -> k+1 that stayed inside a single plan and a single episode.
+    steady = (signals[1:] == signals[:-1]) & (channels[1:] == channels[:-1])
+    steady &= episodes[1:] > episodes[:-1]
+    changed = commands[1:] != commands[:-1]                    # (T-1, E, C)
+    decision = torch.tensor(list(DECISION_CMD_INDEX), device=commands.device)
+    excited = sampler.cmd_index[channels]                      # (T, E)
+
+    # -- 1. consistency envs are untouched ----------------------------------
+    resample_bound = steps // 500 + 4
+    passive_envs = ~is_identification
+    passive_changes = changed[:, passive_envs][:, :, decision].sum(dim=0).max().item()
+    print(f"  max decision-channel changes over the whole rollout: "
+          f"consistency env {passive_changes:.0f} (bound {resample_bound})")
+    if passive_changes > resample_bound:
+        failures.append(
+            f"a consistency env changed a decision channel {passive_changes:.0f}x, "
+            f"more than the {resample_bound} resample/reset events"
+        )
+
+    # -- 2. only the excited channel moves, inside a plan --------------------
+    is_excited = torch.zeros_like(changed, dtype=torch.bool)
+    is_excited.scatter_(2, excited[:-1].unsqueeze(-1), True)
+    passive_moved = (
+        changed & ~is_excited & steady.unsqueeze(-1) & is_identification.view(1, -1, 1)
+    )[:, :, decision]
+    worst = int(passive_moved.sum(dim=0).max())
+    print(f"  passive decision-channel moves inside a plan: {worst} (must be 0)")
+    if worst > 0:
+        env_index = int(passive_moved.sum(dim=(0, 2)).argmax())
+        failures.append(
+            f"identification env {env_index}: a passive decision channel moved "
+            f"{worst}x inside a single plan -- the mid-episode resample is not "
+            "suppressed, or excitation is writing more than one channel"
+        )
+
+    # -- 3. jump count, per 20 s episode, measured inside a plan -------------
+    excited_moved = changed & is_excited & steady.unsqueeze(-1)
+    excited_moved = excited_moved.any(dim=-1)                  # (T-1, E)
+    episode_steps = float(cfg.env.episode_length_s) / base.dt
+    rates = {}
+    for index, name in enumerate(SIGNAL_NAMES):
+        member = (signals[:-1] == index) & steady & is_identification.view(1, -1)
+        samples = int(member.sum())
+        if samples == 0:
+            continue
+        rate = float(excited_moved[member].float().mean()) * episode_steps
+        rates[name] = rate
+        print(f"  {name:<6} command jumps per {cfg.env.episode_length_s:.0f} s episode: "
+              f"{rate:6.1f}   ({samples} in-plan samples)")
+        if name != "prbs" and rate < 20.0:
+            failures.append(f"{name} envs jump only {rate:.1f}x per episode, need >= 20")
+    group_member = steady & is_identification.view(1, -1)
+    group_rate = float(excited_moved[group_member].float().mean()) * episode_steps
+    print(f"  identification group mean: {group_rate:.1f} jumps per episode")
+    if group_rate < 20.0:
+        failures.append(f"identification group jumps {group_rate:.1f}x per episode, need >= 20")
+    if "prbs" in rates and rates["prbs"] >= 20.0:
+        print("  note: PRBS now clears 20 jumps/episode -- the documented "
+              "U(0.5, 3.0) s shortfall no longer applies, check the config")
+
+    # -- 4. chirp band coverage, over one uninterrupted sweep ----------------
+    segment = _longest_plan_segment(signals, channels, episodes, is_identification, CHIRP)
+    if segment is None:
+        failures.append("no uninterrupted chirp segment was produced")
+    else:
+        env_index, lo, hi = segment
+        column = int(excited[lo, env_index])
+        signal = commands[lo:hi, env_index, column].double()
+        signal = signal - signal.mean()
+        spectrum = torch.fft.rfft(signal).abs()
+        freqs = torch.fft.rfftfreq(signal.numel(), d=base.dt)
+        in_band = (freqs >= 0.1) & (freqs <= 2.0)
+        share = float(spectrum[in_band].sum() / spectrum.sum())
+        duration = (hi - lo) * base.dt
+        gaps = [
+            f"{lo_hz}-{2 * lo_hz}Hz"
+            for lo_hz in (0.1, 0.25, 0.5, 1.0)
+            if float(spectrum[(freqs >= lo_hz) & (freqs < 2 * lo_hz)].max())
+            <= 0.02 * float(spectrum.max())
+        ]
+        print(f"  chirp env {env_index} ({DOG_COMMAND_NAMES[column]}), "
+              f"{duration:.1f}s uninterrupted: "
+              f"{share:.1%} of spectral energy inside 0.1-2.0 Hz")
+        # A sweep shorter than the configured duration only reaches part of the
+        # band, so scale what is demanded of it rather than failing on it.
+        expected = min(1.0, duration / float(cfg.response.excitation.chirp_duration_s))
+        if share < 0.85 * expected:
+            failures.append(
+                f"chirp energy inside 0.1-2.0 Hz is only {share:.1%} over a "
+                f"{duration:.1f}s sweep"
+            )
+        if gaps and expected > 0.9:
+            failures.append(f"chirp spectrum has empty octaves: {', '.join(gaps)}")
+
+    # -- 5. curriculum never scored an identification env --------------------
+    total_resampled = sum(int(ids.numel()) for ids in seen["resampled"])
+    identification_resampled = sum(
+        int(is_identification[ids].sum()) for ids in seen["resampled"]
+    )
+    scored = sum(seen["updated"])
+    expected_scored = total_resampled - identification_resampled
+    print(f"  curriculum: {scored} envs scored out of {total_resampled} resampled "
+          f"({identification_resampled} of them identification)")
+    if identification_resampled == 0:
+        failures.append("no identification env was ever resampled -- the check is vacuous")
+    if scored != expected_scored:
+        failures.append(
+            f"curriculum.update() scored {scored} envs, expected {expected_scored} "
+            "(identification envs must be filtered out)"
+        )
+    return failures
+
+
+def _longest_plan_segment(signals, channels, episodes, is_identification, wanted_signal):
+    """Longest ``(env, start, stop)`` run with one plan, one episode, one signal."""
+    best = None
+    for env_index in is_identification.nonzero().flatten().tolist():
+        signal = signals[:, env_index]
+        channel = channels[:, env_index]
+        episode = episodes[:, env_index]
+        start = 0
+        for k in range(1, signal.numel() + 1):
+            broken = k == signal.numel() or not (
+                signal[k] == signal[start]
+                and channel[k] == channel[start]
+                and episode[k] > episode[k - 1]
+            )
+            if not broken:
+                continue
+            if signal[start] == wanted_signal and (best is None or k - start > best[2] - best[1]):
+                best = (env_index, start, k)
+            start = k
+    return best
+
+
+# ---------------------------------------------------------------------------
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--check", default="all", choices=["r1", "r2", "r3", "r4", "all"])
+    parser.add_argument("--check", default="all",
+                        choices=["r1", "r2", "r3", "r4", "r6", "all"])
     parser.add_argument("--num_envs", type=int, default=64)
     parser.add_argument("--sim_device", type=str, default="cuda:0")
     parser.add_argument("--robot", type=str, default="go2_x5")
@@ -409,7 +638,7 @@ def main():
     args = parser.parse_args()
 
     env, cfg = build_env(args.num_envs, args.sim_device, args.robot)
-    wanted = ["r1", "r2", "r3", "r4"] if args.check == "all" else [args.check]
+    wanted = ["r1", "r2", "r3", "r4", "r6"] if args.check == "all" else [args.check]
 
     results = {}
     for name in wanted:
@@ -430,6 +659,8 @@ def main():
                 print("  skipped: needs a walking policy, pass --policy <ckpt.pt>")
                 continue
             results[name] = check_r4(env, cfg, args.policy)
+        elif name == "r6":
+            results[name] = check_r6(env, cfg)
 
     print("\n=== summary ===")
     failed = False
