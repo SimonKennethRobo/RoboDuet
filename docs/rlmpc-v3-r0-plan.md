@@ -155,11 +155,82 @@ commands.num_bins_body_roll     = 1
   必须保留还是移除？**保留**——它是站立行为，与冻结无关；
   但要记录到 R9 导出的数据里，否则残差模型会在站立段看到"频率跳到 0"。
 
-### 验收落地
+### 实现结果（2026-08-31，已完成）
 
-`tests/test_command_freeze.py`：固定命令 rollout 200 步，断言
-`commands_dog[:, [4,7,8,9,10]]` 在 episode 内恒定；
-`cfg.dog.dog_num_observations` 与冻结前一致（都是 11 维命令，只是不采样）。
+**冻结几乎全部由配置达成，`_resample_commands` 的写入逻辑一行没改。**
+原因：1-bin 的课程维度在其（现已收窄的）`limit_*` 区间内均匀采样
+（[base/curriculum.py:31-42](../go1_gym/envs/base/curriculum.py#L31-L42)、
+[:81-84](../go1_gym/envs/base/curriculum.py#L81-L84)），
+所以「窄化 limit + bins=1」既冻结了通道、又把它排除出自适应课程，
+同时保留其在命令向量中的位置。
+
+落地的两张表在 [config/wbc.py](../go1_gym/envs/config/wbc.py)：
+`RESPONSE_COMMAND_OVERRIDES`（总是适用）与
+`RESPONSE_GAIT_COMMAND_OVERRIDES`（仅 `use_dynamic_gait`），
+由 `core.apply_response_overrides(cfg)` 在**所有 `enable_*()` 之后**应用。
+
+实测组合结果：
+
+| 通道 | 采样范围 | limit | bins | 分组 |
+|---|---|---|---|---|
+| vx / vy / yaw_rate | [-0.5,0.5] / [-0.3,0.3] / [-1,1] | [-1.5,1.5] / [-1,1] / [-2,2] | 21 / 3 / 21 | 决策 |
+| body_pitch | [-0.4, 0.4] | [-0.4, 0.4] | **5**（原 1） | 决策 |
+| body_height | [-0.2, 0.3] | [-0.2, 0.3] | **5**（原 1） | 决策 |
+| body_roll | **[0, 0]** | **[0, 0]** | 1 | 冻结 |
+| gait_frequency | **[2.5, 3.5]** | **[2.5, 3.5]** | 1 | 半自由 |
+| footswing_height | [0.06, 0.061] | 同 | 1 | 冻结 |
+| stance_width | **[0.28, 0.32]**（原 [0.10,0.45]） | 同 | 1 | 冻结 |
+| stance_length | **[0.42, 0.46]**（原 [0.25,0.45]） | 同 | 1 | 冻结 |
+| gait_duration | [0.49, 0.5] | 同 | 1 | 冻结 |
+
+**网格 1,964,655 → 33,075**；`dog_num_commands` 仍 11、
+`dog_num_observations` 仍 **90**（R1 要求"观测维度与原版一致"✅）。
+
+### 顺带做的重构
+
+课程的网格定义、初始激活窗口、扩张邻域从 `LeggedRobot._init_command_distribution`
+（原 130 行）抽成 [base/curriculum.py](../go1_gym/envs/base/curriculum.py) 的纯函数
+`command_curriculum_kwargs / _bounds / _local_range / build_command_curriculum`。
+
+**动机不是整洁，是测试有效性**：这些函数不依赖 IsaacGym，验收测试因此可以跑
+**真实的**配置和课程采样器，而不是测一份副本。测试里另有一条
+`test_extracted_builders_match_the_original_inline_code`，
+把 commit `9e7e995` 的原始字面代码逐字抄进测试做等价对照，防止搬运时抄错。
+
+顺带把 `np.int` 改成 `int`（numpy 1.23.5 里是已弃用别名，行为完全相同）。
+
+### 验收结果
+
+[go1_gym/response/test_command_layout.py](../go1_gym/response/test_command_layout.py)
+——**17 项通过**（含 dyna_gait 开/关两种构建、覆盖顺序回归、抽取等价性）。
+
+真环境 rollout（64 env × 1200 步，跨 2 次以上重采样）：
+
+- `body_roll` 恒等于 **0.0000**（硬冻结）
+- `footswing/stance_width/stance_length/gait_duration` 全部落在各自窄带内，
+  且**只在重采样点变化**、episode 内恒定
+- `gait_frequency` 行进时 **[2.501, 3.497]**
+- 决策通道正常变化
+
+> ⚠️ **验收断言写法的坑**：R1 原文是"固定（**可加小幅随机化**用于鲁棒性）"。
+> 最初把断言写成"整段 rollout 内数值恒定"会误报——窄带随机化是每 episode
+> 重采样一次的。正确断言是「带内 + 只在重采样点变化」。
+
+### 200 iter 回归对照
+
+同参数（stage1 + dyna_gait，4096 env，RTX 5090），对照 [facts §13](rlmpc-v3-r0-facts.md) 的基线：
+
+| | 基线（R1 前） | R1 后 |
+|---|---|---|
+| 200 iter 总耗时 | 287.5 s | **238.8 s** |
+| 末段 mean reward | 0.238 | **0.581** |
+| 末段 mean episode length | 806 | 823 |
+| 报错 / NaN | 无 | 无 |
+
+奖励的差距不小，且与 R1 的设计意图一致：原命令空间里存在大片**基本走不了**的角落
+——gait frequency 可采到 0 Hz（无步态）、stance width 可采到 0.10 m（极窄站姿）、
+body roll 可达 ±0.4 rad。裁剪掉这些之后，同样的奖励函数下策略自然拿到更高分。
+**但这只是"一致"，不是因果证明**：种子不同、GPU 负载不同，正式结论要等 R9 的对照实验。
 
 ---
 
@@ -847,6 +918,8 @@ gait frequency、arm 状态、domain 特权参数、地形标签（v1 恒为 pla
 | R1      | **R5 改写 `_resample_commands` 的语义**（组级时钟 + reset 时复制组命令而非新采样） | 高——这是命令系统的核心路径，改错会静默污染课程和所有跟踪奖励 | 分两步提交：先加组级时钟但不改命令内容（可对拍原版），再切共享命令                                                                     |
 | R2      | **twin 标称化要动 6+ 处随机化采样点**，其中 3 处在 `_create_envs()` 里一次性执行   | 中——遗漏一处就等于 twin 不标称，R5 静默退化                  | 写一个断言测试：枚举所有`rand_buffers`，断言 twin 行等于标称值                                                                       |
 | R3      | **R7.2 改为隐式适应 + 显式 (g,l) 统计量**，且 (g,l) 只覆盖 pitch/yaw_rate | 中——vx/vy/height 的域辨识完全靠 1.0 s 历史，上限可能低于显式通路 | 已接受的取舍；R9 的跨域离散度指标会分通道暴露代价，速度通道不达标时优先换 TCN 而非重开 teacher-student |
+| R11     | **pitch/height 现在是课程维度，但还不是「会扩张的课程」** | 中——R1 的字面要求（排除非决策通道）已满足，但两处继承来的设定让新增的 bin 暂时不产生渐进解锁：① `set_to` 的初始窗口对 pitch 用 `body_pitch_range`、对 height 用 `limit_body_height`，二者当前都等于全区间 → 所有 bin 一开始就激活；② `local_range` 对 pitch/height 是 **1.0**，跨越整个网格 | **刻意留给 R8**：初始窗口与扩张邻域是课程排期问题，在第 2 步改会引入无法在本步验证的训练动力学变化。建议 R8 里定 pitch local_range ≈ 0.2、height ≈ 0.12，并让 height 的初始窗口改用 `body_height_cmd` 以消除与 pitch 的不一致 |
+| R12     | **`gait_frequency` 在 `‖v_cmd‖ < 0.1` 时被强制为 0**（[legged_robot.py:1354-1356](../go1_gym/envs/roboduet/legged_robot.py#L1354-L1356)，既有行为，R1 保留） | 中——实测约 17–24% 的样本处于该状态。残差模型会在站立段看到频率从 ~3 Hz 跳到 0，相位随之停止推进 | R9.2 导出必须带「站立标志」；R3 的相位分桶要把站立段单独处理或排除，否则 `δ̂(φ)` 会被污染 |
 | R10     | **`dog.add_obs_noise=False`**，策略在“速度估计完美”假设下训练（既有问题，非本方案引入） | 高（仅对真机）——任何依赖 measured y 的观测都不可靠，包括**现在就在用的** `base_lin_vel` | 排进第一次真机前的清单：打开噪声 + 为 `base_lin_vel` 加**慢漂移偏置**随机化（白噪声不够，EMA 类统计量对偏置才敏感） |
 | ~~R4~~ | ~~EE 相对 base 位置在 stage-1 是否已计算~~                                                | —                                                             | **已核实解除**：`end_effector_state` 在 switch 门控前无条件更新（[wbc_env.py:1026](../go1_gym/envs/roboduet/wbc_env.py#L1026)） |
 | R5      | `sigma_rew_neg = 0.02` 与 `dt = 0.02` 抵消是巧合                                       | 中——任何人改其一都会静默缩放全部一致性权重                   | 配置里加显式注释 + 一条断言                                                                                                            |
@@ -864,8 +937,8 @@ gait frequency、arm 状态、domain 特权参数、地形标签（v1 恒为 pla
 | #  | 内容                                                                 | 验收                                   |
 | -- | -------------------------------------------------------------------- | -------------------------------------- |
 | 0  | 基线复现（**已完成**，见 [facts §13](rlmpc-v3-r0-facts.md)）   | 200 iter 跑通                          |
-| 1  | 新建`response.py` + `tests/`，只实现 `ReferenceModel`，不接env | R2 的三条数值验收                      |
-| 2  | R1 命令裁剪 +`CHANNEL_CMD_IDX` 常量表                              | 冻结通道恒定；网格降到 33k             |
+| 1 ✅ | 新建 `go1_gym/response/` + `ReferenceModel`，不接 env（**已完成**） | R2 三条数值验收 + 4 项变异测试，22 项通过 |
+| 2 ✅ | R1 命令裁剪 + 命令索引表 + 课程构造抽取（**已完成**） | 17 项通过；网格 1.96M→33,075；真环境 rollout 冻结通道带内恒定；obs 宽度仍 90 |
 | 3  | 接入`ReferenceModel`，删除一阶版本，加 R4.1（权重 0，只记录）      | 训练曲线与基线无差异                   |
 | 4  | R3 残差估计 + 双路去趋势                                             | 相位曲线周期性；滞后对比               |
 | 5  | R4 全部四项 + σ 标定脚本                                            | 三条人工轨迹排序；1000 iter 无 NaN     |

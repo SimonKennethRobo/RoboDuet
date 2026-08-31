@@ -23,6 +23,7 @@ import torch
 
 from go1_gym import MINI_GYM_ROOT_DIR
 from go1_gym.envs.base.base_task import BaseTask
+from go1_gym.envs.base.curriculum import command_curriculum_local_range
 from go1_gym.envs.config import ConfigNode
 from go1_gym.utils import global_switch, quaternion_to_rpy
 from go1_gym.utils.math_utils import get_scale_shift, quat_apply_yaw
@@ -1289,9 +1290,7 @@ class LeggedRobot(BaseTask):
 
         old_bins = self.env_command_bins[env_ids.cpu().numpy()]
         if len(success_thresholds) > 0:
-            local_range = np.array([0.55, 0.55, 0.55, 1.0, 1.0, 1.0])
-            if self.cfg.commands.use_dynamic_gait:
-                local_range = np.concatenate([local_range, np.array([0.55, 0.55, 0.55, 0.55, 0.55])])
+            local_range = command_curriculum_local_range(self.cfg)
             curriculum.update(
                 old_bins,
                 task_rewards,
@@ -1362,134 +1361,14 @@ class LeggedRobot(BaseTask):
         # new style curriculum
         self.category_names = ["trot"]
 
-        if self.cfg.commands.curriculum_type == "RewardThresholdCurriculum":
-            from go1_gym.envs.base.curriculum import RewardThresholdCurriculum
+        # Grid definition, initial active window and expansion neighbourhood all
+        # live in go1_gym/envs/base/curriculum.py so they can be exercised
+        # without IsaacGym; see the R1 acceptance test.
+        from go1_gym.envs.base.curriculum import build_command_curriculum
 
-            CurriculumClass = RewardThresholdCurriculum
-        self.curricula = []
-        for category in self.category_names:
-            curriculum_kwargs = dict(
-                seed=self.cfg.commands.curriculum_seed,
-                x_vel=(
-                    self.cfg.commands.limit_vel_x[0],
-                    self.cfg.commands.limit_vel_x[1],
-                    self.cfg.commands.num_bins_vel_x,
-                ),
-                y_vel=(
-                    self.cfg.commands.limit_vel_y[0],
-                    self.cfg.commands.limit_vel_y[1],
-                    self.cfg.commands.num_bins_vel_y,
-                ),
-                yaw_vel=(
-                    self.cfg.commands.limit_vel_yaw[0],
-                    self.cfg.commands.limit_vel_yaw[1],
-                    self.cfg.commands.num_bins_vel_yaw,
-                ),
-                body_pitch=(
-                    self.cfg.commands.limit_body_pitch[0],
-                    self.cfg.commands.limit_body_pitch[1],
-                    self.cfg.commands.num_bins_body_pitch,
-                ),
-                body_roll=(
-                    self.cfg.commands.limit_body_roll[0],
-                    self.cfg.commands.limit_body_roll[1],
-                    self.cfg.commands.num_bins_body_roll,
-                ),
-                body_height=(
-                    self.cfg.commands.limit_body_height[0],
-                    self.cfg.commands.limit_body_height[1],
-                    self.cfg.commands.num_bins_body_height,
-                ),
-            )
-            if self.cfg.commands.use_dynamic_gait:
-                curriculum_kwargs.update(
-                    gait_frequency=(
-                        self.cfg.commands.limit_gait_frequency[0],
-                        self.cfg.commands.limit_gait_frequency[1],
-                        self.cfg.commands.num_bins_gait_frequency,
-                    ),
-                    footswing_height=(
-                        self.cfg.commands.limit_footswing_height[0],
-                        self.cfg.commands.limit_footswing_height[1],
-                        self.cfg.commands.num_bins_footswing_height,
-                    ),
-                    stance_width=(
-                        self.cfg.commands.limit_stance_width[0],
-                        self.cfg.commands.limit_stance_width[1],
-                        self.cfg.commands.num_bins_stance_width,
-                    ),
-                    stance_length=(
-                        self.cfg.commands.limit_stance_length[0],
-                        self.cfg.commands.limit_stance_length[1],
-                        self.cfg.commands.num_bins_stance_length,
-                    ),
-                    gait_duration=(
-                        self.cfg.commands.limit_gait_duration[0],
-                        self.cfg.commands.limit_gait_duration[1],
-                        self.cfg.commands.num_bins_gait_duration,
-                    ),
-                )
-            self.curricula += [CurriculumClass(**curriculum_kwargs)]
-
-        if self.cfg.commands.curriculum_type == "LipschitzCurriculum":
-            for curriculum in self.curricula:
-                curriculum.set_params(
-                    lipschitz_threshold=self.cfg.commands.lipschitz_threshold,
-                    binary_phases=self.cfg.commands.binary_phases,
-                )
-        self.env_command_bins = np.zeros(len(env_ids), dtype=np.int)
-        self.env_command_categories = np.zeros(len(env_ids), dtype=np.int)
-        low = np.array(
-            [
-                self.cfg.commands.lin_vel_x[0],
-                self.cfg.commands.lin_vel_y[0],
-                self.cfg.commands.ang_vel_yaw[0],
-                self.cfg.commands.body_pitch_range[0],
-                self.cfg.commands.body_roll_range[0],
-                self.cfg.commands.limit_body_height[0],
-            ]
-        )
-        high = np.array(
-            [
-                self.cfg.commands.lin_vel_x[1],
-                self.cfg.commands.lin_vel_y[1],
-                self.cfg.commands.ang_vel_yaw[1],
-                self.cfg.commands.body_pitch_range[1],
-                self.cfg.commands.body_roll_range[1],
-                self.cfg.commands.limit_body_height[1],
-            ]
-        )
-        if self.cfg.commands.use_dynamic_gait:
-            low = np.concatenate(
-                [
-                    low,
-                    np.array(
-                        [
-                            self.cfg.commands.limit_gait_frequency[0],
-                            self.cfg.commands.limit_footswing_height[0],
-                            self.cfg.commands.limit_stance_width[0],
-                            self.cfg.commands.limit_stance_length[0],
-                            self.cfg.commands.limit_gait_duration[0],
-                        ]
-                    ),
-                ]
-            )
-            high = np.concatenate(
-                [
-                    high,
-                    np.array(
-                        [
-                            self.cfg.commands.limit_gait_frequency[1],
-                            self.cfg.commands.limit_footswing_height[1],
-                            self.cfg.commands.limit_stance_width[1],
-                            self.cfg.commands.limit_stance_length[1],
-                            self.cfg.commands.limit_gait_duration[1],
-                        ]
-                    ),
-                ]
-            )
-        for curriculum in self.curricula:
-            curriculum.set_to(low=low, high=high)
+        self.curricula = [build_command_curriculum(self.cfg) for _ in self.category_names]
+        self.env_command_bins = np.zeros(len(env_ids), dtype=int)
+        self.env_command_categories = np.zeros(len(env_ids), dtype=int)
 
     def _post_physics_step_callback(self):
         """Callback called before computing terminations, rewards, and observations

@@ -179,3 +179,99 @@ if __name__ == '__main__':
 
     plt.scatter(*samples.T[:2])
     plt.show()
+
+
+# ---------------------------------------------------------------------------
+# Command-curriculum construction.
+#
+# Extracted verbatim from LeggedRobot._init_command_distribution /
+# _resample_commands so the grid, its initial active window and its expansion
+# neighbourhood can be exercised without starting IsaacGym -- which is what the
+# R1 acceptance criterion ("frozen channels stay constant under sampling")
+# actually needs.  A copy of this mapping inside a test would be a test of the
+# copy, not of the trainer.
+#
+# Dimension order is the commands_dog column order; see
+# go1_gym/response/command_layout.py.
+# ---------------------------------------------------------------------------
+
+
+def command_curriculum_kwargs(cfg):
+    """Grid definition: (low, high, num_bins) per command dimension."""
+    c = cfg.commands
+    kwargs = dict(
+        seed=c.curriculum_seed,
+        x_vel=(c.limit_vel_x[0], c.limit_vel_x[1], c.num_bins_vel_x),
+        y_vel=(c.limit_vel_y[0], c.limit_vel_y[1], c.num_bins_vel_y),
+        yaw_vel=(c.limit_vel_yaw[0], c.limit_vel_yaw[1], c.num_bins_vel_yaw),
+        body_pitch=(c.limit_body_pitch[0], c.limit_body_pitch[1], c.num_bins_body_pitch),
+        body_roll=(c.limit_body_roll[0], c.limit_body_roll[1], c.num_bins_body_roll),
+        body_height=(c.limit_body_height[0], c.limit_body_height[1], c.num_bins_body_height),
+    )
+    if c.use_dynamic_gait:
+        kwargs.update(
+            gait_frequency=(
+                c.limit_gait_frequency[0], c.limit_gait_frequency[1], c.num_bins_gait_frequency,
+            ),
+            footswing_height=(
+                c.limit_footswing_height[0], c.limit_footswing_height[1], c.num_bins_footswing_height,
+            ),
+            stance_width=(
+                c.limit_stance_width[0], c.limit_stance_width[1], c.num_bins_stance_width,
+            ),
+            stance_length=(
+                c.limit_stance_length[0], c.limit_stance_length[1], c.num_bins_stance_length,
+            ),
+            gait_duration=(
+                c.limit_gait_duration[0], c.limit_gait_duration[1], c.num_bins_gait_duration,
+            ),
+        )
+    return kwargs
+
+
+def command_curriculum_bounds(cfg):
+    """Initial active window handed to ``Curriculum.set_to``.
+
+    Note the asymmetry inherited from the original code and deliberately kept
+    here: the velocity and pitch/roll dimensions start from their *sampling*
+    range (narrow) and grow, while body height starts from its *limit* range
+    (already full).  R8 is where that inconsistency gets decided on; changing it
+    here would silently alter the curriculum schedule.
+    """
+    c = cfg.commands
+    low = np.array([
+        c.lin_vel_x[0], c.lin_vel_y[0], c.ang_vel_yaw[0],
+        c.body_pitch_range[0], c.body_roll_range[0], c.limit_body_height[0],
+    ])
+    high = np.array([
+        c.lin_vel_x[1], c.lin_vel_y[1], c.ang_vel_yaw[1],
+        c.body_pitch_range[1], c.body_roll_range[1], c.limit_body_height[1],
+    ])
+    if c.use_dynamic_gait:
+        low = np.concatenate([low, np.array([
+            c.limit_gait_frequency[0], c.limit_footswing_height[0],
+            c.limit_stance_width[0], c.limit_stance_length[0], c.limit_gait_duration[0],
+        ])])
+        high = np.concatenate([high, np.array([
+            c.limit_gait_frequency[1], c.limit_footswing_height[1],
+            c.limit_stance_width[1], c.limit_stance_length[1], c.limit_gait_duration[1],
+        ])])
+    return low, high
+
+
+def command_curriculum_local_range(cfg):
+    """Neighbourhood, in value units, that a successful bin unlocks around itself."""
+    local_range = np.array([0.55, 0.55, 0.55, 1.0, 1.0, 1.0])
+    if cfg.commands.use_dynamic_gait:
+        local_range = np.concatenate([local_range, np.array([0.55, 0.55, 0.55, 0.55, 0.55])])
+    return local_range
+
+
+def build_command_curriculum(cfg):
+    """Grid + initial active window, exactly as the trainer builds it."""
+    if cfg.commands.curriculum_type != "RewardThresholdCurriculum":
+        raise NotImplementedError(cfg.commands.curriculum_type)
+    curriculum = RewardThresholdCurriculum(**command_curriculum_kwargs(cfg))
+    low, high = command_curriculum_bounds(cfg)
+    curriculum.set_to(low=low, high=high)
+    return curriculum

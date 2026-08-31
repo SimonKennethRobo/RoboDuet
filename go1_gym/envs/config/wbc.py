@@ -611,6 +611,67 @@ DYNAMIC_GAIT_BIN_CONFIG = {
 }
 
 
+# ============================================================
+# R1 -- command-space trimming for the response-consistent policy.
+#
+# Collapses the MoB behaviour space to the five channels the SE(3) MPC will
+# actually decide (forward/lateral velocity, yaw rate, body height, body pitch),
+# leaves gait frequency semi-free in a narrow band, and pins everything else.
+#
+# Applied by core.apply_response_overrides() AFTER the feature-enable block,
+# because enable_dyna_gait() rewrites gait_frequency_cmd_range from
+# --dyna_gait_min_frequency and would otherwise win.
+#
+# R1 invariant: frozen channels keep their slot in commands_dog.  Deleting an
+# index would change the observation width and poison the comparison against
+# the unmodified WTW policy.  They are frozen by giving them a degenerate
+# sampling range and a single curriculum bin, never by removing them.
+# ============================================================
+RESPONSE_COMMAND_OVERRIDES = {
+    # body roll: frozen at 0.  Its commandable amplitude (~+-10 deg) is the same
+    # order as the roll oscillation trot induces on its own (+-2-4 deg), so the
+    # signal-to-noise ratio does not support identifying a roll response.  Left
+    # as an ablation, not a permanent restriction.
+    "commands.body_roll_range": [0.0, 0.0],
+    "commands.limit_body_roll": [0.0, 0.0],
+    "commands.num_bins_body_roll": 1,
+    # body pitch / body height stay decision variables -- the MPC needs body
+    # lean and height adjustment to help manipulation -- and become real
+    # curriculum dimensions instead of the single all-covering bin they had.
+    "commands.num_bins_body_pitch": 5,
+    "commands.num_bins_body_height": 5,
+}
+
+# Only meaningful with --dyna_gait (dog_num_commands == 11); without it these
+# columns do not exist.
+RESPONSE_GAIT_COMMAND_OVERRIDES = {
+    # Semi-free: trained over a narrow band for robustness, fixed at deployment,
+    # recorded as a conditioning input for the gait-phase residual model.
+    # A single bin keeps it out of the adaptive curriculum (R1 invariant) while
+    # still sampling uniformly across the band.
+    "commands.gait_frequency_cmd_range": [2.5, 3.5],
+    "commands.limit_gait_frequency": [2.5, 3.5],
+    "commands.num_bins_gait_frequency": 1,
+    # Gait type is locked to trot: different gaits have structurally different
+    # gait-phase residuals, and mixing them stops the residual model converging.
+    # footswing height and duty are already effectively fixed upstream; stance
+    # width/length were not, and are narrowed to a small band around the values
+    # _reward_raibert_heuristic treats as nominal (0.30 / 0.45).
+    "commands.footswing_height_range": [0.06, 0.061],
+    "commands.limit_footswing_height": [0.06, 0.061],
+    "commands.num_bins_footswing_height": 1,
+    "commands.stance_width_range": [0.28, 0.32],
+    "commands.limit_stance_width": [0.28, 0.32],
+    "commands.num_bins_stance_width": 1,
+    "commands.stance_length_range": [0.42, 0.46],
+    "commands.limit_stance_length": [0.42, 0.46],
+    "commands.num_bins_stance_length": 1,
+    "commands.gait_duration_cmd_range": [0.49, 0.5],
+    "commands.limit_gait_duration": [0.49, 0.5],
+    "commands.num_bins_gait_duration": 1,
+}
+
+
 ROBODUET_PROFILE = ConfigProfile(
     name="roboduet",
     overrides=ROBODUET_OVERRIDES,

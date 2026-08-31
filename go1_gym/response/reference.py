@@ -55,6 +55,8 @@ from typing import Iterable, Optional, Sequence, Tuple
 
 import torch
 
+from .command_layout import BODY_HEIGHT, BODY_PITCH, VX, VY, YAW_RATE
+
 
 @dataclass(frozen=True)
 class ChannelSpec:
@@ -78,11 +80,11 @@ class ChannelSpec:
 #: Starting values from the requirements document (R2).  MUST be replaced by
 #: the R8.2 calibration output before any result is reported.
 DEFAULT_CHANNELS: Tuple[ChannelSpec, ...] = (
-    ChannelSpec(name="vx", cmd_index=0, omega_n=8.0, rate_limit=1.2),
-    ChannelSpec(name="vy", cmd_index=1, omega_n=6.0, rate_limit=0.8),
-    ChannelSpec(name="wyaw", cmd_index=2, omega_n=8.0, rate_limit=3.0),
-    ChannelSpec(name="height", cmd_index=5, omega_n=7.0, rate_limit=0.25),
-    ChannelSpec(name="pitch", cmd_index=3, omega_n=5.0, rate_limit=0.8),
+    ChannelSpec(name="vx", cmd_index=VX, omega_n=8.0, rate_limit=1.2),
+    ChannelSpec(name="vy", cmd_index=VY, omega_n=6.0, rate_limit=0.8),
+    ChannelSpec(name="wyaw", cmd_index=YAW_RATE, omega_n=8.0, rate_limit=3.0),
+    ChannelSpec(name="height", cmd_index=BODY_HEIGHT, omega_n=7.0, rate_limit=0.25),
+    ChannelSpec(name="pitch", cmd_index=BODY_PITCH, omega_n=5.0, rate_limit=0.8),
 )
 
 

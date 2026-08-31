@@ -561,6 +561,26 @@ def enable_traj_tracking(cfg, layout):
         setattr(cfg.wbc.reward_scales, name, scale)
 
 
+def apply_response_overrides(cfg):
+    """Apply the R1 command-space trimming.
+
+    Runs LAST among the config mutations, after enable_dyna_gait() and the
+    goal-reaching / trajectory switches, because enable_dyna_gait() rewrites
+    ``commands.gait_frequency_cmd_range`` from ``--dyna_gait_min_frequency``
+    and would otherwise overwrite the narrow band R1 asks for.
+
+    The gait half is skipped when dynamic gait is off, where commands_dog is
+    only 6 wide and those columns do not exist.  That keeps a bare
+    ``build_roboduet_config()`` -- which the benchmark package builds at import
+    time -- working instead of raising.
+    """
+    from .wbc import RESPONSE_COMMAND_OVERRIDES, RESPONSE_GAIT_COMMAND_OVERRIDES
+
+    apply_cfg_overrides(cfg, RESPONSE_COMMAND_OVERRIDES)
+    if cfg.commands.use_dynamic_gait:
+        apply_cfg_overrides(cfg, RESPONSE_GAIT_COMMAND_OVERRIDES)
+
+
 def validate_arm_action_mode(cfg):
     """Check cfg.arm.action_mode, wherever it came from -- the wbc.py override
     table, a --arm_action_mode flag, or a restored checkpoint snapshot."""
@@ -667,6 +687,10 @@ def build_roboduet_config(args=None, *, options=None, debug=False):
     set_arm_action_mode(cfg, options.arm_action_mode)
     if not options.reach_table:
         cfg.wbc.goal_reaching.reach_table_path = ""
+
+    # MUST stay after every enable_*(): R1 narrows ranges that enable_dyna_gait
+    # writes, so applying it earlier would be silently undone.
+    apply_response_overrides(cfg)
 
     layout.finalize(cfg)
     configure_privileged_obs_dims(cfg)

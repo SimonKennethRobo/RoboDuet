@@ -14,6 +14,16 @@ splitting these classes out.  ``go1_gym/__init__.py`` only does ``import os``,
 so this package is reachable from a bare ``torch`` environment.
 """
 
+from .command_layout import (
+    CURRICULUM_KEY_ORDER,
+    DECISION_CHANNEL_NAMES,
+    DECISION_CMD_INDEX,
+    DOG_COMMAND_INDEX,
+    DOG_COMMAND_NAMES,
+    FROZEN_CMD_INDEX,
+    SEMI_FREE_CMD_INDEX,
+    assert_partition_is_complete,
+)
 from .reference import (
     DEFAULT_CHANNELS,
     ChannelSpec,
@@ -23,6 +33,14 @@ from .reference import (
 )
 
 __all__ = [
+    "CURRICULUM_KEY_ORDER",
+    "DECISION_CHANNEL_NAMES",
+    "DECISION_CMD_INDEX",
+    "DOG_COMMAND_INDEX",
+    "DOG_COMMAND_NAMES",
+    "FROZEN_CMD_INDEX",
+    "SEMI_FREE_CMD_INDEX",
+    "assert_partition_is_complete",
     "DEFAULT_CHANNELS",
     "ChannelSpec",
     "ReferenceModel",
