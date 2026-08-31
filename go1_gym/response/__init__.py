@@ -15,6 +15,7 @@ so this package is reachable from a bare ``torch`` environment.
 """
 
 from .command_layout import (
+    GAIT_FREQUENCY,
     CURRICULUM_KEY_ORDER,
     DECISION_CHANNEL_NAMES,
     DECISION_CHANNEL_UNITS,
@@ -25,6 +26,7 @@ from .command_layout import (
     SEMI_FREE_CMD_INDEX,
     assert_partition_is_complete,
 )
+from .residual import PhaseResidualEstimator
 from .reference import (
     DEFAULT_CHANNELS,
     ChannelSpec,
@@ -35,6 +37,7 @@ from .reference import (
 )
 
 __all__ = [
+    "GAIT_FREQUENCY",
     "CURRICULUM_KEY_ORDER",
     "DECISION_CHANNEL_NAMES",
     "DECISION_CHANNEL_UNITS",
@@ -46,6 +49,7 @@ __all__ = [
     "assert_partition_is_complete",
     "DEFAULT_CHANNELS",
     "ChannelSpec",
+    "PhaseResidualEstimator",
     "ReferenceModel",
     "build_channels",
     "critically_damped_step_response",

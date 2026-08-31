@@ -598,6 +598,27 @@ RESPONSE_MODEL_OVERRIDES = {
     "response.channel_order": ["vx", "vy", "wyaw", "height", "pitch"],
     "response.omega_n": {"vx": 8.0, "vy": 6.0, "wyaw": 8.0, "height": 7.0, "pitch": 5.0},
     "response.rate_limit": {"vx": 1.2, "vy": 0.8, "wyaw": 3.0, "height": 0.25, "pitch": 0.8},
+    # ---- R3: gait-phase-conditioned residual estimate -----------------------
+    # Speed binning is an R3 invariant, not a refinement: the oscillation's
+    # amplitude and shape change strongly with travel speed, and forcing one
+    # shape across all speeds is physically unrealisable -- the dependent reward
+    # would degrade into a constant negative floor.
+    "response.residual.speed_bin_edges": [0.15, 0.35, 0.6],
+    "response.residual.num_phase_bins": 16,
+    # Update-path low-pass. Long enough to leave the ~3 Hz gait ripple in the
+    # residual (attenuated only ~11% at tau=0.5 s), short enough to track the
+    # slow trend. Its lag is confined to this path and never reaches a reward.
+    "response.residual.lowpass_tau_s": 0.5,
+    # In units of *visits to a bin*, and a bin is visited about once per gait
+    # cycle -- so 15 cycles is ~5 s at 3 Hz, comfortably longer than the gait
+    # period as R3 requires.
+    "response.residual.estimate_cycles": 15.0,
+    # Convergence gate for the rewards that consume the estimate (R3: they must
+    # stay off until it has converged).
+    "response.residual.min_cycles": 45.0,
+    # Steps after a reset during which samples are discarded and the low-pass is
+    # snapped: the robot is still settling and the filter holds a stale level.
+    "response.residual.warmup_steps": 25,
 }
 
 

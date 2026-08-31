@@ -25,7 +25,13 @@ from go1_gym import MINI_GYM_ROOT_DIR
 from go1_gym.envs.base.base_task import BaseTask
 from go1_gym.envs.base.curriculum import command_curriculum_local_range
 from go1_gym.envs.config import ConfigNode
-from go1_gym.response import DECISION_CHANNEL_UNITS, ReferenceModel, build_channels
+from go1_gym.response import (
+    DECISION_CHANNEL_UNITS,
+    GAIT_FREQUENCY,
+    PhaseResidualEstimator,
+    ReferenceModel,
+    build_channels,
+)
 from go1_gym.utils import global_switch, quaternion_to_rpy
 from go1_gym.utils.math_utils import get_scale_shift, quat_apply_yaw
 from go1_gym.utils.terrain import Terrain
@@ -810,6 +816,26 @@ class LeggedRobot(BaseTask):
             dim=-1,
         )
 
+    def _residual_sample_active(self):
+        """Environments whose current sample may enter the residual estimate.
+
+        Two exclusions, both of which would otherwise corrupt it:
+
+        * **Standing.** ``_resample_commands`` forces the gait frequency to 0
+          when the velocity command is under 0.1, so the phase clock stops
+          (~17-24% of samples in practice). Every sample would then pile into
+          whichever phase bin the env happened to freeze in.
+        * **Just reset.** The low-pass still holds the previous episode's level
+          and the robot is settling, so the residual is meaningless.
+        """
+        past_warmup = self.episode_length_buf > int(self.cfg.response.residual.warmup_steps)
+        if self.commands_dog.shape[1] > GAIT_FREQUENCY:
+            clock_running = self.commands_dog[:, GAIT_FREQUENCY] > 0.1
+        else:
+            # Without dynamic gait the clock runs at a fixed 3 Hz, always.
+            clock_running = torch.ones_like(past_warmup)
+        return past_warmup & clock_running
+
     def _update_response_state(self):
         """Advance the R2 reference model by one control step.
 
@@ -819,8 +845,32 @@ class LeggedRobot(BaseTask):
         Also caches self.response_measured for the metrics to reuse.
         """
         self.response_measured = self._response_measured()
+
+        # Bin by COMMANDED planar speed, not measured: keeps the estimator out
+        # of a feedback loop with the quantity it detrends, and it is the value
+        # the planner knows.
+        speed_bin = self.response_residual.speed_bin(torch.norm(self.commands_dog[:, :2], dim=-1))
+        phase_bin = self.response_residual.phase_bin(self.gait_indices)
+        self.response_speed_bin = speed_bin
+        self.response_phase_bin = phase_bin
+
+        # USE path first, and strictly read-only: the detrended measurement must
+        # come from the estimate as it stood BEFORE this step's sample was
+        # folded in, or the two R3 paths are no longer separate.
+        self.response_detrended = self.response_residual.detrend(
+            self.response_measured, speed_bin, phase_bin
+        )
+        self.response_residual_converged = self.response_residual.is_converged(speed_bin, phase_bin)
+
         commands = self.response_ref.gather_commands(self.commands_dog)
+        # Alignment after a reset snaps to the raw measurement: the estimate has
+        # nothing useful for a freshly reset env, and it is a one-off snap.
         self.response_ref.step(commands, measured=self.response_measured)
+
+        # UPDATE path last.
+        self.response_residual.update(
+            self.response_measured, speed_bin, phase_bin, active=self._residual_sample_active()
+        )
 
     def compute_reward(self):
         """Compute rewards
@@ -1115,6 +1165,7 @@ class LeggedRobot(BaseTask):
             "foot_contact_samples",
             "locomotion_power_sum",
             *(f"ref_abs_err_{name}" for name in self.response_ref.channel_names),
+            *(f"ref_abs_err_detrended_{name}" for name in self.response_ref.channel_names),
         )
         self.performance_metric_sums = {
             name: torch.zeros(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
@@ -1166,8 +1217,13 @@ class LeggedRobot(BaseTask):
         # the moment the reference model exists so the step that turns it into a
         # reward has a before/after baseline.
         ref_abs_err = torch.abs(self.response_measured - self.response_ref.xi)
+        # Same error on the R3-detrended measurement. R4's acceptance asks for
+        # the variance of the tracking reward with and without detrending; these
+        # two series are that comparison, recorded before either becomes a reward.
+        ref_abs_err_detrended = torch.abs(self.response_detrended - self.response_ref.xi)
         for index, name in enumerate(self.response_ref.channel_names):
             sums[f"ref_abs_err_{name}"] += ref_abs_err[:, index]
+            sums[f"ref_abs_err_detrended_{name}"] += ref_abs_err_detrended[:, index]
 
         self._arm_update_performance_metrics_hook()
 
@@ -1216,6 +1272,9 @@ class LeggedRobot(BaseTask):
             unit = DECISION_CHANNEL_UNITS.get(name, "")
             suffix = f"_{unit}" if unit else ""
             extras[f"perf_ref_mae_{name}{suffix}"] = mean_valid(episode_mean(f"ref_abs_err_{name}"))
+            extras[f"perf_ref_mae_detrended_{name}{suffix}"] = mean_valid(
+                episode_mean(f"ref_abs_err_detrended_{name}")
+            )
         extras["perf_early_termination_rate"] = mean_valid((~timeouts).float())
         extras["perf_episode_duration_s"] = mean_valid(steps * self.dt)
         self._arm_log_performance_metrics_hook(train_env_ids, steps)
@@ -1865,6 +1924,22 @@ class LeggedRobot(BaseTask):
             ),
             num_envs=self.num_envs,
             dt=self.dt,
+            device=self.device,
+        )
+        # R3: per-environment estimate of the gait-phase-conditioned base
+        # oscillation. Feeds two things that must not share a data path -- the
+        # zero-delay detrend the tracking rewards need, and the target the
+        # phase-variance penalty compares against.
+        residual_cfg = self.cfg.response.residual
+        self.response_residual = PhaseResidualEstimator(
+            num_envs=self.num_envs,
+            num_channels=self.response_ref.num_channels,
+            dt=self.dt,
+            speed_bin_edges=residual_cfg.speed_bin_edges,
+            num_phase_bins=int(residual_cfg.num_phase_bins),
+            lowpass_tau_s=float(residual_cfg.lowpass_tau_s),
+            estimate_cycles=float(residual_cfg.estimate_cycles),
+            min_cycles=float(residual_cfg.min_cycles),
             device=self.device,
         )
         self.rew_buf_dog = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)

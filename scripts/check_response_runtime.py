@@ -1,0 +1,358 @@
+"""Runtime acceptance checks for the response-consistent locomotion policy.
+
+The unit tests under ``go1_gym/response/`` pin the maths on synthetic signals.
+These checks are the other half: they run the real IsaacGym env and verify the
+acceptance criteria in ``docs/project-design-rlmpc-v3-coding.md`` that only make
+sense on a moving robot.
+
+    python scripts/check_response_runtime.py --check all
+    python scripts/check_response_runtime.py --check r3 --policy <ckpt.pt>
+
+R1  frozen command channels stay inside their bands and only change at a
+    resample; body roll is identically zero; gait frequency stays in its band.
+R2  the reference model's position never advances faster than its rate limit,
+    peaks exactly at the limit, and holds unit steady-state gain.
+R3  the phase-conditioned residual is a clean low-order periodic waveform.
+    Needs a walking policy, so pass --policy; without one this check is skipped.
+"""
+
+import argparse
+import math
+import os
+import sys
+
+import isaacgym  # noqa: F401  must precede torch
+import torch
+
+from go1_gym.envs.config import build_roboduet_config
+from go1_gym.envs.roboduet.wbc_env import WBCEnv
+from go1_gym.envs.roboduet.wbc_env_wrapper import HistoryWrapper
+from go1_gym.response import (
+    DECISION_CMD_INDEX,
+    DOG_COMMAND_NAMES,
+    FROZEN_CMD_INDEX,
+    SEMI_FREE_CMD_INDEX,
+)
+from go1_gym.utils import global_switch
+
+
+def build_env(num_envs, sim_device, robot="go2_x5"):
+    args = argparse.Namespace(
+        robot=robot, num_envs=num_envs, dyna_gait=True, goal_reaching=False,
+        traj_tracking=False, arm_action_mode=None, no_reach_table=False,
+        dyna_gait_min_frequency=0.0, video=False,
+    )
+    cfg = build_roboduet_config(args)
+    cfg.env.arm_policy_enabled = False
+    cfg.env.record_video = False
+    # Keep the stage-2 switch permanently shut: these checks are stage-1 only.
+    global_switch.pretrained_to_wbc_start = 10 ** 9
+    global_switch.pretrained_to_wbc_end = 10 ** 9 + 1
+    global_switch.init_sigmoid_lr()
+    env = HistoryWrapper(WBCEnv(sim_device=sim_device, headless=True, cfg=cfg))
+    return env, cfg
+
+
+def zero_actions(env, cfg):
+    base = env.env
+    return (
+        torch.zeros(cfg.env.num_envs, cfg.dog.num_actions_loco, device=base.device),
+        torch.zeros(cfg.env.num_envs, base.num_actions_arm, device=base.device),
+    )
+
+
+def load_dog_policy(path, cfg, device):
+    from go1_gym_learn.ppo_cse_automatic.dog_ac import DogActorCritic
+
+    ac = DogActorCritic(
+        cfg.dog.dog_num_observations,
+        cfg.dog.dog_num_privileged_obs,
+        cfg.dog.dog_num_obs_history,
+        cfg.dog.dog_actions,
+        use_adaptation_module=False,
+    )
+    state = torch.load(path, map_location="cpu")
+    missing, unexpected = ac.load_state_dict(state, strict=False)
+    if missing:
+        raise SystemExit(
+            f"checkpoint {path} is missing {len(missing)} tensors, e.g. {missing[:3]}.\n"
+            "The observation layout has probably changed since it was trained."
+        )
+    return ac.eval().to(device)
+
+
+# ---------------------------------------------------------------------------
+# R1
+# ---------------------------------------------------------------------------
+
+
+def check_r1(env, cfg, steps=1200):
+    """Frozen channels constant, semi-free channel inside its band.
+
+    "Frozen" per R1 means pinned, or jittered inside a narrow band for
+    robustness -- so the test is (a) every value inside the configured band and
+    (b) the value only ever changes at a resample, never during one.  Asserting
+    "constant over the whole rollout" instead is a false alarm waiting to
+    happen, because the narrow-band jitter is resampled once per episode.
+    """
+    base = env.env
+    env.reset()
+    base.episode_length_buf = torch.randint_like(
+        base.episode_length_buf, high=int(base.max_episode_length)
+    )
+    dog_a, arm_a = zero_actions(env, cfg)
+
+    history = []
+    for _ in range(steps):
+        env.step(dog_a, arm_a)
+        history.append(base.commands_dog.clone())
+    commands = torch.stack(history)
+
+    bands = {
+        "body_roll": cfg.commands.limit_body_roll,
+        "footswing_height": cfg.commands.limit_footswing_height,
+        "stance_width": cfg.commands.limit_stance_width,
+        "stance_length": cfg.commands.limit_stance_length,
+        "gait_duration": cfg.commands.limit_gait_duration,
+    }
+    # Resamples every 500 steps plus a reset per episode, over a randomised
+    # start phase: a generous upper bound on legitimate changes.
+    max_changes = steps // 500 + 4
+
+    failures = []
+    group = {i: "frozen" for i in FROZEN_CMD_INDEX}
+    group.update({i: "semi-free" for i in SEMI_FREE_CMD_INDEX})
+    group.update({i: "decision" for i in DECISION_CMD_INDEX})
+
+    print(f"  {steps} steps x {cfg.env.num_envs} envs")
+    print(f"  {'idx':<4}{'name':<20}{'group':<11}{'min':>9}{'max':>9}{'changes/env':>13}")
+    for index, name in enumerate(DOG_COMMAND_NAMES):
+        column = commands[:, :, index]
+        changes = (column[1:] != column[:-1]).sum(dim=0).max().item()
+        print(
+            f"  {index:<4}{name:<20}{group[index]:<11}"
+            f"{column.min():>9.4f}{column.max():>9.4f}{changes:>13.0f}"
+        )
+        if group[index] != "frozen":
+            continue
+        low, high = bands[name]
+        if column.min().item() < low - 1e-6 or column.max().item() > high + 1e-6:
+            failures.append(
+                f"{name} left its band [{low}, {high}] -> "
+                f"[{column.min():.4f}, {column.max():.4f}]"
+            )
+        if changes > max_changes:
+            failures.append(
+                f"{name} changed {changes:.0f}x per env, more than the {max_changes} "
+                "resample/reset events -- it is varying mid-episode"
+            )
+
+    roll = commands[:, :, DOG_COMMAND_NAMES.index("body_roll")]
+    if not torch.all(roll == 0.0):
+        failures.append(f"body roll is not identically 0: [{roll.min():.5f}, {roll.max():.5f}]")
+
+    frequency = commands[:, :, DOG_COMMAND_NAMES.index("gait_frequency")]
+    moving = frequency > 0.01
+    if moving.any():
+        low, high = cfg.commands.limit_gait_frequency
+        span = (frequency[moving].min().item(), frequency[moving].max().item())
+        standing = (~moving).float().mean().item()
+        print(
+            f"  gait frequency while moving: [{span[0]:.3f}, {span[1]:.3f}]; "
+            f"{standing:.1%} of samples are standing (clock pinned to 0)"
+        )
+        if span[0] < low - 1e-4 or span[1] > high + 1e-4:
+            failures.append(f"gait frequency left [{low}, {high}] -> {span}")
+    return failures
+
+
+# ---------------------------------------------------------------------------
+# R2
+# ---------------------------------------------------------------------------
+
+
+def check_r2(env, cfg, steps=900):
+    """Rate saturation really bounds the reference, and the DC gain is 1."""
+    base = env.env
+    reference = base.response_ref
+    env.reset()
+    dog_a, arm_a = zero_actions(env, cfg)
+
+    xi_hist, rate_hist, cmd_hist, reset_hist = [], [], [], []
+    for _ in range(steps):
+        env.step(dog_a, arm_a)
+        xi_hist.append(reference.xi.clone())
+        rate_hist.append(reference.xi_dot.clone())
+        cmd_hist.append(reference.gather_commands(base.commands_dog).clone())
+        reset_hist.append(base.reset_buf.clone())
+    xi = torch.stack(xi_hist)
+    rate = torch.stack(rate_hist)
+    commands = torch.stack(cmd_hist)
+    resets = torch.stack(reset_hist).bool()
+
+    failures = []
+    if not torch.isfinite(xi).all():
+        failures.append("reference state contains non-finite values")
+
+    print(f"  {'channel':<10}{'peak rate':>11}{'limit':>9}{'max |dxi|':>12}{'limit*dt':>11}")
+    for index, name in enumerate(reference.channel_names):
+        limit = reference.rate_limit[0, index].item()
+        # Skip steps where the env reset: the reference realigns to the
+        # measurement there, which is a legitimate jump.
+        keep = ~(resets[1:] | resets[:-1])
+        increments = (xi[1:, :, index] - xi[:-1, :, index]).abs()[keep]
+        peak_rate = rate[:, :, index].abs().max().item()
+        largest = increments.max().item()
+        bound = limit * base.dt
+        print(f"  {name:<10}{peak_rate:>11.4f}{limit:>9.3f}{largest:>12.5f}{bound:>11.5f}")
+        if peak_rate > limit + 1e-5:
+            failures.append(f"{name}: peak rate {peak_rate:.4f} exceeds the limit {limit}")
+        # 2% covers the single boundary-crossing step, which takes the linear
+        # branch and is the one place the piecewise update is O(dt) approximate.
+        if largest > bound * 1.02:
+            failures.append(
+                f"{name}: reference advanced {largest:.5f} in one step, over rate_limit*dt "
+                f"= {bound:.5f}"
+            )
+
+    held = (commands[200:] == commands[:-200]).all(dim=-1)
+    if held.any():
+        error = (xi[200:] - commands[200:]).abs()[held].max().item()
+        print(f"  steady-state |xi - u| after 200 held steps: {error:.5f}")
+        if error > 0.02:
+            failures.append(f"steady-state gain is not 1 (|xi - u| = {error:.4f})")
+    return failures
+
+
+# ---------------------------------------------------------------------------
+# R3
+# ---------------------------------------------------------------------------
+
+# R3's wording is "dominated by the first one or two harmonics".  Taken
+# literally that is wrong for half the channels, and for a physical reason: in
+# trot both diagonal pairs push once per gait cycle, so forward velocity and
+# body height oscillate at TWICE the gait frequency and their energy sits in the
+# even harmonics (h2, h4).  Pitch and yaw rate, which alternate once per cycle,
+# really are h1-dominated.  The property the criterion is reaching for is "a
+# clean low-order periodic waveform, not noise", so the gate is concentration in
+# the first four harmonics; the h1+h2 share is still reported for reference.
+HARMONIC_GATE = 0.85
+HARMONIC_COUNT = 4
+
+
+def check_r3(env, cfg, policy_path, seconds=60.0, held_speed=0.5):
+    base = env.env
+    policy = load_dog_policy(policy_path, cfg, base.device)
+
+    held = {0: held_speed, 1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.0,
+            6: 3.0, 7: 0.06, 8: 0.30, 9: 0.44, 10: 0.5}
+
+    def hold():
+        for index, value in held.items():
+            base.commands_dog[:, index] = value
+
+    env.reset()
+    hold()
+    _, arm_a = zero_actions(env, cfg)
+
+    channels = len(base.response_ref.channel_names)
+    raw_error = torch.zeros(channels)
+    detrended_error = torch.zeros(channels)
+    samples = 0
+    with torch.no_grad():
+        for _ in range(int(seconds / base.dt)):
+            observations = env.get_dog_observations()
+            actions = policy.act_inference({"obs_history": observations["obs_history"]})
+            env.step(actions, arm_a)
+            hold()
+            active = base._residual_sample_active()
+            if active.any():
+                raw_error += (base.response_measured - base.response_ref.xi).abs()[active].mean(0).cpu()
+                detrended_error += (base.response_detrended - base.response_ref.xi).abs()[active].mean(0).cpu()
+                samples += 1
+    raw_error /= max(samples, 1)
+    detrended_error /= max(samples, 1)
+
+    estimator = base.response_residual
+    speed_bin = estimator.speed_bin(torch.norm(base.commands_dog[:, :2], dim=-1))[0].item()
+    visits = estimator.sample_count[:, speed_bin].median().item()
+    print(f"  held vx={held_speed} for {seconds:.0f}s | speed bin {speed_bin} | "
+          f"median visits per phase bin {visits:.0f}")
+
+    failures = []
+    print(f"  {'channel':<10}{'pk-pk':>9}{'h1+h2':>9}{f'h1..h{HARMONIC_COUNT}':>9}"
+          f"{'raw MAE':>10}{'detrended':>11}{'change':>9}")
+    for index, name in enumerate(base.response_ref.channel_names):
+        curve = estimator.delta_hat[:, speed_bin, :, index].mean(0).double()
+        power = (torch.fft.rfft(curve).abs() ** 2)[1:]
+        total = power.sum()
+        low_two = (power[:2].sum() / total).item() if total > 0 else 0.0
+        low_n = (power[:HARMONIC_COUNT].sum() / total).item() if total > 0 else 0.0
+        peak_to_peak = (curve.max() - curve.min()).item()
+        change = (detrended_error[index] - raw_error[index]) / raw_error[index] * 100
+        print(f"  {name:<10}{peak_to_peak:>9.4f}{low_two:>8.0%}{low_n:>9.0%}"
+              f"{raw_error[index]:>10.4f}{detrended_error[index]:>11.4f}{change:>8.1f}%")
+        harmonics = "  ".join(f"h{k + 1}={v:.0%}" for k, v in enumerate((power / total).tolist()[:6]))
+        print(f"  {'':<10}{harmonics}")
+        if peak_to_peak > 1e-4 and low_n < HARMONIC_GATE:
+            failures.append(
+                f"{name}: harmonics 1-{HARMONIC_COUNT} carry only {low_n:.1%} of the AC "
+                "power -- the residual looks like noise, not a gait waveform"
+            )
+        if visits < estimator.min_samples:
+            failures.append(
+                f"phase bins saw {visits:.0f} visits, below the convergence gate "
+                f"({estimator.min_samples:.0f})"
+            )
+            break
+    return failures
+
+
+# ---------------------------------------------------------------------------
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--check", default="all", choices=["r1", "r2", "r3", "all"])
+    parser.add_argument("--num_envs", type=int, default=64)
+    parser.add_argument("--sim_device", type=str, default="cuda:0")
+    parser.add_argument("--robot", type=str, default="go2_x5")
+    parser.add_argument("--policy", type=str, default=None,
+                        help="stage-1 dog checkpoint; required for the R3 check")
+    parser.add_argument("--seconds", type=float, default=60.0, help="R3 rollout length")
+    args = parser.parse_args()
+
+    env, cfg = build_env(args.num_envs, args.sim_device, args.robot)
+    wanted = ["r1", "r2", "r3"] if args.check == "all" else [args.check]
+
+    results = {}
+    for name in wanted:
+        print(f"\n=== {name.upper()} ===")
+        if name == "r1":
+            results[name] = check_r1(env, cfg)
+        elif name == "r2":
+            results[name] = check_r2(env, cfg)
+        elif name == "r3":
+            if not args.policy:
+                print("  skipped: needs a walking policy, pass --policy <ckpt.pt>")
+                continue
+            if not os.path.exists(args.policy):
+                raise SystemExit(f"checkpoint not found: {args.policy}")
+            results[name] = check_r3(env, cfg, args.policy, seconds=args.seconds)
+
+    print("\n=== summary ===")
+    failed = False
+    for name, failures in results.items():
+        if failures:
+            failed = True
+            print(f"  {name.upper()} FAILED:")
+            for failure in failures:
+                print(f"    - {failure}")
+        else:
+            print(f"  {name.upper()} passed")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
