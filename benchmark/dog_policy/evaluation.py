@@ -960,8 +960,8 @@ def _eval_loop_parallel(
     ``settle_steps`` runs that many un-accumulated steps first, holding
     ``settle_cmd_fn`` (falling back to ``cmd_fn``). Used by the step-response
     scenario to damp the reset's hardcoded +-0.5 m/s initial base velocity to
-    rest -- and bring the first-order reference model dog_vel_ref to 0 -- so the
-    subsequently-held command is a clean step from rest.
+    rest -- and settle the R2 reference model response_ref onto that rest state
+    -- so the subsequently-held command is a clean step from rest.
     """
     configure_stage1(arm_intensity)
     env.reset()
@@ -1014,7 +1014,10 @@ def _eval_loop_parallel(
         vel = base.base_lin_vel  # [total_envs, 3]
         ang = base.base_ang_vel  # [total_envs, 3]
         cmd = base.commands_dog  # [total_envs, D]
-        vel_ref = getattr(base, "dog_vel_ref", None)  # [total_envs, 2] first-order ref, or None
+        # R2 prescribed reference: [total_envs, 5] in response-channel order
+        # (vx, vy, wyaw, height, pitch). None on checkpoints predating it.
+        ref_model = getattr(base, "response_ref", None)
+        ref_xi = ref_model.xi if ref_model is not None else None
         pitch = base.pitch  # [total_envs]
         roll = base.roll  # [total_envs]
         height = _actual_height(env)  # [total_envs]
@@ -1043,13 +1046,16 @@ def _eval_loop_parallel(
             acc.add_sq_err("yaw", ang_g[:, 2], cmd_g[:, 2])
             lin_vel_err = torch.sum(torch.square(cmd_g[:, :2] - vel_g[:, :2]), dim=1)
             acc.add_sq("lin_vel_xy", lin_vel_err)
-            if vel_ref is not None:
+            if ref_xi is not None:
                 # Predictable-plant metric: deviation of the realised base
-                # velocity from the first-order reference model of the command
-                # (v_ref += (v_cmd - v_ref) * dt / T). Same quantity as the
-                # response_consistency reward -- low = leg response tracks a
-                # fixed-time-constant linear plant, which upstream v_ff needs.
-                resp_cons_err = torch.sum(torch.square(vel_g[:, :2] - vel_ref[s:e]), dim=1)
+                # velocity from the PRESCRIBED reference trajectory (R2's
+                # critically damped second-order model with a rate box), rather
+                # than from the raw command. Low = the closed loop behaves like
+                # the fixed linear plant the MPC will plan through.
+                # Restricted to the two velocity channels so the number stays
+                # comparable with results recorded before R2 replaced the
+                # first-order model.
+                resp_cons_err = torch.sum(torch.square(vel_g[:, :2] - ref_xi[s:e, :2]), dim=1)
                 acc.add_sq("response_consistency", resp_cons_err)
             yaw_err = torch.square(cmd_g[:, 2] - ang_g[:, 2])
             acc.add_val("tracking_lin_vel_reward", torch.exp(-lin_vel_err / base.cfg.rewards.tracking_sigma))

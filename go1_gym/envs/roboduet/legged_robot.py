@@ -25,6 +25,7 @@ from go1_gym import MINI_GYM_ROOT_DIR
 from go1_gym.envs.base.base_task import BaseTask
 from go1_gym.envs.base.curriculum import command_curriculum_local_range
 from go1_gym.envs.config import ConfigNode
+from go1_gym.response import DECISION_CHANNEL_UNITS, ReferenceModel, build_channels
 from go1_gym.utils import global_switch, quaternion_to_rpy
 from go1_gym.utils.math_utils import get_scale_shift, quat_apply_yaw
 from go1_gym.utils.terrain import Terrain
@@ -377,8 +378,11 @@ class LeggedRobot(BaseTask):
 
         # compute observations, rewards, resets, ...
         self.check_termination()
+        # Ahead of the metrics, not just ahead of compute_reward(): both have to
+        # see this step's reference, otherwise the logged tracking error is off
+        # by one control step and looks like a constant lag that isn't there.
+        self._update_response_state()
         self._update_performance_metrics()
-        self._update_dog_vel_ref()
         self.compute_reward()
         env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
         self.reset_idx(env_ids)
@@ -443,7 +447,11 @@ class LeggedRobot(BaseTask):
         self.last_actions[env_ids] = 0.0
         self.last_last_actions[env_ids] = 0.0
         self.last_dof_vel[env_ids] = 0.0
-        self.dog_vel_ref[env_ids] = 0.0
+        # R2 invariant: align the reference to the measurement on reset only,
+        # never on command resampling.  Deferred by one step because the
+        # measurement buffers here still hold pre-reset values -- they are
+        # refreshed at the top of the next post_physics_step().
+        self.response_ref.request_alignment(env_ids)
         self.feet_air_time[env_ids] = 0.0
         self.episode_length_buf[env_ids] = 0
         self.reset_buf[env_ids] = 1
@@ -765,13 +773,54 @@ class LeggedRobot(BaseTask):
             "traj_twist_err",
         }
 
-    def _update_dog_vel_ref(self):
-        """Advance the first-order reference model tracked by the
-        response_consistency reward: v_ref += (v_cmd - v_ref) * dt / T.
-        Runs unconditionally (cheap) so the buffer stays valid even when the
-        reward scale is zero."""
-        T = max(float(self.cfg.rewards.response_consistency_T), 1e-3)
-        self.dog_vel_ref += (self.commands_dog[:, :2] - self.dog_vel_ref) * (self.dt / T)
+    def _terrain_reference_height(self):
+        """Ground height under the base, or 0 on flat terrain.
+
+        Global invariant 9: on rough terrain every height quantity must be
+        measured relative to the local ground, never in the world frame.  With
+        ``terrain.measure_heights`` off (the current flat-ground setup)
+        ``measured_heights`` is the scalar 0 and this degenerates correctly.
+        """
+        heights = self.measured_heights
+        if isinstance(heights, torch.Tensor):
+            return torch.mean(heights, dim=1) if heights.ndim > 1 else heights
+        return torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+
+    def _response_measured(self):
+        """The five decision channels as actually realised, in channel order.
+
+        Body frame throughout, and height relative to the local terrain -- the
+        quantities the reference model, the consistency rewards and the MPC all
+        have to agree on.  ``self.pitch`` is refreshed by check_termination(),
+        which runs earlier in post_physics_step().
+        """
+        body_height = (
+            self.base_pos[:, 2]
+            - self._terrain_reference_height()
+            - float(self.cfg.rewards.base_height_target)
+        )
+        return torch.stack(
+            (
+                self.base_lin_vel[:, 0],
+                self.base_lin_vel[:, 1],
+                self.base_ang_vel[:, 2],
+                body_height,
+                self.pitch,
+            ),
+            dim=-1,
+        )
+
+    def _update_response_state(self):
+        """Advance the R2 reference model by one control step.
+
+        Ordering: after check_termination() (which refreshes self.pitch) and
+        before BOTH _update_performance_metrics() and compute_reward() -- R2
+        invariant: they must see this step's reference, not the previous one's.
+        Also caches self.response_measured for the metrics to reuse.
+        """
+        self.response_measured = self._response_measured()
+        commands = self.response_ref.gather_commands(self.commands_dog)
+        self.response_ref.step(commands, measured=self.response_measured)
 
     def compute_reward(self):
         """Compute rewards
@@ -1065,6 +1114,7 @@ class LeggedRobot(BaseTask):
             "foot_slip_speed_sum",
             "foot_contact_samples",
             "locomotion_power_sum",
+            *(f"ref_abs_err_{name}" for name in self.response_ref.channel_names),
         )
         self.performance_metric_sums = {
             name: torch.zeros(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
@@ -1110,6 +1160,15 @@ class LeggedRobot(BaseTask):
         sums["foot_slip_speed_sum"] += torch.sum(foot_slip_speed * foot_contact.float(), dim=-1)
         sums["foot_contact_samples"] += torch.sum(foot_contact, dim=-1).float()
         sums["locomotion_power_sum"] += self.step_locomotion_power
+
+        # R2 diagnostic, deliberately NOT a reward yet: how far the realised
+        # response is from the prescribed reference, per channel.  Recorded from
+        # the moment the reference model exists so the step that turns it into a
+        # reward has a before/after baseline.
+        ref_abs_err = torch.abs(self.response_measured - self.response_ref.xi)
+        for index, name in enumerate(self.response_ref.channel_names):
+            sums[f"ref_abs_err_{name}"] += ref_abs_err[:, index]
+
         self._arm_update_performance_metrics_hook()
 
     @staticmethod
@@ -1153,6 +1212,10 @@ class LeggedRobot(BaseTask):
         slip_speed = sums["foot_slip_speed_sum"][train_env_ids] / torch.clamp(contact_samples, min=1.0)
         extras["perf_foot_slip_speed_mps"] = self._mean_valid_metric(slip_speed, contact_valid)
         extras["perf_locomotion_power_w"] = mean_valid(episode_mean("locomotion_power_sum"))
+        for name in self.response_ref.channel_names:
+            unit = DECISION_CHANNEL_UNITS.get(name, "")
+            suffix = f"_{unit}" if unit else ""
+            extras[f"perf_ref_mae_{name}{suffix}"] = mean_valid(episode_mean(f"ref_abs_err_{name}"))
         extras["perf_early_termination_rate"] = mean_valid((~timeouts).float())
         extras["perf_episode_duration_s"] = mean_valid(steps * self.dt)
         self._arm_log_performance_metrics_hook(train_env_ids, steps)
@@ -1790,10 +1853,20 @@ class LeggedRobot(BaseTask):
             device=self.device,
             requires_grad=False,
         )[: self.cfg.dog.dog_num_commands]
-        # First-order reference model of commands_dog[:, :2], used by the
-        # response_consistency reward (see rewards.py) and updated every
-        # step in _update_dog_vel_ref().
-        self.dog_vel_ref = torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device, requires_grad=False)
+        # R2 prescribed reference-response model: one critically damped
+        # second-order system with a rate box per MPC decision channel.  The
+        # policy is trained to track its state, not the raw command, and the
+        # very same linear system becomes the MPC's nominal dynamics.
+        self.response_ref = ReferenceModel(
+            build_channels(
+                self.cfg.response.channel_order,
+                self.cfg.response.omega_n,
+                self.cfg.response.rate_limit,
+            ),
+            num_envs=self.num_envs,
+            dt=self.dt,
+            device=self.device,
+        )
         self.rew_buf_dog = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
         self.rew_buf_pos_dog = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
         self.rew_buf_neg_dog = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)

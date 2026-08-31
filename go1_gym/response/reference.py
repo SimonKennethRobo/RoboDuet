@@ -38,13 +38,28 @@ reference state".
 
 Rate saturation
 ---------------
-The limit is applied to ``xi_dot`` (a state), not to the acceleration.  The
-system therefore stays "linear dynamics + box constraint on a state", which is
-what keeps the MPC a QP.  A consequence worth stating plainly: while saturated,
-``xi`` does not advance at exactly ``rate_limit`` -- it follows the constrained
-linear system, whose position increment can sit a few percent above
-``rate_limit * dt``.  That is the behaviour the MPC will reproduce, so it is the
-behaviour the policy must be trained against.
+The limit is applied to ``xi_dot`` (a state), not to the acceleration, so the
+system stays "linear dynamics + box constraint on a state" and the MPC stays a
+QP.  R2's rationale is explicit about what saturation is for: small commands
+keep full bandwidth, large commands *degenerate into a constant-velocity ramp*.
+
+Getting that right needs one more step than clipping the endpoint.  Advancing
+the exact linear map across the whole interval and clipping ``xi_dot`` only at
+the end lets ``xi`` move faster than ``rate_limit`` *within* the interval -- on
+a large command step the position increment reaches ~1.4x ``rate_limit * dt``.
+Two things are wrong with that: it contradicts the continuous-time spec (where
+``|dxi/dt| <= rate_limit`` holds pointwise, hence ``|dxi| <= rate_limit * dt``
+over any interval), and the size of the violation scales with ``dt``, which
+destroys the step-size independence the exact discretisation was chosen for.
+
+So the update is piecewise, and exact in both pieces:
+
+* not saturated -> the exact ZOH map (exact for the linear system),
+* saturated     -> ``xi += clipped_rate * dt`` (exact for a ramp).
+
+Only the one or two steps that cross the boundary carry O(dt) error.  A
+saturated large step is therefore a true constant-velocity ramp at
+``rate_limit``, and both regimes reproduce the same trajectory at any dt.
 """
 
 from __future__ import annotations
@@ -55,7 +70,15 @@ from typing import Iterable, Optional, Sequence, Tuple
 
 import torch
 
-from .command_layout import BODY_HEIGHT, BODY_PITCH, VX, VY, YAW_RATE
+from .command_layout import (
+    BODY_HEIGHT,
+    BODY_PITCH,
+    DECISION_CHANNEL_NAMES,
+    DECISION_CMD_INDEX,
+    VX,
+    VY,
+    YAW_RATE,
+)
 
 
 @dataclass(frozen=True)
@@ -118,6 +141,33 @@ def validate_channels(channels: Sequence[ChannelSpec]) -> None:
                 "R2 invariant violated: omega_n[pitch] must be strictly less than "
                 f"omega_n[height], got {by_name['pitch'].omega_n} >= {by_name['height'].omega_n}"
             )
+
+
+def build_channels(order, omega_n, rate_limit):
+    """Assemble the channel table from plain config containers.
+
+    ``omega_n`` and ``rate_limit`` are name-keyed mappings (that is what the
+    R8.2 calibration writes out); ``cmd_index`` is deliberately *not*
+    configurable -- it is a fact about the command vector layout, not a tunable,
+    so it comes from ``command_layout`` and cannot drift per run.
+    """
+    index_of = dict(zip(DECISION_CHANNEL_NAMES, DECISION_CMD_INDEX))
+    missing = [name for name in order if name not in index_of]
+    if missing:
+        raise ValueError(
+            f"unknown response channel(s) {missing}; known: {list(index_of)}"
+        )
+    channels = tuple(
+        ChannelSpec(
+            name=name,
+            cmd_index=index_of[name],
+            omega_n=float(omega_n[name]),
+            rate_limit=float(rate_limit[name]),
+        )
+        for name in order
+    )
+    validate_channels(channels)
+    return channels
 
 
 def critically_damped_step_response(
@@ -288,8 +338,14 @@ class ReferenceModel:
         next_deviation = self._a11 * deviation + self._a12 * rate
         next_rate = self._a21 * deviation + self._a22 * rate
 
-        self.xi_dot = torch.clamp(next_rate, -self.rate_limit, self.rate_limit)
-        self.xi = commands + next_deviation
+        clipped_rate = torch.clamp(next_rate, -self.rate_limit, self.rate_limit)
+        saturated = clipped_rate != next_rate
+
+        # Unsaturated: the exact linear map.  Saturated: a ramp at exactly the
+        # limit, so the position honours |dxi| <= rate_limit * dt.  See the
+        # module docstring for why the endpoint-clip alternative is wrong.
+        self.xi = torch.where(saturated, self.xi + clipped_rate * self.dt, commands + next_deviation)
+        self.xi_dot = clipped_rate
 
     # ------------------------------------------------------------------- misc
 

@@ -82,7 +82,7 @@ VEL_GRID: List[tuple] = [(xv, 0.0, yaw) for xv in [-0.5, 0.0, 0.5, 1.0, 1.5] for
 ARM_INTENSITY_SWEEP = [0.0, 0.25, 0.5, 0.75, 1.0]
 FORWARD_CMD = (1.0, 0.0, 0.0)
 # Step-response targets (vx, vy, yaw): each point resets (which zeroes both the
-# base velocity and the first-order reference model dog_vel_ref) then holds the
+# base velocity and the prescribed R2 reference model response_ref) then holds the
 # target, so it is a step from rest. response_consistency_rmse then measures how
 # closely the realised velocity follows the fixed-time-constant reference model.
 STEP_TARGETS: List[tuple] = [

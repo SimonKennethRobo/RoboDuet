@@ -220,7 +220,6 @@ COMMON_OVERRIDES = {
     # LeggedRobot._prepare_reward_function's pretrained -> wbc fallback merge)
     "rewards.terminal_body_height": 0.17,
     "reward_scales.loco_energy": -0.00004,
-    "reward_scales.response_consistency": -0.05,
     # domain randomization: base & mount
     "domain_rand.dog_obs_frame_drop_prob": 0.0,
     "domain_rand.added_mass_range": [-2.0, 2.0],
@@ -582,7 +581,28 @@ TRAJ_TRACKING_REWARD_SCALES = {
 }
 
 
+# ============================================================
+# R2 -- prescribed reference-response model.
+#
+# omega_n / rate_limit are STARTING VALUES from the requirements document.
+# R8.2's calibration measures the 20th percentile of what a stage-1 policy can
+# actually sustain across the full randomisation range and overwrites them; a
+# reference the plant cannot realise in the hard domains forces the policy to
+# choose between missing the reference and going unstable, which is the main
+# way this method loses robustness.
+#
+# cmd_index is NOT here on purpose: it is a fact about the commands_dog layout
+# (go1_gym/response/command_layout.py), not a tunable.
+# ============================================================
+RESPONSE_MODEL_OVERRIDES = {
+    "response.channel_order": ["vx", "vy", "wyaw", "height", "pitch"],
+    "response.omega_n": {"vx": 8.0, "vy": 6.0, "wyaw": 8.0, "height": 7.0, "pitch": 5.0},
+    "response.rate_limit": {"vx": 1.2, "vy": 0.8, "wyaw": 3.0, "height": 0.25, "pitch": 0.8},
+}
+
+
 ROBODUET_OVERRIDES = {
+    **RESPONSE_MODEL_OVERRIDES,
     **COMMON_OVERRIDES,
     **STAGE1_OVERRIDES,
     **STAGE2_OVERRIDES,

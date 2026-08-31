@@ -85,6 +85,16 @@ CURRICULUM_KEY_ORDER: Tuple[str, ...] = (
 DECISION_CMD_INDEX: Tuple[int, ...] = (VX, VY, YAW_RATE, BODY_HEIGHT, BODY_PITCH)
 DECISION_CHANNEL_NAMES: Tuple[str, ...] = ("vx", "vy", "wyaw", "height", "pitch")
 
+#: Physical unit suffix per decision channel.  Metric names in this repo carry
+#: their units (see AGENTS.md) and these five channels do not share one.
+DECISION_CHANNEL_UNITS: Dict[str, str] = {
+    "vx": "mps",
+    "vy": "mps",
+    "wyaw": "rad_s",
+    "height": "m",
+    "pitch": "rad",
+}
+
 #: Trained over a narrow band, fixed at deployment, but recorded as a
 #: conditioning input for the gait-phase residual model (R1 "semi-free").
 #: Excluded from the adaptive curriculum: it gets a single grid bin, so the

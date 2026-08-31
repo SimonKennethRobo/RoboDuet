@@ -123,6 +123,58 @@ def test_small_step_does_not_saturate():
     assert peak == pytest.approx(0.4 * PITCH.omega_n / math.e, rel=2e-3)
 
 
+def test_saturated_position_never_moves_faster_than_the_limit():
+    """The continuous-time spec bounds |dxi/dt| pointwise, so over one step
+    |dxi| <= rate_limit * dt.  Clipping only the endpoint of an exact linear
+    step violates this by ~40% on a large command jump."""
+    bound = PITCH.rate_limit * DT
+    # Several amplitudes, including ones large enough that saturation both
+    # starts and ends inside the window.
+    for amplitude in (0.6, 1.2, 2.0):
+        model = _single_channel_model(PITCH)
+        xi, _ = _run_step(model, amplitude, 120)
+        first = xi[0, 0].abs().item()
+        increments = (xi[0, 1:] - xi[0, :-1]).abs()
+        assert first <= bound * 1.01, f"A={amplitude}: first step {first:.5f} > {bound:.5f}"
+        # 1% covers the single boundary-crossing step, which takes the linear
+        # branch and is the one place the piecewise update is O(dt) approximate.
+        # Endpoint-clipping (the wrong implementation) overshoots by ~40% here.
+        assert increments.max().item() <= bound * 1.01, (
+            f"A={amplitude}: max step {increments.max().item():.5f} exceeds "
+            f"rate_limit*dt = {bound:.5f}"
+        )
+
+
+def test_saturated_segment_is_a_constant_velocity_ramp():
+    """R2's stated intent: large commands degenerate into a ramp."""
+    model = _single_channel_model(PITCH)
+    xi, rate = _run_step(model, 1.2, 60)
+    saturated = rate[0].abs() >= PITCH.rate_limit - 1e-6
+    assert saturated.sum() > 10, "expected a long saturated segment"
+
+    # Inside the saturated run the position advances by exactly limit*dt.
+    idx = saturated.nonzero().flatten()
+    run = idx[(idx > idx.min()) & (idx < idx.max())]
+    increments = xi[0, run] - xi[0, run - 1]
+    expected = PITCH.rate_limit * DT
+    assert increments.min().item() == pytest.approx(expected, rel=1e-5)
+    assert increments.max().item() == pytest.approx(expected, rel=1e-5)
+
+
+def test_saturated_trajectory_is_step_size_independent():
+    """The property that motivated exact discretisation must survive
+    saturation -- otherwise training at 50 Hz and planning at another rate
+    disagree exactly where the rate limit bites."""
+    coarse = _single_channel_model(PITCH, dt=DT, dtype=torch.float64)
+    fine = _single_channel_model(PITCH, dt=DT / 4, dtype=torch.float64)
+
+    xi_coarse, rate_coarse = _run_step(coarse, 1.2, 50)   # 1.0 s
+    xi_fine, _ = _run_step(fine, 1.2, 200)                # 1.0 s
+    assert (rate_coarse[0].abs() >= PITCH.rate_limit - 1e-9).any(), "must actually saturate"
+
+    assert xi_coarse[0, -1].item() == pytest.approx(xi_fine[0, -1].item(), abs=2e-3)
+
+
 def test_saturated_response_still_converges_without_overshoot():
     """Clipping must not turn a critically damped system into an oscillator."""
     amplitude = 0.6

@@ -17,6 +17,7 @@ so this package is reachable from a bare ``torch`` environment.
 from .command_layout import (
     CURRICULUM_KEY_ORDER,
     DECISION_CHANNEL_NAMES,
+    DECISION_CHANNEL_UNITS,
     DECISION_CMD_INDEX,
     DOG_COMMAND_INDEX,
     DOG_COMMAND_NAMES,
@@ -28,6 +29,7 @@ from .reference import (
     DEFAULT_CHANNELS,
     ChannelSpec,
     ReferenceModel,
+    build_channels,
     critically_damped_step_response,
     validate_channels,
 )
@@ -35,6 +37,7 @@ from .reference import (
 __all__ = [
     "CURRICULUM_KEY_ORDER",
     "DECISION_CHANNEL_NAMES",
+    "DECISION_CHANNEL_UNITS",
     "DECISION_CMD_INDEX",
     "DOG_COMMAND_INDEX",
     "DOG_COMMAND_NAMES",
@@ -44,6 +47,7 @@ __all__ = [
     "DEFAULT_CHANNELS",
     "ChannelSpec",
     "ReferenceModel",
+    "build_channels",
     "critically_damped_step_response",
     "validate_channels",
 ]

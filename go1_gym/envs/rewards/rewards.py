@@ -79,16 +79,6 @@ class Rewards:
         ang_vel_error = torch.square(self.env.commands_dog[:, 2] - self.env.base_ang_vel[:, 2])
         return torch.exp(-ang_vel_error / self.env.cfg.rewards.tracking_sigma_yaw)
 
-    def _reward_response_consistency(self):
-        # Penalizes deviation from a first-order reference model of the xy
-        # velocity command (self.env.dog_vel_ref, updated every step in
-        # LeggedRobot._update_dog_vel_ref). Unlike tracking_lin_vel, which
-        # rewards matching the raw (discontinuous) command, this keeps the
-        # realised response close to a predictable linear plant regardless
-        # of payload/posture disturbance, so an upstream planner can rely on
-        # a fixed time constant when computing feedforward base motion.
-        return torch.sum(torch.square(self.env.base_lin_vel[:, :2] - self.env.dog_vel_ref), dim=-1)
-
     def _reward_lin_vel_z(self):
         # Penalize z axis base linear velocity
         return torch.square(self.env.base_lin_vel[:, 2])
@@ -233,7 +223,11 @@ class Rewards:
         return torch.sum(out_of_limits, dim=1)
 
     def _reward_jump(self):
-        reference_heights = 0
+        # Despite the name this is the body-height tracking term. Terrain height
+        # is subtracted through the shared helper rather than assumed to be 0:
+        # on flat ground it returns 0 (identical behaviour), and on rough
+        # terrain a world-frame height would violate global invariant 9.
+        reference_heights = self.env._terrain_reference_height()
         body_height = self.env.base_pos[:, 2] - reference_heights
         jump_height_target = self.env.commands_dog[:, 5] + self.env.cfg.rewards.base_height_target
         reward = - torch.square(body_height - jump_height_target)
@@ -280,7 +274,7 @@ class Rewards:
         return rew_slip
 
     def _reward_feet_contact_vel(self):
-        reference_heights = 0
+        reference_heights = self.env._terrain_reference_height().unsqueeze(-1)
         near_ground = self.env.foot_positions[:, :, 2] - reference_heights < 0.03
         foot_velocities = torch.square(torch.norm(self.env.foot_velocities[:, :, 0:3], dim=2).view(self.env.num_envs, -1))
         rew_contact_vel = torch.sum(near_ground * foot_velocities, dim=1)

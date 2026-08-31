@@ -501,6 +501,13 @@ python scripts/auto_train.py --train_stage stage1 --dyna_gait --headless \
 | 每 iteration 采样 | 24 步 × 4096 env = 98,304 transitions |
 | 训练健康度 | 200 iter 无报错、无 NaN；mean episode length 149 → 806，mean reward 0.033 → 0.238 |
 
+> ⚠️ **200 iter 的 mean reward 不能用于版本间比较。** 实测：同一份代码、
+> 三个固定种子（42/43/44），200 iter 末段 mean reward 分别是
+> **0.2275 / 0.7408 / 2.6352**，散布 11.6 倍；episode length 584/917/882。
+> 而总耗时是稳的（233/238/231 s，±1.5%）。
+> 因此 200 iter 只能做「跑得通 / 无 NaN / 耗时正常」的冒烟门限，
+> 任何奖励层面的结论都需要 R9 的多种子对照。
+
 > 显存有充裕余量。R3 的 `(num_envs, 4速度桶, 16相位桶, 5通道)` float32
 > 估计量只占 **5.2 MB**，R5/R6 的分组掩码可忽略，
 > **新增状态不构成显存约束**。
