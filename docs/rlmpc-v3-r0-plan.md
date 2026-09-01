@@ -1589,6 +1589,72 @@ MPC 要规划的对象也不同。
 姿态通道按 `(domain, 阶跃时刻相位桶)` 联合分桶后**取各桶中最差的那个**——
 "平均相位可实现、不利相位不可实现"正是 R8.2 明令禁止的那种模型。
 
+### R8.2 的诊断告警（2026-09-01，第 11 步：已完成）
+
+R8.2 的诊断信号——"标定错误时训练奖励出现与步频同频的波动"——此前只是
+`gait_frequency_ripple()` 一个函数，**训练里没有任何地方调用它**。现已接线。
+
+#### ⚠️ 原方案说的那条曲线上，这个信号不可能存在
+
+方案原文是"对 `rew_ref_tracking` 序列做 FFT"，指的是 per-iteration 的奖励曲线。
+在那条曲线上测不到任何东西，两个独立的原因：
+
+1. **一个 iteration 点是 4096 env × 24 步的均值。** 纹波锁在每个 env 自己的步态
+   时钟上，而 env 之间不同步（R5 只同步组内 4 个），所以先在 env 维平掉一次、
+   再在步维平掉一次。
+2. **采样率不对。** 3 Hz 的现象要在 50 Hz 的步序列上看，不是在一秒一个点的
+   iteration 序列上看。
+
+所以改成**逐 env、逐控制步**测量，并且**每个 env 与它自己被命令的频率比**
+（R1 在 2.5–3.5 Hz 采样，用population 常数会把带边上正常的 env 判成异常）。
+`gait_frequency_ripple_batch()` 是这个版本；原来的标量函数保留未动。
+
+#### 频带下限必须是一个 FFT bin，否则告警是静默假阴性
+
+128 步 @ dt=0.02 s ⇒ bin 宽 0.39 Hz，而 15% × 2.5 Hz = **0.375 Hz**。
+照字面取容差，频带会整个掉进两个 bin 之间——无论策略怎么抖都报"干净"。
+半带宽取 `max(tolerance·f, 1 bin)`，并把这条钉进单测。
+
+#### 三个指标，不是一个
+
+| 指标 | 读法 |
+| --- | --- |
+| `perf_ref_tracking_ripple_fraction` | 硬投票：峰值落在步频带内的 env 占比。看"有没有发生" |
+| `perf_ref_tracking_ripple_band_power` | 连续量：带内 AC 功率占比。看"有没有变糟" |
+| `perf_ref_tracking_ripple_env_count` | 样本量。少于 `max(8, envs/100)` 时**整组不报** |
+
+`band_power` **不要当绝对阈值用**：3 Hz 不落在 bin 上，纯正弦也只有 0.86–0.91。
+env_count 那条守的是同一个老问题——把三个 env 上的比例写出去，logger 会把它
+当成一次测量平均进曲线。
+
+#### 窗口的排除规则（每一条都对应一种假阳性）
+
+- **软门关闭的步不入窗**。门一次关 25 步，0.5 s 的方波缺口是宽带事件，会在步频
+  带里凭空造出功率——那样做出来的是"扰动报警器"，不是标定报警器。
+- **站立**（相位时钟停，没有频率可言）、**reset**（窗口两侧不是同一段实验）。
+- **辨识 env**：命令每 0.5–3 s 跳一次是 R6 故意放进去的谱，不是 R8.2 要听的东西。
+
+任一条命中就把该 env 的 eligibility 计数器清零，攒满 128 步才进 FFT。
+
+#### 告警只告警
+
+runner 侧对 `fraction` 取 20 iteration 滑窗，超过 0.5 才打印一次（每 20 iter 至多
+一次）。**训练循环不因此改变任何行为**——该做的事是人去重跑
+`scripts/calibrate_reference_model.py`，那是判断，不是调度。
+
+`--check r8` 实测（64 env）：
+
+```
+  ripple window 128 steps (2.56 s); eligibility counter grew 6 over 30 steps
+  synthetic ripple at each env's own gait frequency: fraction 1.00, band power 0.91, envs 60
+  synthetic 0.4 Hz command drift: fraction 0.00
+```
+
+检查分两半，因为它们独立失效：**记录器**每步都要跑（不跑的话计数器永远攒不满，
+指标永远不写出去，整个 run 的告警静默关闭，且无任何报错）；**检测器**要能把步频
+纹波和"奖励只是在动"分开。后者用注入的合成窗口验，不靠 rollout 真走出纹波——
+零动作下机器人不走，那样的检查测的是策略不是接线。
+
 ### R8.3 域随机化分层
 
 三档写成 `configs/domain_{in_distribution,held_out,ood}.json`（JSON 非 YAML，
@@ -1675,7 +1741,7 @@ gait frequency、arm 状态、domain 特权参数、地形标签（v1 恒为 pla
 | R2      | **twin 标称化要动 6+ 处随机化采样点**，其中 3 处在 `_create_envs()` 里一次性执行   | 中——遗漏一处就等于 twin 不标称，R5 静默退化                  | 写一个断言测试：枚举所有`rand_buffers`，断言 twin 行等于标称值                                                                       |
 | R3      | **R7.2 改为隐式适应 + 显式 (g,l) 统计量**，且 (g,l) 只覆盖 pitch/yaw_rate | 中——vx/vy/height 的域辨识完全靠 1.0 s 历史，上限可能低于显式通路 | 已接受的取舍；R9 的跨域离散度指标会分通道暴露代价，速度通道不达标时优先换 TCN 而非重开 teacher-student |
 | R13     | **R4.2/4.3 的权重对策略成熟度极其敏感**：同一项在未训练策略上比训练后大 95× | 高——按训练后标定的权重在起步阶段会把总奖励压掉 1000×，表现为"常数负底噪"而非崩溃，很容易被误读成别的问题 | 默认 scale=0，由 R8 阶段 3 慢升；`perf_phase_variance_raw` 恒定可见，用它定 ramp 时机。**R3 的收敛门不提供保护**（它守估计量收敛，不守策略成熟度） |
-| R11     | **pitch/height 现在是课程维度，但还不是「会扩张的课程」** | 中——R1 的字面要求（排除非决策通道）已满足，但两处继承来的设定让新增的 bin 暂时不产生渐进解锁：① `set_to` 的初始窗口对 pitch 用 `body_pitch_range`、对 height 用 `limit_body_height`，二者当前都等于全区间 → 所有 bin 一开始就激活；② `local_range` 对 pitch/height 是 **1.0**，跨越整个网格 | **刻意留给 R8**：初始窗口与扩张邻域是课程排期问题，在第 2 步改会引入无法在本步验证的训练动力学变化。建议 R8 里定 pitch local_range ≈ 0.2、height ≈ 0.12，并让 height 的初始窗口改用 `body_height_cmd` 以消除与 pitch 的不一致 |
+| ~~R11~~ | ~~pitch/height 是课程维度但不会扩张~~ | — | **已决定不做（2026-09-01 用户决定）**：pitch/height 从第 0 iter 起就在全区间上采样是可接受的，不加渐进解锁。现状因此是最终状态而非欠账：初始窗口 = `body_pitch_range` / `limit_body_height`（都是全区间）、`local_range` = 1.0，即 5×5 个 bin 一开始全部激活；vx/vy/yaw 的渐进解锁不受影响。**回头的触发条件**：阶段 1 若出现大 pitch/height 命令下的早期摔倒率异常，或 `perf_ref_mae_pitch/height` 长期不收敛，再按原建议（pitch `local_range≈0.2`、height `≈0.12`、height 初始窗口改用 `body_height_cmd`）补窗口 |
 | R12     | **`gait_frequency` 在 `‖v_cmd‖ < 0.1` 时被强制为 0**（[legged_robot.py:1354-1356](../go1_gym/envs/roboduet/legged_robot.py#L1354-L1356)，既有行为，R1 保留） | 中——实测约 17–24% 的样本处于该状态。残差模型会在站立段看到频率从 ~3 Hz 跳到 0，相位随之停止推进 | R9.2 导出必须带「站立标志」；R3 的相位分桶要把站立段单独处理或排除，否则 `δ̂(φ)` 会被污染 |
 | R10     | **`dog.add_obs_noise=False`**，策略在“速度估计完美”假设下训练（既有问题，非本方案引入） | 高（仅对真机）——任何依赖 measured y 的观测都不可靠，包括**现在就在用的** `base_lin_vel` | 排进第一次真机前的清单：打开噪声 + 为 `base_lin_vel` 加**慢漂移偏置**随机化（白噪声不够，EMA 类统计量对偏置才敏感） |
 | ~~R4~~ | ~~EE 相对 base 位置在 stage-1 是否已计算~~                                                | —                                                             | **已核实解除**：`end_effector_state` 在 switch 门控前无条件更新（[wbc_env.py:1026](../go1_gym/envs/roboduet/wbc_env.py#L1026)） |
@@ -1705,6 +1771,7 @@ gait frequency、arm 状态、domain 特权参数、地形标签（v1 恒为 pla
 | 8 ✅ | R7 观测（90→112）+ 历史 30→50 + R7.3 的 4 条结构性约束（**已完成**） | 167 项单测；obs 宽度 = parts 表之和 = 112、展平 5600；旧 ckpt 显式报错并指出两处不符；`flat`/`tcn` 均通过 `jit.script`；历史布局钉进测试 |
 | 9 ✅ | R8 四阶段课程 + 参考模型标定（**已完成**） | 191 项单测；`--check r8` 全过：4 项全注册、stage 1 精确为 0、ramp 到达奖励；标定脚本就位（待阶段 1 checkpoint）；三档域配置已生成 |
 | 10 ✅ | R9 评测数值与辨识数据导出（**已完成**） | 209 项单测；R² 无法分辨阶数（一阶对二阶 R²=0.995）⇒ 主图改用残差能量对数轴；导出→拟合闭环跑通 |
+| 11 ✅ | R8.2 步频纹波告警接线；R11（pitch/height 课程窗口）决定不做（**已完成**） | 227 项单测；`--check r8` 新增两半：记录器每步都跑、合成纹波 fraction 1.00 / 0.4 Hz 漂移 0.00；1024 env × 60 iter 实跑，302 env 合格、fraction 0.11、band power 0.06（远低于 0.5 告警线） |
 
 第 1–5 步是方法的骨架，第 7 步是最大的单点风险。
 建议在第 5 步结束时先跑一次完整训练看曲线，再决定是否继续第 7 步。

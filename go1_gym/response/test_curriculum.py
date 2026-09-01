@@ -9,10 +9,13 @@ curriculum disabled, or with a term nobody scheduled.
 
 import pytest
 
+import torch
+
 from go1_gym.response.curriculum import (
     ResponseCurriculum,
     dominant_frequency,
     gait_frequency_ripple,
+    gait_frequency_ripple_batch,
 )
 
 BOUNDARIES = [3000, 6000, 12000]
@@ -245,3 +248,106 @@ def test_report_carries_both_intensities():
     report = make().report(12500)
     assert report["curriculum_randomization"] == pytest.approx(1.0)
     assert report["curriculum_disturbance"] == pytest.approx(0.5)
+
+
+# --- R8.2's ripple diagnostic, batched over environments --------------------
+
+
+DT = 0.02
+WINDOW = 128
+
+
+def rippled(frequency, num_envs=4, amplitude=0.2, offset=0.6, phase=0.0):
+    """A reward series that ripples at ``frequency``, one column per env."""
+    t = torch.arange(WINDOW, dtype=torch.float32).unsqueeze(1) * DT
+    phases = phase + torch.arange(num_envs, dtype=torch.float32).unsqueeze(0)
+    return offset + amplitude * torch.sin(2 * torch.pi * frequency * t + phases)
+
+
+def test_a_ripple_at_the_gait_frequency_is_detected():
+    series = rippled(3.0)
+    report = gait_frequency_ripple_batch(series, DT, torch.full((4,), 3.0))
+    assert report.count == 4
+    assert report.fraction == pytest.approx(1.0)
+    # Not ~1.0: 3 Hz falls between bins at this window length, so a pure
+    # sinusoid still leaks ~14% of its power outside the band. band_power is a
+    # trend to watch, never a quantity to threshold at some clean-looking value.
+    assert report.band_power > 0.8
+
+
+def test_a_ripple_somewhere_else_is_not():
+    """The point of the diagnostic is the gait frequency specifically: a policy
+    whose reward swings with the 10 s command resample is not miscalibrated."""
+    series = rippled(0.4)
+    report = gait_frequency_ripple_batch(series, DT, torch.full((4,), 3.0))
+    assert report.fraction == 0.0
+    assert report.band_power < 0.1
+
+
+def test_each_env_is_judged_against_its_own_commanded_frequency():
+    """R1 samples gait frequency over 2.5-3.5 Hz, so a population constant would
+    mark correctly-behaving environments at the band edges as rippling."""
+    slow, fast = rippled(2.5, num_envs=2), rippled(3.5, num_envs=2)
+    series = torch.cat((slow, fast), dim=1)
+    matched = torch.tensor([2.5, 2.5, 3.5, 3.5])
+    assert gait_frequency_ripple_batch(series, DT, matched).fraction == pytest.approx(1.0)
+    swapped = torch.tensor([3.5, 3.5, 2.5, 2.5])
+    assert gait_frequency_ripple_batch(series, DT, swapped).fraction == 0.0
+
+
+def test_the_band_is_never_narrower_than_one_fft_bin():
+    """15% of 2.5 Hz is 0.375 Hz and a 128-step bin is 0.39 Hz, so a band that
+    took the tolerance literally could fall between bins and report clean."""
+    series = rippled(2.5)
+    report = gait_frequency_ripple_batch(series, DT, torch.full((4,), 2.5))
+    assert report.fraction == pytest.approx(1.0)
+
+
+def test_ineligible_envs_are_excluded_not_counted_as_clean():
+    """Standing, freshly reset or gated environments must leave the metric, not
+    dilute it -- diluting would hide a real ripple behind a low fraction."""
+    series = rippled(3.0, num_envs=4)
+    eligible = torch.tensor([True, True, False, False])
+    report = gait_frequency_ripple_batch(series, DT, torch.full((4,), 3.0), eligible)
+    assert report.count == 2
+    assert report.fraction == pytest.approx(1.0)
+
+
+def test_a_standing_env_is_dropped_even_if_it_is_marked_eligible():
+    """gait_frequency == 0 has no band to look in; the safe answer is to not
+    report on that env rather than to compare against 0 Hz."""
+    series = rippled(3.0, num_envs=2)
+    report = gait_frequency_ripple_batch(series, DT, torch.tensor([3.0, 0.0]))
+    assert report.count == 1
+
+
+def test_no_eligible_env_reports_nothing_rather_than_zero():
+    series = rippled(3.0, num_envs=2)
+    report = gait_frequency_ripple_batch(series, DT, torch.zeros(2))
+    assert (report.count, report.fraction, report.band_power) == (0, 0.0, 0.0)
+
+
+def test_a_constant_series_is_not_a_ripple():
+    """A flat reward has no AC power at all; dividing by it must not manufacture
+    a peak."""
+    series = torch.full((WINDOW, 3), 0.7)
+    report = gait_frequency_ripple_batch(series, DT, torch.full((3,), 3.0))
+    assert report.count == 0
+
+
+def test_a_window_too_short_to_resolve_anything_reports_nothing():
+    report = gait_frequency_ripple_batch(torch.zeros(4, 2), DT, torch.full((2,), 3.0))
+    assert report.count == 0
+
+
+def test_a_dc_offset_does_not_hide_the_ripple():
+    """The R4.1 term lives in [0, 1] and is far from zero-mean, so DC removal is
+    load-bearing, not hygiene."""
+    series = rippled(3.0, offset=50.0, amplitude=0.05)
+    report = gait_frequency_ripple_batch(series, DT, torch.full((4,), 3.0))
+    assert report.fraction == pytest.approx(1.0)
+
+
+def test_the_series_must_be_time_by_env():
+    with pytest.raises(ValueError, match=r"\(T, E\)"):
+        gait_frequency_ripple_batch(torch.zeros(WINDOW), DT, torch.full((1,), 3.0))

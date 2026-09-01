@@ -32,7 +32,10 @@ function would not exist to call.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Dict, Mapping, Optional, Sequence
+
+import torch
 
 
 class ResponseCurriculum:
@@ -216,8 +219,6 @@ def dominant_frequency(series: Sequence[float], dt: float) -> Optional[float]:
     ripple at the gait frequency**.  That is a distinctive signature and a cheap
     one to watch for, so it is computed rather than left to be noticed by eye.
     """
-    import torch
-
     values = torch.as_tensor(list(series), dtype=torch.float64)
     if values.numel() < 8:
         return None
@@ -243,3 +244,86 @@ def gait_frequency_ripple(
     if peak is None or gait_frequency <= 0.0:
         return False
     return abs(peak - gait_frequency) <= tolerance * gait_frequency
+
+
+@dataclass(frozen=True)
+class RippleReport:
+    """What :func:`gait_frequency_ripple_batch` found, ready for a logger.
+
+    ``fraction`` is the share of eligible environments whose reward series peaks
+    inside the gait-frequency band; ``band_power`` is the mean share of their
+    AC power that sits in that band.  Both are reported because they fail
+    differently: ``fraction`` is a hard vote that says nothing about how strong
+    the peak is, ``band_power`` is continuous but never reaches 0 (a band always
+    contains some broadband power).  Read the first for "is this happening", the
+    second for "is it getting worse".  ``count`` is how many environments were
+    eligible at all -- a fraction over three environments is not a measurement.
+    """
+
+    fraction: float
+    band_power: float
+    count: int
+
+
+def gait_frequency_ripple_batch(
+    series: torch.Tensor,
+    dt: float,
+    gait_frequency: torch.Tensor,
+    eligible: Optional[torch.Tensor] = None,
+    tolerance: float = 0.15,
+) -> RippleReport:
+    """R8.2's ripple diagnostic, measured where the ripple actually lives.
+
+    ``series`` is ``(T, E)``: the raw R4.1 term sampled **per control step, per
+    environment**, oldest row first.  ``gait_frequency`` is ``(E,)`` in Hz.
+
+    The per-iteration reward curve -- what :func:`gait_frequency_ripple` above
+    reads, and what the R0 plan originally proposed watching -- cannot show this
+    signal.  One logged point is a mean over thousands of environments and tens
+    of steps, and the environments are not phase-locked to each other, so a
+    per-environment ripple at 3 Hz averages away twice over before it is ever
+    written down.  The failure R8.2 warns about is per environment and phase
+    locked to *its own* gait clock, so that is the axis it has to be measured
+    on; each environment is compared against its own commanded frequency rather
+    than a population constant, which also covers the 2.5-3.5 Hz band R1 samples
+    the frequency from.
+
+    The band half-width is ``tolerance * f``, but never narrower than one FFT
+    bin: at a 128-step window and dt = 0.02 s a bin is 0.39 Hz while 15% of
+    2.5 Hz is 0.375 Hz, so without the floor the band could fall between bins
+    and the check would report "clean" no matter what the policy did.
+    """
+    if series.ndim != 2:
+        raise ValueError(f"series must be (T, E), got shape {tuple(series.shape)}")
+    steps = int(series.shape[0])
+    if steps < 8:
+        return RippleReport(0.0, 0.0, 0)
+
+    values = series.to(torch.float32)
+    freq = gait_frequency.to(device=values.device, dtype=values.dtype).reshape(-1)
+    if eligible is None:
+        usable = torch.ones(values.shape[1], dtype=torch.bool, device=values.device)
+    else:
+        usable = eligible.to(device=values.device, dtype=torch.bool).reshape(-1)
+
+    spectrum = torch.fft.rfft(values - values.mean(dim=0, keepdim=True), dim=0).abs()
+    spectrum[0] = 0.0
+    power = spectrum ** 2
+    total = power.sum(dim=0)
+
+    usable = usable & (freq > 0.0) & (total > 0.0)
+    count = int(usable.sum())
+    if count == 0:
+        return RippleReport(0.0, 0.0, 0)
+
+    freqs = torch.fft.rfftfreq(steps, d=dt).to(device=values.device, dtype=values.dtype)
+    half_width = torch.clamp(tolerance * freq, min=1.0 / (steps * dt))
+    in_band = (freqs.unsqueeze(1) - freq.unsqueeze(0)).abs() <= half_width.unsqueeze(0)
+    peak_is_gait = (freqs[power.argmax(dim=0)] - freq).abs() <= half_width
+    band_share = (power * in_band).sum(dim=0) / torch.clamp(total, min=1e-30)
+
+    return RippleReport(
+        fraction=float(peak_is_gait[usable].to(values.dtype).mean()),
+        band_power=float(band_share[usable].mean()),
+        count=count,
+    )

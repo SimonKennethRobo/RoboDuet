@@ -722,6 +722,28 @@ RESPONSE_MODEL_OVERRIDES = {
     # acceleration p99.9 9.6 m/s^2.
     "response.reward.soft_gate_slip_speed": 1.5,
     "response.reward.soft_gate_accel": 20.0,
+    # ---- R8.2's miscalibration alarm ---------------------------------------
+    # A reference model calibrated without binning the posture channels by gait
+    # phase is achievable at average phase and unachievable at the unfavourable
+    # ones, and R8.2 says the signature of that is a ripple in the reward AT THE
+    # GAIT FREQUENCY. It is measured per environment on the per-STEP R4.1 term
+    # (see gait_frequency_ripple_batch): the per-iteration reward curve averages
+    # over thousands of environments that are not phase-locked to each other, so
+    # the ripple is gone twice over before it reaches the logger.
+    #
+    # 128 steps = 2.56 s = ~8 gait cycles at 3 Hz, with a 0.39 Hz bin. Shorter
+    # windows cannot resolve the 2.5-3.5 Hz band the frequency is sampled from;
+    # longer ones are harder to keep uninterrupted, since a reset, a shut soft
+    # gate or a stretch of standing all void the window.
+    "response.diagnostics.ripple_window_steps": 128,
+    "response.diagnostics.ripple_tolerance": 0.15,
+    # A warning threshold, not a failure threshold. Chance level for "the peak
+    # happens to land in the band" is roughly one bin in the 0-25 Hz half-band,
+    # so a sustained 0.5 is far above coincidence -- but it is an instruction to
+    # go and re-run the calibration, never something the training loop acts on
+    # by itself.
+    "response.diagnostics.ripple_warn_fraction": 0.5,
+    "response.diagnostics.ripple_warn_iterations": 20,
 }
 
 

@@ -35,10 +35,12 @@ from go1_gym.response import (
     PhaseResidualEstimator,
     ReferenceModel,
     build_channels,
+    gait_frequency_ripple_batch,
 )
 from go1_gym.response.reward_terms import (
     domain_consistency,
     phase_variance,
+    reference_tracking,
     settled_mask,
     soft_gate_from_events,
     steady_gain,
@@ -517,6 +519,9 @@ class LeggedRobot(BaseTask):
         self.response_deviation.reset(env_ids)
         self.response_soft_gate_timer[env_ids] = 0.0
         self.prev_base_lin_vel[env_ids] = 0.0
+        # R8.2: the ripple window may not span a reset -- the samples before and
+        # after it belong to different episodes and different commands.
+        self.ripple_valid_steps[env_ids] = 0
         self.feet_air_time[env_ids] = 0.0
         self.episode_length_buf[env_ids] = 0
         self.reset_buf[env_ids] = 1
@@ -1576,7 +1581,91 @@ class LeggedRobot(BaseTask):
         # weight was derived from, for no reason other than the denominator.
         sums["domain_consistency_active"] += self.grouping.valid
 
+        self._record_ref_tracking_window()
+
         self._arm_update_performance_metrics_hook()
+
+    def _record_ref_tracking_window(self):
+        """One R8.2 diagnostic sample per env: the raw, UNGATED R4.1 term.
+
+        Ungated on purpose.  The soft gate zeroes the term for 25 steps at a
+        stretch, and a 0.5 s square notch is a broadband event that would put
+        power right across the gait band -- a ripple alarm that fires on
+        disturbances rather than on miscalibration.  Gated steps are dropped
+        from the window instead, by voiding the env's eligibility counter.
+
+        Three other states void it, each because the samples on either side of
+        them are not the same measurement: a reset, standing (the phase clock
+        stops, so there is no gait frequency to ripple at), and identification
+        environments, whose commands jump every 0.5-3 s by design and whose
+        spectrum is therefore something R6 put there, not something R8.2 needs
+        to hear about.
+        """
+        raw = reference_tracking(
+            self.response_detrended,
+            self.response_ref.xi,
+            self.response_sigma,
+            self.response_channel_weights,
+        )
+        self.ref_tracking_window[self.ripple_cursor] = raw
+        self.ripple_cursor = (self.ripple_cursor + 1) % self.ripple_window_steps
+
+        comparable = (
+            (self.response_soft_gate > 0)
+            & self._residual_sample_active()
+            & ~self.is_identification_env
+        )
+        self.ripple_valid_steps = torch.where(
+            comparable, self.ripple_valid_steps + 1, torch.zeros_like(self.ripple_valid_steps)
+        )
+
+    def _gait_frequency_hz(self):
+        """Commanded gait frequency per env, 0 while standing.
+
+        The scalar branch mirrors _step_contact_targets: without dynamic gait
+        the clock runs at a fixed 3 Hz for everyone.
+        """
+        if self.commands_dog.shape[1] > GAIT_FREQUENCY:
+            return self.commands_dog[:, GAIT_FREQUENCY]
+        return torch.full((self.num_envs,), 3.0, device=self.device, dtype=torch.float)
+
+    def _log_gait_frequency_ripple(self, extras):
+        """R8.2: is the R4.1 reward rippling at the gait frequency?
+
+        If it is, the posture channels of the reference model were most likely
+        calibrated without joint (domain, phase) binning, and the model is
+        asking for something that is only achievable at favourable phases.  R8.2
+        says to stop and re-calibrate when this appears, so it is worth a metric
+        rather than an eyeball check -- and the eyeball check it replaces could
+        not have worked anyway (see gait_frequency_ripple_batch).
+
+        Emitted only when enough envs have an uninterrupted window: a fraction
+        over a handful of envs is noise, and writing it anyway would let the
+        logger average it in as though it were a measurement.
+        """
+        # The roll puts the ring buffer back in oldest-first order.  A magnitude
+        # spectrum is invariant to a circular shift, so this changes no number
+        # today; it is here because the detector's input contract is a time
+        # series, and the day it grows a window function or a detrend it would
+        # start mattering silently.
+        report = gait_frequency_ripple_batch(
+            torch.roll(self.ref_tracking_window, shifts=-self.ripple_cursor, dims=0),
+            self.dt,
+            self._gait_frequency_hz(),
+            eligible=self.ripple_valid_steps >= self.ripple_window_steps,
+            tolerance=self.ripple_tolerance,
+        )
+        if report.count < max(8, self.num_train_envs // 100):
+            return
+        extras["perf_ref_tracking_ripple_fraction"] = torch.tensor(
+            report.fraction, device=self.device
+        )
+        extras["perf_ref_tracking_ripple_band_power"] = torch.tensor(
+            report.band_power, device=self.device
+        )
+        extras["perf_ref_tracking_ripple_env_count"] = torch.tensor(
+            float(report.count), device=self.device
+        )
 
     @staticmethod
     def _mean_valid_metric(values, valid):
@@ -1618,6 +1707,13 @@ class LeggedRobot(BaseTask):
             extras["perf_excitation_early_termination_rate"] = self._mean_valid_metric(
                 (~timeouts).float(), excited
             )
+
+        # R8.2's alarm.  Reported above the episode guard below because it is a
+        # population-instantaneous quantity like perf_group_desync_fraction: it
+        # is about the last 2.56 s of every walking env, not about the envs that
+        # happened to finish an episode in this batch.
+        self._log_gait_frequency_ripple(extras)
+
         if not torch.any(valid):
             return
 
@@ -2528,6 +2624,23 @@ class LeggedRobot(BaseTask):
         )
         self.response_soft_gate = torch.ones(self.num_envs, device=self.device, dtype=torch.float)
         self.prev_base_lin_vel = torch.zeros(self.num_envs, 3, device=self.device, dtype=torch.float)
+
+        # R8.2's miscalibration alarm: a rolling per-step window of the raw R4.1
+        # term, per env, so the gait-frequency ripple is measured rather than
+        # left to be spotted by eye on a curve it cannot survive to reach.
+        diagnostics_cfg = self.cfg.response.diagnostics
+        self.ripple_window_steps = int(diagnostics_cfg.ripple_window_steps)
+        self.ripple_tolerance = float(diagnostics_cfg.ripple_tolerance)
+        self.ref_tracking_window = torch.zeros(
+            self.ripple_window_steps, self.num_envs, device=self.device, dtype=torch.float
+        )
+        self.ripple_cursor = 0
+        # Counts consecutive steps this env has spent in a state where its R4.1
+        # samples are comparable with each other; an env only enters the FFT
+        # once it has a full window's worth.
+        self.ripple_valid_steps = torch.zeros(
+            self.num_envs, device=self.device, dtype=torch.long
+        )
 
         # R7.1: the (g, l) statistics.  Only the IMU-anchored channels are
         # observed -- see the deployment contract in the R0 plan.

@@ -19,7 +19,8 @@ R5  a group shares one command vector and one gait phase, its twin really is
     until the next shared resample.
 R8  the stage curriculum really reaches the reward: terms are registered from
     iteration 0, contribute exactly nothing in stage 1, and ramp to their
-    configured target.
+    configured target; the randomisation and disturbance intensities reach the
+    samplers; and R8.2's gait-frequency ripple alarm is both fed and able to see.
 R6  the identification environments really are excited (jump count, chirp band),
     really are excluded from the curriculum, and really are the only ones
     touched.
@@ -686,6 +687,90 @@ def check_r8(env, cfg, steps=120):
             failures.append(f"{name} multiplier is {weights[name]}, expected 1.0")
 
     failures += _check_domain_schedule(env, cfg, curriculum, original_count)
+    failures += _check_ripple_alarm(env, cfg)
+    return failures
+
+
+def _check_ripple_alarm(env, cfg):
+    """R8.2's alarm: does the ripple diagnostic reach the logger, and can it see?
+
+    Two halves, because they fail independently.  The *recorder* has to run on
+    every step -- if it does not, the eligibility counter never fills, the
+    metric is silently never emitted, and the alarm is off for the whole run
+    with no error anywhere.  The *detector* has to separate a gait-frequency
+    ripple from a reward that merely moves, which is checked by feeding the env
+    a synthetic window rather than by hoping the rollout produces one: with zero
+    actions the robot does not walk, and a check that depends on it walking
+    would be testing the policy, not the wiring.
+    """
+    base = env.env
+    failures = []
+    dog_a, arm_a = zero_actions(env, cfg)
+    window = base.ripple_window_steps
+
+    env.reset()
+    before = int(base.ripple_valid_steps.max())
+    for _ in range(30):
+        env.step(dog_a, arm_a)
+    grew = int(base.ripple_valid_steps.max()) - before
+    print(f"\n  ripple window {window} steps ({window * base.dt:.2f} s); "
+          f"eligibility counter grew {grew} over 30 steps")
+    if grew <= 0:
+        failures.append(
+            "the ripple window is not being filled -- _record_ref_tracking_window "
+            "is not running, so the R8.2 alarm is silently off"
+        )
+        return failures
+
+    frequency = base._gait_frequency_hz()
+    walking = frequency > 0.1
+    if not bool(walking.any()):
+        print("  no env has a running gait clock; skipped the detector half")
+        return failures
+
+    steps = torch.arange(window, device=base.device, dtype=torch.float).unsqueeze(1)
+    time = steps * base.dt
+
+    def emit(series):
+        base.ref_tracking_window[:] = series
+        base.ripple_cursor = 0
+        base.ripple_valid_steps[:] = torch.where(
+            walking, torch.full_like(base.ripple_valid_steps, window),
+            torch.zeros_like(base.ripple_valid_steps),
+        )
+        extras = {}
+        base._log_gait_frequency_ripple(extras)
+        return {k: float(v) for k, v in extras.items()}
+
+    rippling = emit(0.6 + 0.2 * torch.sin(2 * math.pi * frequency.unsqueeze(0) * time))
+    drifting = emit(0.6 + 0.2 * torch.sin(2 * math.pi * 0.4 * time).expand(-1, base.num_envs))
+    print(f"  synthetic ripple at each env's own gait frequency: "
+          f"fraction {rippling.get('perf_ref_tracking_ripple_fraction', float('nan')):.2f}, "
+          f"band power {rippling.get('perf_ref_tracking_ripple_band_power', float('nan')):.2f}, "
+          f"envs {rippling.get('perf_ref_tracking_ripple_env_count', 0):.0f}")
+    print(f"  synthetic 0.4 Hz command drift: "
+          f"fraction {drifting.get('perf_ref_tracking_ripple_fraction', float('nan')):.2f}")
+
+    if "perf_ref_tracking_ripple_fraction" not in rippling:
+        failures.append(
+            "the ripple metric was not emitted even with a full window on every "
+            "walking env -- it would never appear in wandb either"
+        )
+        return failures
+    if rippling["perf_ref_tracking_ripple_fraction"] < 0.95:
+        failures.append(
+            f"a synthetic gait-frequency ripple registered at only "
+            f"{rippling['perf_ref_tracking_ripple_fraction']:.2f}; the detector is "
+            "not reading each env against its own commanded frequency"
+        )
+    if drifting.get("perf_ref_tracking_ripple_fraction", 1.0) > 0.05:
+        failures.append(
+            "a 0.4 Hz reward swing was reported as a gait-frequency ripple -- the "
+            "alarm would fire on ordinary command transients"
+        )
+
+    base.ripple_valid_steps[:] = 0
+    base.ref_tracking_window[:] = 0.0
     return failures
 
 

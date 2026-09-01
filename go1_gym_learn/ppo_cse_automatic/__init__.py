@@ -168,6 +168,17 @@ class Runner:
         self._stage2_loco_policy_mode_applied = False
         self.arm_policy_enabled = self.env.arm_policy_enabled
 
+        # R8.2's alarm, kept over iterations rather than judged on one: the
+        # per-iteration value is a fraction over whichever envs held an
+        # uninterrupted window, and a single high reading is a small sample, not
+        # a miscalibrated reference model.
+        diagnostics = getattr(getattr(self.env.cfg, "response", None), "diagnostics", None)
+        self._ripple_warn_fraction = float(getattr(diagnostics, "ripple_warn_fraction", 0.5))
+        self._ripple_history = deque(
+            maxlen=max(2, int(getattr(diagnostics, "ripple_warn_iterations", 20)))
+        )
+        self._ripple_last_warned = None
+
         self.arm_model = None
         self.alg_arm = None
         if self.arm_policy_enabled:
@@ -267,6 +278,49 @@ class Runner:
 
     def _dog_policy_trainable_this_iteration(self):
         return not (global_switch.switch_open and self.stage2_loco_policy_frozen)
+
+    def _check_gait_frequency_ripple(self, iteration, ep_infos, episode_keys):
+        """R8.2: warn when the R4.1 reward keeps rippling at the gait frequency.
+
+        The diagnostic R8.2 prescribes, and the reason it prescribes one: a
+        reference model whose posture channels were calibrated without joint
+        (domain, phase) binning is achievable at average phase and not at the
+        unfavourable ones, which shows up here and essentially nowhere else --
+        the reward simply looks a bit lower, so it is easy to read as a weight
+        problem and to spend a training run on the wrong fix.
+
+        Only a warning.  Nothing in the loop acts on it: the response is to stop
+        and re-run scripts/calibrate_reference_model.py, which is a decision for
+        a person, not a schedule.
+        """
+        key = "perf_ref_tracking_ripple_fraction"
+        if key not in episode_keys:
+            return
+        self._ripple_history.append(float(aggregate_episode_value(ep_infos, key)))
+        if len(self._ripple_history) < self._ripple_history.maxlen:
+            return
+        sustained = sum(self._ripple_history) / len(self._ripple_history)
+        if sustained <= self._ripple_warn_fraction:
+            return
+        # One warning per full window, not one per iteration: it stays true for
+        # as long as the calibration is wrong, and a per-iteration print would
+        # bury the rest of the log.
+        span = self._ripple_history.maxlen
+        if self._ripple_last_warned is not None and iteration - self._ripple_last_warned < span:
+            return
+        self._ripple_last_warned = iteration
+        print(
+            "\033[1;33m"
+            f"[R8.2] ref_tracking is rippling at the gait frequency in {sustained:.0%} of "
+            f"environments, averaged over the last {span} iterations.\n"
+            "       That is the signature of posture channels calibrated without joint "
+            "(domain, gait-phase) binning:\n"
+            "       the reference model is achievable at average phase and not at the "
+            "unfavourable ones.\n"
+            "       Re-run scripts/calibrate_reference_model.py before reading anything "
+            "into the consistency curves."
+            "\033[0m"
+        )
 
     def _advance_stage_schedule(self, iteration):
         global_switch.count += 1
@@ -485,6 +539,7 @@ class Runner:
                 fps = self.num_steps_per_env * self.env.num_envs / iteration_time
 
                 episode_keys = dict.fromkeys(key for ep_info in ep_infos for key in ep_info)
+                self._check_gait_frequency_ripple(it, ep_infos, episode_keys)
                 for key in episode_keys:
                     if key == "perf_episode_count":
                         continue

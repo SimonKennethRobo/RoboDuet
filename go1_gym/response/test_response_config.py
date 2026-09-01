@@ -113,3 +113,18 @@ def test_model_built_from_config_steps(cfg):
     assert model.xi[0, names.index("pitch")].item() == pytest.approx(0.3, abs=0.02)
     assert model.xi[0, names.index("height")].item() == pytest.approx(0.1, abs=0.02)
     assert model.xi[0, names.index("vx")].item() == 0.0
+
+
+def test_the_ripple_window_can_resolve_the_gait_band_it_is_watching(cfg):
+    """R8.2's diagnostic window has to be long enough for the slowest gait
+    frequency R1 samples, or the alarm is silent by construction rather than
+    because the reference model is well calibrated."""
+    dt = cfg.sim.dt * cfg.control.decimation
+    window_s = int(cfg.response.diagnostics.ripple_window_steps) * dt
+    slowest_hz = float(cfg.commands.limit_gait_frequency[0])
+    assert window_s * slowest_hz >= 4.0
+    # And the band has to be wide enough to survive the FFT resolution: the
+    # detector floors it at one bin, so this asserts the floor is not carrying
+    # the whole check on its own.
+    bin_hz = 1.0 / window_s
+    assert bin_hz <= 2.0 * float(cfg.response.diagnostics.ripple_tolerance) * slowest_hz

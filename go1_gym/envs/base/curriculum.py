@@ -232,11 +232,15 @@ def command_curriculum_kwargs(cfg):
 def command_curriculum_bounds(cfg):
     """Initial active window handed to ``Curriculum.set_to``.
 
-    Note the asymmetry inherited from the original code and deliberately kept
-    here: the velocity and pitch/roll dimensions start from their *sampling*
-    range (narrow) and grow, while body height starts from its *limit* range
-    (already full).  R8 is where that inconsistency gets decided on; changing it
-    here would silently alter the curriculum schedule.
+    Note the asymmetry inherited from the original code: the velocity dimensions
+    start from their *sampling* range (narrow) and grow, while pitch and body
+    height start from a range that is already the full grid, so their bins are
+    all active from iteration 0 and never "unlock" in any meaningful sense.
+
+    That was left open for R8 and has since been decided (2026-09-01): posture
+    commands starting at full range is accepted, so this is the final state
+    rather than an outstanding item.  See the R11 row in the R0 plan for the
+    conditions under which it would be revisited.
     """
     c = cfg.commands
     low = np.array([
@@ -260,7 +264,11 @@ def command_curriculum_bounds(cfg):
 
 
 def command_curriculum_local_range(cfg):
-    """Neighbourhood, in value units, that a successful bin unlocks around itself."""
+    """Neighbourhood, in value units, that a successful bin unlocks around itself.
+
+    1.0 for pitch/roll/height spans their whole grid, i.e. those three do not
+    expand gradually at all -- accepted, see command_curriculum_bounds above.
+    """
     local_range = np.array([0.55, 0.55, 0.55, 1.0, 1.0, 1.0])
     if cfg.commands.use_dynamic_gait:
         local_range = np.concatenate([local_range, np.array([0.55, 0.55, 0.55, 0.55, 0.55])])
