@@ -53,6 +53,9 @@ class ResponseCurriculum:
         ramp_iterations: int,
         term_stage: Mapping[str, int],
         enabled: bool = True,
+        randomization_stage: int = 3,
+        randomization_floor: float = 0.3,
+        disturbance_stage: int = 4,
     ) -> None:
         boundaries = [int(b) for b in stage_boundaries]
         if sorted(boundaries) != boundaries:
@@ -72,6 +75,19 @@ class ResponseCurriculum:
             )
         self.term_stage = {name: int(stage) for name, stage in term_stage.items()}
         self.enabled = bool(enabled)
+        for label, stage in (("randomization_stage", randomization_stage),
+                             ("disturbance_stage", disturbance_stage)):
+            if not 1 <= int(stage) <= self.num_stages:
+                raise ValueError(
+                    f"{label} must be in 1..{self.num_stages}, got {stage}"
+                )
+        if not 0.0 <= randomization_floor <= 1.0:
+            raise ValueError(
+                f"randomization_floor must be in [0, 1], got {randomization_floor}"
+            )
+        self.randomization_stage = int(randomization_stage)
+        self.randomization_floor = float(randomization_floor)
+        self.disturbance_stage = int(disturbance_stage)
 
     # -- schedule -----------------------------------------------------------
 
@@ -110,6 +126,42 @@ class ResponseCurriculum:
                 result[name] = min(1.0, (iteration - start) / self.ramp_iterations)
         return result
 
+    def _ramp(self, iteration: int, stage: int) -> float:
+        """Fraction of the way through ``stage``'s ramp, in ``[0, 1]``."""
+        start = self.stage_start(stage)
+        if not self.enabled or iteration < start:
+            return 0.0
+        if self.ramp_iterations == 0:
+            return 1.0
+        return min(1.0, (iteration - start) / self.ramp_iterations)
+
+    def randomization_intensity(self, iteration: int) -> float:
+        """How far the domain ranges are opened, from nominal to full.
+
+        R8.1 asks for weak randomisation in stages 1-2 and full randomisation
+        from stage 3, which is the stage that first asks for cross-domain
+        consistency.  The order matters: a policy that cannot yet walk on ice
+        learns nothing from being asked to walk on ice *consistently*.
+
+        Never zero.  A floor keeps some domain spread from the start, because a
+        policy trained on exactly one domain and then handed the full range at
+        stage 3 has to relearn locomotion at the same moment it is first asked
+        for consistency -- which is the collapse R8 already warns stage 3 is
+        prone to.
+        """
+        span = 1.0 - self.randomization_floor
+        return self.randomization_floor + span * self._ramp(iteration, self.randomization_stage)
+
+    def disturbance_intensity(self, iteration: int) -> float:
+        """Stage 4's added push disturbance, ``0`` before that stage.
+
+        Stage 4 exists to show that robustness comes back after the consistency
+        weights are frozen, so its disturbance must be off while those weights
+        are still moving -- otherwise a robustness change and a weight change
+        land at the same time and neither can be attributed.
+        """
+        return self._ramp(iteration, self.disturbance_stage)
+
     def apply(
         self, reward_scales: Mapping[str, float], iteration: int
     ) -> Dict[str, float]:
@@ -129,7 +181,11 @@ class ResponseCurriculum:
 
     def report(self, iteration: int) -> Dict[str, float]:
         """Flat metrics for the training log."""
-        metrics = {"curriculum_stage": float(self.stage(iteration))}
+        metrics = {
+            "curriculum_stage": float(self.stage(iteration)),
+            "curriculum_randomization": self.randomization_intensity(iteration),
+            "curriculum_disturbance": self.disturbance_intensity(iteration),
+        }
         for name, factor in self.multiplier(iteration).items():
             metrics[f"curriculum_weight_{name}"] = float(factor)
         return metrics

@@ -1125,6 +1125,36 @@ class LeggedRobot(BaseTask):
         self.is_nominal_twin = self.grouping.is_twin
         return self.grouping
 
+    def _ensure_response_curriculum(self):
+        """Build the R8 curriculum, lazily.
+
+        Needed during ``_create_envs`` -- friction, restitution and base payload
+        are drawn there -- but ``_init_buffers`` runs afterwards, so it cannot
+        wait for that.  Without this the creation-time draw would silently use
+        the default intensity of 1.0 and stage 1 would start at full
+        randomisation, which is the one thing this schedule exists to prevent.
+        """
+        if getattr(self, "response_curriculum", None) is not None:
+            return self.response_curriculum
+        cfg = self.cfg.response.curriculum
+        self.response_curriculum = ResponseCurriculum(
+            stage_boundaries=list(cfg.stage_boundaries),
+            ramp_iterations=int(cfg.ramp_iterations),
+            term_stage=dict(cfg.term_stage),
+            enabled=bool(cfg.enabled),
+            randomization_stage=int(cfg.randomization_stage),
+            randomization_floor=float(cfg.randomization_floor),
+            disturbance_stage=int(cfg.disturbance_stage),
+        )
+        iteration = int(getattr(global_switch, "count", 0))
+        self.domain_randomization_intensity = (
+            self.response_curriculum.randomization_intensity(iteration)
+        )
+        self.domain_disturbance_intensity = (
+            self.response_curriculum.disturbance_intensity(iteration)
+        )
+        return self.response_curriculum
+
     def _grouping_active(self):
         return getattr(self, "grouping", None) is not None and self.grouping.num_groups > 0
 
@@ -1136,6 +1166,77 @@ class LeggedRobot(BaseTask):
     def _arm_nominalize_twins_hook(self, twins):
         """Reset arm-side domain randomisation for the twin rows."""
         pass
+
+    #: Nominal value of every randomised domain parameter.  Shared by the twin
+    #: nominalisation and by the curriculum's range scaling -- "nominal" has to
+    #: mean the same thing in both, or the twin sits at a different point from
+    #: the one the ranges collapse towards at intensity 0.
+    DOMAIN_NOMINAL = {
+        "friction": None,           # filled from default_friction at runtime
+        "restitution": None,        # filled from default_restitution
+        "payload": 0.0,
+        "com_displacement": 0.0,
+        "motor_strength": 1.0,
+        "motor_offset": 0.0,
+        "Kp_factor": 1.0,
+        "Kd_factor": 1.0,
+        "ee_payload": 0.0,
+        "arm_link_mass": 1.0,
+        "arm_link_com": 0.0,
+    }
+
+    def _domain_nominal(self, name):
+        if name == "friction":
+            return float(self.default_friction)
+        if name == "restitution":
+            return float(self.default_restitution)
+        return float(self.DOMAIN_NOMINAL[name])
+
+    def _domain_range(self, bounds, name):
+        """R8.1: open a randomisation range from nominal towards its full width.
+
+        Intensity 0 collapses the range onto the nominal value -- i.e. onto
+        exactly what the R5 twin is held at -- and 1 restores the configured
+        range.  Interpolating around the nominal rather than scaling the raw
+        bounds matters for the asymmetric ranges: body payload is [-2, +2] but
+        friction is [0.1, 3.0] around a nominal of 1.0, and scaling those bounds
+        towards zero would make friction vanish rather than become nominal.
+        """
+        low, high = float(bounds[0]), float(bounds[1])
+        intensity = float(getattr(self, "domain_randomization_intensity", 1.0))
+        nominal = self._domain_nominal(name)
+        return nominal + (low - nominal) * intensity, nominal + (high - nominal) * intensity
+
+    def _update_domain_curriculum(self):
+        """Track the curriculum's randomisation intensity; redraw on a change.
+
+        Friction, restitution and base payload are applied to the simulator when
+        an actor is created and are only refreshed by an explicit per-env call.
+        Doing that on every reset costs **+94% per step** (measured: 46.6 ->
+        90.6 ms at 4096 envs with 83 resets/step), which is not affordable.
+        Doing it when the intensity has actually moved costs 2.2 s per full pass
+        and happens about twenty times over a run -- roughly 0.08% overhead.
+        So the schedule is applied on transitions, not continuously.
+        """
+        if not hasattr(self, "response_curriculum"):
+            return
+        iteration = int(getattr(global_switch, "count", 0))
+        intensity = self.response_curriculum.randomization_intensity(iteration)
+        self.domain_disturbance_intensity = (
+            self.response_curriculum.disturbance_intensity(iteration)
+        )
+        applied = getattr(self, "domain_randomization_intensity", None)
+        self.domain_randomization_intensity = intensity
+        if applied is None:
+            return
+        threshold = float(self.cfg.response.curriculum.refresh_threshold)
+        if abs(intensity - applied) < threshold:
+            self.domain_randomization_intensity = applied
+            return
+        every = torch.arange(self.num_envs, device=self.device)
+        self._randomize_rigid_body_props(every, self.cfg)
+        self._nominalize_twins()
+        self.refresh_actor_rigid_shape_props(every, self.cfg)
 
     def _nominalize_twins(self, env_ids=None):
         """Hold the nominal twins at nominal domain values.
@@ -1261,7 +1362,7 @@ class LeggedRobot(BaseTask):
 
     def _randomize_rigid_body_props(self, env_ids, cfg):
         if cfg.domain_rand.randomize_base_mass:
-            min_payload, max_payload = cfg.domain_rand.added_mass_range
+            min_payload, max_payload = self._domain_range(cfg.domain_rand.added_mass_range, "payload")
             # self.payloads[env_ids] = -1.0
             self.payloads[env_ids] = (
                 torch.rand(len(env_ids), dtype=torch.float, device=self.device, requires_grad=False)
@@ -1269,7 +1370,9 @@ class LeggedRobot(BaseTask):
                 + min_payload
             )
         if cfg.domain_rand.randomize_com_displacement:
-            min_com_displacement, max_com_displacement = cfg.domain_rand.com_displacement_range
+            min_com_displacement, max_com_displacement = self._domain_range(
+                cfg.domain_rand.com_displacement_range, "com_displacement"
+            )
             self.com_displacements[env_ids, :] = (
                 torch.rand(len(env_ids), 3, dtype=torch.float, device=self.device, requires_grad=False)
                 * (max_com_displacement - min_com_displacement)
@@ -1277,7 +1380,7 @@ class LeggedRobot(BaseTask):
             )
 
         if cfg.domain_rand.randomize_friction:
-            min_friction, max_friction = cfg.domain_rand.friction_range
+            min_friction, max_friction = self._domain_range(cfg.domain_rand.friction_range, "friction")
             self.friction_coeffs[env_ids, :] = (
                 torch.rand(len(env_ids), 1, dtype=torch.float, device=self.device, requires_grad=False)
                 * (max_friction - min_friction)
@@ -1285,7 +1388,9 @@ class LeggedRobot(BaseTask):
             )
 
         if cfg.domain_rand.randomize_restitution:
-            min_restitution, max_restitution = cfg.domain_rand.restitution_range
+            min_restitution, max_restitution = self._domain_range(
+                cfg.domain_rand.restitution_range, "restitution"
+            )
             self.restitutions[env_ids] = (
                 torch.rand(len(env_ids), 1, dtype=torch.float, device=self.device, requires_grad=False)
                 * (max_restitution - min_restitution)
@@ -1304,28 +1409,36 @@ class LeggedRobot(BaseTask):
 
     def _randomize_dof_props(self, env_ids, cfg):
         if cfg.domain_rand.randomize_motor_strength:
-            min_strength, max_strength = cfg.domain_rand.motor_strength_range
+            min_strength, max_strength = self._domain_range(
+                cfg.domain_rand.motor_strength_range, "motor_strength"
+            )
             self.motor_strengths[env_ids, :] = (
                 torch.rand(len(env_ids), dtype=torch.float, device=self.device, requires_grad=False).unsqueeze(1)
                 * (max_strength - min_strength)
                 + min_strength
             )
         if cfg.domain_rand.randomize_motor_offset:
-            min_offset, max_offset = cfg.domain_rand.motor_offset_range
+            min_offset, max_offset = self._domain_range(
+                cfg.domain_rand.motor_offset_range, "motor_offset"
+            )
             self.motor_offsets[env_ids, :] = (
                 torch.rand(len(env_ids), self.num_dof, dtype=torch.float, device=self.device, requires_grad=False)
                 * (max_offset - min_offset)
                 + min_offset
             )
         if cfg.domain_rand.randomize_Kp_factor:
-            min_Kp_factor, max_Kp_factor = cfg.domain_rand.Kp_factor_range
+            min_Kp_factor, max_Kp_factor = self._domain_range(
+                cfg.domain_rand.Kp_factor_range, "Kp_factor"
+            )
             self.Kp_factors[env_ids, :] = (
                 torch.rand(len(env_ids), dtype=torch.float, device=self.device, requires_grad=False).unsqueeze(1)
                 * (max_Kp_factor - min_Kp_factor)
                 + min_Kp_factor
             )
         if cfg.domain_rand.randomize_Kd_factor:
-            min_Kd_factor, max_Kd_factor = cfg.domain_rand.Kd_factor_range
+            min_Kd_factor, max_Kd_factor = self._domain_range(
+                cfg.domain_rand.Kd_factor_range, "Kd_factor"
+            )
             self.Kd_factors[env_ids, :] = (
                 torch.rand(len(env_ids), dtype=torch.float, device=self.device, requires_grad=False).unsqueeze(1)
                 * (max_Kd_factor - min_Kd_factor)
@@ -1960,6 +2073,9 @@ class LeggedRobot(BaseTask):
         if self.cfg.terrain.measure_heights:
             self.measured_heights = self._get_heights(torch.arange(self.num_envs, device=self.device), self.cfg)
 
+        # R8.1: the domain schedule, before anything samples from it.
+        self._update_domain_curriculum()
+
         # push robots
         self._push_robots(torch.arange(self.num_envs, device=self.device), self.cfg)
 
@@ -2080,13 +2196,17 @@ class LeggedRobot(BaseTask):
 
     def _push_robots(self, env_ids, cfg):
         """Random pushes the robots. Emulates an impulse by setting a randomized base velocity."""
-        if cfg.domain_rand.push_robots:
+        # R8.1 stage 4: the curriculum turns pushes on and ramps their strength.
+        # This is what "robustness recovery" is made of in v1 -- there is no
+        # terrain to make harder -- so the whole stage rests on it.
+        intensity = float(getattr(self, "domain_disturbance_intensity", 0.0))
+        if cfg.domain_rand.push_robots and intensity > 0.0:
             push_env_ids = env_ids[self.episode_length_buf[env_ids] % int(cfg.domain_rand.push_interval) == 0]
             if len(push_env_ids) == 0:
                 return
 
-            max_vel = cfg.domain_rand.max_push_vel_xy
-            max_push_ang = cfg.domain_rand.max_push_ang_vel
+            max_vel = cfg.domain_rand.max_push_vel_xy * intensity
+            max_push_ang = cfg.domain_rand.max_push_ang_vel * intensity
             n = len(push_env_ids)
             self.root_states[push_env_ids, 7:9] = torch_rand_float(-max_vel, max_vel, (n, 2), device=self.device)
             self.root_states[push_env_ids, 10:13] = torch_rand_float(
@@ -2443,13 +2563,7 @@ class LeggedRobot(BaseTask):
         # R8.1: the stage schedule that gates every consistency term.  The
         # configured reward scales are end-of-ramp targets; this supplies the
         # multiplier.
-        curriculum_cfg = self.cfg.response.curriculum
-        self.response_curriculum = ResponseCurriculum(
-            stage_boundaries=list(curriculum_cfg.stage_boundaries),
-            ramp_iterations=int(curriculum_cfg.ramp_iterations),
-            term_stage=dict(curriculum_cfg.term_stage),
-            enabled=bool(curriculum_cfg.enabled),
-        )
+        self._ensure_response_curriculum()
 
         residual_cfg = self.cfg.response.residual
         self.response_residual = PhaseResidualEstimator(
@@ -2959,6 +3073,9 @@ class LeggedRobot(BaseTask):
         self.default_friction = rigid_shape_props_asset[1].friction
         self.default_restitution = rigid_shape_props_asset[1].restitution
         self._init_custom_buffers__()
+        # R8.1: the schedule has to exist before the first draw, or the
+        # creation-time parameters are sampled at full range.
+        self._ensure_response_curriculum()
         self._randomize_rigid_body_props(torch.arange(self.num_envs, device=self.device), self.cfg)
         # R5: the twins have to be nominal BEFORE the actor loop below, because
         # _process_rigid_shape_props and _process_rigid_body_props read

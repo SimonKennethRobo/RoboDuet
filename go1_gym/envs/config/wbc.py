@@ -866,7 +866,35 @@ RESPONSE_CURRICULUM_OVERRIDES = {
         "steady_gain": 3,
         "domain_consistency": 3,
     },
+    # ---- R8.1's other two columns: randomisation and disturbance ------------
+    # Stage 3 is where cross-domain consistency is first asked for, so it is
+    # also where the domain ranges open fully.  The order is the point: a policy
+    # that cannot yet walk on ice learns nothing from being asked to walk on ice
+    # *consistently*.
+    "response.curriculum.randomization_stage": 3,
+    # Not zero. A policy trained on a single domain and then handed the full
+    # range at stage 3 would have to relearn locomotion at the very moment it is
+    # first asked for consistency -- which is the stage-3 collapse R8 warns
+    # about, arriving by a second route.
+    "response.curriculum.randomization_floor": 0.3,
+    # Stage 4 = robustness recovery. Its disturbance must stay off while the
+    # consistency weights are still moving, otherwise a robustness change and a
+    # weight change land together and neither can be attributed.
+    "response.curriculum.disturbance_stage": 4,
+    # Friction/restitution/base payload reach the simulator only through a
+    # per-env refresh call. Doing that every reset costs +94% per step
+    # (measured 46.6 -> 90.6 ms at 4096 envs); doing it when the intensity has
+    # actually moved costs 2.2 s a pass, about twenty times a run. So the
+    # schedule is applied on transitions, and this is how big a move counts.
+    "response.curriculum.refresh_threshold": 0.05,
 }
+
+# Enabled so the curriculum can gate it: _push_robots additionally requires a
+# non-zero disturbance intensity, which only stage 4 provides. Leaving this
+# False would make stage 4 a no-op, and stage 4 carries R8's entire robustness-
+# recovery claim -- in v1 there is no terrain to make harder, so pushes are all
+# it has.
+RESPONSE_CURRICULUM_OVERRIDES["domain_rand.push_robots"] = True
 
 
 ROBODUET_OVERRIDES = {

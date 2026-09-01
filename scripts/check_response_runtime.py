@@ -684,6 +684,71 @@ def check_r8(env, cfg, steps=120):
     for name, stage in curriculum.term_stage.items():
         if stage <= 3 and weights[name] != 1.0:
             failures.append(f"{name} multiplier is {weights[name]}, expected 1.0")
+
+    failures += _check_domain_schedule(env, cfg, curriculum, original_count)
+    return failures
+
+
+def _check_domain_schedule(env, cfg, curriculum, original_count):
+    """R8.1's other two columns: randomisation width and stage-4 pushes.
+
+    The reward schedule is only one of the three things R8.1's table asks each
+    stage to change.  This drives the iteration counter across the boundaries
+    and reads the **actually sampled** domain spread, because the failure mode
+    here is silent: an intensity that never reaches the samplers leaves stage 1
+    training at full randomisation and looks exactly like a working schedule
+    from the outside.
+    """
+    base = env.env
+    failures = []
+    dog_a, arm_a = zero_actions(env, cfg)
+    others = base.grouping.is_grouped & ~base.grouping.is_twin
+    if not bool(others.any()):
+        others = torch.ones_like(base.grouping.is_twin)
+
+    def spread():
+        base._update_domain_curriculum()
+        every = torch.arange(base.num_envs, device=base.device)
+        base._randomize_dof_props(every, base.cfg)
+        base._randomize_rigid_body_props(every, base.cfg)
+        base._nominalize_twins()
+        values = base.motor_strengths[others]
+        friction = base.friction_coeffs[others]
+        return (float(values.max() - values.min()),
+                float(friction.max() - friction.min()))
+
+    print(f"\n  {'iter':>8}{'stage':>7}{'rand':>7}{'push':>7}"
+          f"{'motor spread':>14}{'friction spread':>17}")
+    observed = {}
+    try:
+        for iteration in (0, 6000, 6500, 7000, 12500, 13000):
+            global_switch.count = iteration
+            env.step(dog_a, arm_a)
+            motor, friction = spread()
+            observed[iteration] = (motor, friction)
+            print(f"  {iteration:>8}{curriculum.stage(iteration):>7}"
+                  f"{curriculum.randomization_intensity(iteration):>7.2f}"
+                  f"{curriculum.disturbance_intensity(iteration):>7.2f}"
+                  f"{motor:>14.4f}{friction:>17.4f}")
+    finally:
+        global_switch.count = original_count
+        base._update_domain_curriculum()
+
+    weak, full = observed[0], observed[7000]
+    for index, name in enumerate(("motor strength", "friction")):
+        if not weak[index] < full[index] * 0.8:
+            failures.append(
+                f"{name} spread is {weak[index]:.4f} in stage 1 against "
+                f"{full[index]:.4f} at full intensity -- the randomisation "
+                "schedule is not reaching the samplers"
+            )
+    if not bool(cfg.domain_rand.push_robots):
+        failures.append(
+            "domain_rand.push_robots is False, so stage 4 is a no-op -- in v1 "
+            "pushes are the whole of its robustness-recovery claim"
+        )
+    if curriculum.disturbance_intensity(curriculum.stage_start(4) - 1) != 0.0:
+        failures.append("stage-4 disturbance leaks into stage 3")
     return failures
 
 

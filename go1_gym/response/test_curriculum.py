@@ -195,3 +195,53 @@ def test_ripple_detector_is_quiet_on_degenerate_input():
     assert dominant_frequency([1.0] * 64, 0.02) is None
     assert not gait_frequency_ripple([1.0] * 64, 0.02, 3.0)
     assert not gait_frequency_ripple([1.0, 2.0, 1.0] * 40, 0.02, 0.0)
+
+
+# --- R8.1's other two columns ----------------------------------------------
+
+
+def test_randomization_opens_over_stage_three_and_never_starts_at_zero():
+    curriculum = make()
+    assert curriculum.randomization_intensity(0) == pytest.approx(0.3)
+    assert curriculum.randomization_intensity(5999) == pytest.approx(0.3)
+    assert curriculum.randomization_intensity(6500) == pytest.approx(0.65)
+    assert curriculum.randomization_intensity(7000) == pytest.approx(1.0)
+    assert curriculum.randomization_intensity(50000) == pytest.approx(1.0)
+
+
+def test_the_randomization_floor_is_configurable_and_bounded():
+    assert make(randomization_floor=0.0).randomization_intensity(0) == 0.0
+    assert make(randomization_floor=1.0).randomization_intensity(0) == 1.0
+    with pytest.raises(ValueError, match="randomization_floor"):
+        make(randomization_floor=1.5)
+
+
+def test_disturbance_is_off_until_stage_four():
+    """Stage 4 must not overlap the stage-3 weight ramp, or a robustness change
+    and a weight change land together and neither can be attributed."""
+    curriculum = make()
+    for iteration in (0, 6000, 7000, 11999):
+        assert curriculum.disturbance_intensity(iteration) == 0.0
+    assert curriculum.disturbance_intensity(12500) == pytest.approx(0.5)
+    assert curriculum.disturbance_intensity(13000) == pytest.approx(1.0)
+
+
+def test_the_stage_the_ramps_attach_to_is_validated():
+    with pytest.raises(ValueError, match="randomization_stage"):
+        make(randomization_stage=0)
+    with pytest.raises(ValueError, match="disturbance_stage"):
+        make(disturbance_stage=99)
+
+
+def test_disabling_the_curriculum_freezes_randomization_at_the_floor():
+    """Safe direction again: disabled must not mean full randomisation plus
+    full disturbance from iteration 0."""
+    curriculum = make(enabled=False)
+    assert curriculum.randomization_intensity(1_000_000) == pytest.approx(0.3)
+    assert curriculum.disturbance_intensity(1_000_000) == 0.0
+
+
+def test_report_carries_both_intensities():
+    report = make().report(12500)
+    assert report["curriculum_randomization"] == pytest.approx(1.0)
+    assert report["curriculum_disturbance"] == pytest.approx(0.5)
