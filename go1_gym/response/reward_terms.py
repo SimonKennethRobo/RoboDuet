@@ -151,3 +151,38 @@ def soft_gate_from_events(
     """
     decremented = torch.clamp(timer - 1, min=0)
     return torch.where(triggered, torch.full_like(timer, hold_steps), decremented)
+
+
+def domain_consistency(
+    detrended: torch.Tensor,
+    twin_detrended: torch.Tensor,
+    weights: torch.Tensor,
+    valid: torch.Tensor,
+) -> torch.Tensor:
+    """R5 -- penalty on responding differently to the same command in a
+    different domain.  Non-negative; the scale supplies the sign.
+
+    ``twin_detrended`` is the nominal twin's detrended response, gathered per
+    env.  The comparison is against the twin and never against a within-group
+    mean or variance, which R5 states as an invariant: variance has a degenerate
+    minimiser -- be equally sluggish in every domain -- that collapses
+    consistency and bandwidth together, while "behave in the hard domain the way
+    you behave in the easy one" carries its own performance anchor.
+
+    ``valid`` is :attr:`EnvGrouping.valid`: zero for ungrouped envs, for the
+    twin itself, and for any group whose phase or command timing has drifted
+    after a fall.  That last one is the R5 invariant with teeth -- without it
+    the penalty is largest exactly where it is least meaningful, and a fall gets
+    charged twice.
+
+    On "the twin side must not receive gradient".  In this codebase there is no
+    autograd path through the simulator at all -- these are measured tensors, so
+    a ``.detach()`` here would be decoration.  What actually implements the
+    requirement is that the twin's own value of this term is masked to zero:
+    the policy is never paid for moving the *twin* towards a member, only for
+    moving members towards the twin.  Gradient asymmetry in a model-free setting
+    is a property of which environments the reward is applied to, not of the
+    tensor graph.
+    """
+    error = detrended - twin_detrended
+    return ((error ** 2) * weights).sum(dim=-1) * valid

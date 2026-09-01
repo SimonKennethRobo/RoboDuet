@@ -35,6 +35,7 @@ from go1_gym.response import (
     build_channels,
 )
 from go1_gym.response.reward_terms import (
+    domain_consistency,
     phase_variance,
     settled_mask,
     soft_gate_from_events,
@@ -59,7 +60,12 @@ CURRICULUM_PROGRESS_REWARDS = (
 #: Reward terms introduced by the response-consistency work (R4).  Asserted to
 #: be disjoint from CURRICULUM_PROGRESS_REWARDS at startup, which is the whole
 #: enforcement mechanism for the invariant above.
-CONSISTENCY_REWARDS = ("ref_tracking", "phase_variance", "steady_gain")
+CONSISTENCY_REWARDS = (
+    "ref_tracking",
+    "phase_variance",
+    "steady_gain",
+    "domain_consistency",
+)
 
 
 class LeggedRobot(BaseTask):
@@ -950,6 +956,14 @@ class LeggedRobot(BaseTask):
             self.response_measured, speed_bin, phase_bin, active=self._residual_sample_active()
         )
         self.response_delta_hat = self.response_measured - self.response_detrended
+        # R5: each group's alignment target, gathered per env.  Taken from the
+        # DETRENDED signal, not the raw one: every env in a group has its own
+        # gait-phase residual (different domains oscillate differently), so
+        # comparing raw measurements would charge the policy for an oscillation
+        # difference that R4.2 already governs and that R5 is not about.
+        self.response_twin_detrended = self.grouping.broadcast_from_twin(
+            self.response_detrended
+        )
 
         self.steps_since_command_change += 1.0
         self._update_response_soft_gate()
@@ -1333,6 +1347,8 @@ class LeggedRobot(BaseTask):
             *(f"ref_abs_err_detrended_{name}" for name in self.response_ref.channel_names),
             "phase_variance_raw",
             "steady_gain_raw",
+            "domain_consistency_raw",
+            "domain_consistency_active",
             "excitation_jumps",
         )
         self.performance_metric_sums = {
@@ -1409,6 +1425,21 @@ class LeggedRobot(BaseTask):
             self.response_channel_weights,
             mask=self.response_steady_gain_mask,
         )
+        # R5's magnitude, logged whatever its scale is -- the R4.2 experience
+        # says the end-of-ramp weight cannot be chosen without this number, and
+        # that watching it is how the ramp gets timed.
+        sums["domain_consistency_raw"] += domain_consistency(
+            self.response_detrended,
+            self.response_twin_detrended,
+            self.response_channel_weights,
+            self.grouping.valid,
+        )
+        # Counted so the metric can be normalised by ACTIVE steps rather than
+        # elapsed steps.  The term is zero wherever the mask is zero -- twins,
+        # ungrouped envs, desynchronised groups -- and dividing by elapsed steps
+        # would report a number a third smaller than the one the end-of-ramp
+        # weight was derived from, for no reason other than the denominator.
+        sums["domain_consistency_active"] += self.grouping.valid
 
         self._arm_update_performance_metrics_hook()
 
@@ -1490,6 +1521,11 @@ class LeggedRobot(BaseTask):
             )
         extras["perf_phase_variance_raw"] = mean_valid(episode_mean("phase_variance_raw"))
         extras["perf_steady_gain_raw"] = mean_valid(episode_mean("steady_gain_raw"))
+        active_steps = sums["domain_consistency_active"][train_env_ids]
+        extras["perf_domain_consistency_raw"] = self._mean_valid_metric(
+            sums["domain_consistency_raw"][train_env_ids] / torch.clamp(active_steps, min=1.0),
+            valid & (active_steps > 0),
+        )
         extras["perf_soft_gate_open_fraction"] = mean_valid(
             torch.full_like(steps, float(self.response_soft_gate.mean()))
         )

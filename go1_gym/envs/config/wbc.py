@@ -250,6 +250,37 @@ COMMON_OVERRIDES = {
     # policy): phase_variance -20.0, steady_gain -0.5.
     "reward_scales.phase_variance": 0.0,
     "reward_scales.steady_gain": 0.0,
+    # ---- R5 ------------------------------------------------------------------
+    # Same reasoning, same default. R5's term is structurally the same shape as
+    # R4.2 -- a squared deviation entering the exponent -- and it is switched on
+    # in the same stage-3 ramp, so switching it on at iteration 0 would fail the
+    # same way.
+    #
+    # It has a second problem R4.2 does not: availability.  A group of 4 is
+    # desynchronised if ANY member resets before the group's next shared
+    # resample, so if each env has probability p of resetting inside a 500-step
+    # window, the group is usable only (1-p)^4 of the time.  Measured over
+    # training, perf_group_desync_fraction sits near 0 while most envs are still
+    # in their first episode, jumps to 1.0 the moment resets become common (the
+    # first timeout wave, around iteration 42 at 24 steps/iteration), and only
+    # then decays -- 0.32-0.37 by iteration 80.  So for a long stretch the term
+    # is simply absent, and a weight applied there is uninformative rather than
+    # merely harmful.
+    #
+    # The practical gate for R8 stage 3 is therefore this metric coming down and
+    # staying down, NOT an iteration count. Group size trades directly against
+    # it: 4 members gives 3 comparisons per twin but needs a 4x lower per-env
+    # fall rate for the same availability.
+    # End-of-ramp target -3.0, measured not guessed: a walking policy gives a
+    # mean raw term of 0.0351 over the envs the mask leaves active, and
+    # -ln(0.90) / 0.0351 = 3.0 for the same 10% attenuation the other two are
+    # sized at (scripts/check_response_runtime.py --check r4 --policy <ckpt>).
+    #
+    # Note the term is averaged over ACTIVE envs only.  Twins, ungrouped envs
+    # and desynchronised groups are masked out -- measured, that is 31.5% of
+    # samples even for a policy that walks -- and averaging over everything
+    # would understate the term by about a third and bake that into the weight.
+    "reward_scales.domain_consistency": 0.0,
     "reward_scales.loco_energy": -0.00004,
     # domain randomization: base & mount
     "domain_rand.dog_obs_frame_drop_prob": 0.0,

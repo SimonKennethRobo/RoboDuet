@@ -698,6 +698,75 @@ R4 说的是"**大**扰动或**严重**打滑"，所以阈值必须落在尾部�
   ⚠️ 这是对 `_resample_commands` 语义的实质修改，
   需要一个 `copy_from_group` 分支，风险点已标注。
 
+### 实现结果（2026-09-01，第 7b 步：奖励项）
+
+`domain_consistency` 进 `go1_gym/response/reward_terms.py`，
+`_reward_domain_consistency` 是 3 行的 env 包装；
+比较目标 `response_twin_detrended = grouping.broadcast_from_twin(response_detrended)`
+在 `_update_response_state` 里算好。
+
+**比较的是去趋势量，不是原始量。** 组内每个 env 有各自的相位残差
+（不同域的振荡本来就不同），比原始量会把「振荡差异」也算进去——
+那是 R4.2 管的事，不是 R5 要表达的。
+
+#### 「twin 一侧不回传梯度」在 model-free 下是什么意思
+
+方案原文写 `.detach()`。实现时确认：**本仓库不存在穿过仿真器的 autograd 路径**，
+这些都是测量张量，`.detach()` 在这里纯属装饰。
+真正实现该要求的是**掩码**：twin 自己的该项被置 0
+（`EnvGrouping.valid` 已排除 twin），
+于是策略永远不会因为「把 twin 挪向成员」而得分，只会因为「把成员挪向 twin」得分。
+**model-free 下的梯度不对称是「奖励施加在哪些环境上」的性质，不是张量图的性质。**
+
+#### 权重是量出来的
+
+`--check r4 --policy <ckpt>` 扩了一项，用同一条
+`weight = -ln(attenuation) / mean_term_value` 规则：
+
+| 项 | 实测 raw | 10% 衰减对应权重 |
+| --- | --- | --- |
+| phase_variance | 0.004476 | 23.5 |
+| steady_gain | 0.131564 | 0.8 |
+| **domain_consistency** | **0.035138** | **3.0** |
+
+⚠️ **均值只在该项 active 的 env 上取。** twin、未分组 env、失步组都被掩掉——
+实测即使策略已经会走，仍有 **31.5%** 的样本被掩掉；
+按全体取均值会把该项低估约 1/3，并把这个偏差固化进权重。
+
+出厂值仍为 **0**，理由与 R4.2/4.3 同：结构上同样是「平方偏差进指数」，
+同样在 R8 阶段 3 的 ramp 里开启。**−3.0 记为末端目标。**
+
+#### ⚠️ `perf_group_desync_fraction` 的形状不是单调的，我最初读错了
+
+我先按 80 iter 的尾部读数在配置里写了「训练早期 0.36–0.38」——**错的**。
+把整条曲线拉出来：
+
+| 阶段 | ep_len | desync | 原因 |
+| --- | --- | --- | --- |
+| iter 0–35 | 11 → 178 | **0.001–0.05** | 「mean episode length」只统计**已结束**的 episode。此时绝大多数 env 还在第一个 episode 里没摔过，真正 reset 过的组很少 |
+| iter ~42 | 527 | **1.0** | 24 步/iter × 42 ≈ 1008 ≈ `max_episode_length`，**第一波超时同时命中所有 env**，每个组都被标失步 |
+| iter 63–80 | 417 → 603 | 0.29 → 0.37 | 策略站得住了，摔倒变少，可用性回升 |
+
+用受控探针复现确认了机制本身没问题
+（`scripts/check_group_availability.py`：强制 9%/步 摔倒 ⇒ desync 立刻钉在 1.0；
+强制 0.2%/步 ⇒ 第 450 步爬到 1.0；每 500 步 resync 时 64 组里恰好 48 组被清——
+另外 16 组是辨识组，周期是 1000，符合预期）。
+
+**真正该记住的量化结论：** 4 个一组，只要**任一**成员在本窗口内 reset 整组就失效，
+所以单 env reset 概率 p 对应组可用率 **(1−p)⁴**。
+p=63%（0.2%/步 × 500 步）时组可用率仅 1.9%。
+**R8 阶段 3 的启动判据必须是这条曲线降下来并稳住，不能是 iteration 数。**
+组大小与可用性直接对冲：4 个一组每个 twin 换来 3 组对比，
+但要求单 env 摔倒率低 4 倍才能维持同样的可用性。
+
+`perf_domain_consistency_raw` 也必须**按 active 步数归一**，
+不能按流逝步数——否则同一个量，定权重时的分母和盯 ramp 时的分母不一样，
+指标会比目标值小约 1/3，纯粹因为分母不同。
+（这是本项目第三次踩统计口径的坑：前两次是
+`perf_group_desync_fraction` 的 episode 归一化、
+`perf_twin_early_termination_rate` 的零稀释。
+共同点都是**「掩码/空批次写 0，再被平均进去」**。）
+
 ### 奖励
 
 `_reward_domain_consistency`（负项）：
@@ -1388,7 +1457,7 @@ gait frequency、arm 状态、domain 特权参数、地形标签（v1 恒为 pla
 | 5 ✅ | R4 四项 + σ 标定（**已完成**） | 83 项单测；σ 复现文档算例（t=0.1 参考 0.0361 / 激进误差 0.2015 / 奖励 0.0065）；1000 iter 无 NaN；R4.2/4.3 实测必须默认关闭 |
 | 6 ✅ | R6 富激励（先不分组）（**已完成**） | 109 项单测；辨识组 660 跳变/episode；chirp 带内能量 92.4%；课程 spy 精确排除 16/161；PRBS 12.2 次（文档自相矛盾，已记录） |
 | 7a ✅ | **R5 分组骨架 + twin 标称化**（**已完成**） | 135 项单测；`--check r5` 全过：twin 逐参数标称、0 命令/相位失配、强制摔倒后 valid 1→0 并在 499 步恢复 |
-| 7b | R5 `_reward_domain_consistency` 奖励项 | twin 侧 detach；权重按实测量级定 |
+| 7b ✅ | R5 `_reward_domain_consistency` 奖励项（**已完成**） | 140 项单测；实测 raw 0.0351 ⇒ 末端目标 −3.0；出厂 0（同 R4.2/4.3）；掩码即梯度不对称 |
 | 8  | R7 观测（90→112）+ 历史窗口 30→50 + R7.3 的 4 条结构性约束            | obs 宽度断言通过；旧 ckpt 显式报错；历史布局连续性测试通过；`temporal_encoder` 开关就位 |
 | 9  | R8 四阶段课程 + 参考模型标定                                         | 四个 checkpoint；无步频同频波动        |
 | 10 | R9 评测与导出                                                        | 主图产出                               |

@@ -5,7 +5,12 @@ from go1_gym.utils.math_utils import quat_apply_yaw, wrap_to_pi, get_scale_shift
 from isaacgym.torch_utils import *
 from isaacgym import gymapi
 from go1_gym.envs.roboduet.legged_robot import LeggedRobot
-from go1_gym.response.reward_terms import phase_variance, reference_tracking, steady_gain
+from go1_gym.response.reward_terms import (
+    domain_consistency,
+    phase_variance,
+    reference_tracking,
+    steady_gain,
+)
 
 class Rewards:
     def __init__(self, env):
@@ -122,6 +127,18 @@ class Rewards:
             env.response_ref.gather_commands(env.commands_dog),
             env.response_channel_weights,
             mask=env.response_steady_gain_mask,
+        )
+
+    def _reward_domain_consistency(self):
+        # R5. The same command in a harder domain must produce the twin's
+        # response.  Masked off for the twin itself and for any group whose
+        # phase drifted after a fall -- see EnvGrouping.valid.
+        env = self.env
+        return domain_consistency(
+            env.response_detrended,
+            env.response_twin_detrended,
+            env.response_channel_weights,
+            env.grouping.valid,
         )
 
     def _reward_lin_vel_z(self):

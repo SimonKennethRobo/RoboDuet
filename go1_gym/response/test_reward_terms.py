@@ -19,6 +19,7 @@ from go1_gym.response import (
     discrimination_for_sigma,
 )
 from go1_gym.response.reward_terms import (
+    domain_consistency,
     phase_variance,
     reference_tracking,
     settled_mask,
@@ -310,3 +311,71 @@ def test_channel_weights_are_honoured():
     )
     assert heavy_on_good.item() == pytest.approx(0.9, abs=1e-6)
     assert heavy_on_bad.item() == pytest.approx(0.1, abs=1e-6)
+
+
+# --- R5: domain consistency -------------------------------------------------
+
+
+def test_domain_consistency_is_zero_when_the_response_matches_the_twin():
+    detrended = torch.randn(8, 5)
+    weights = torch.ones(1, 5)
+    valid = torch.ones(8)
+    assert torch.allclose(
+        domain_consistency(detrended, detrended.clone(), weights, valid),
+        torch.zeros(8),
+    )
+
+
+def test_domain_consistency_grows_with_the_gap_and_is_non_negative():
+    weights = torch.ones(1, 5)
+    valid = torch.ones(3)
+    twin = torch.zeros(3, 5)
+    detrended = torch.tensor([0.0, 0.1, -0.3]).unsqueeze(-1).repeat(1, 5)
+    value = domain_consistency(detrended, twin, weights, valid)
+    assert torch.all(value >= 0)
+    assert value[0] < value[1] < value[2]
+    # symmetric: overshoot and undershoot cost the same
+    assert torch.allclose(
+        domain_consistency(-detrended, twin, weights, valid), value
+    )
+
+
+def test_domain_consistency_respects_the_validity_mask():
+    """Ungrouped envs, the twin itself, and desynchronised groups contribute 0."""
+    weights = torch.ones(1, 5)
+    detrended = torch.full((4, 5), 0.5)
+    twin = torch.zeros(4, 5)
+    valid = torch.tensor([0.0, 1.0, 0.0, 1.0])
+    value = domain_consistency(detrended, twin, weights, valid)
+    assert value.tolist() == [0.0, 1.25, 0.0, 1.25]
+
+
+def test_domain_consistency_weights_channels_independently():
+    valid = torch.ones(1)
+    twin = torch.zeros(1, 5)
+    detrended = torch.zeros(1, 5)
+    detrended[0, 3] = 1.0
+    weights = torch.tensor([[1.0, 1.0, 1.0, 4.0, 1.0]])
+    assert float(domain_consistency(detrended, twin, weights, valid)) == 4.0
+
+
+def test_domain_consistency_matches_a_grouping_broadcast_end_to_end():
+    """The shape R5 specifies, assembled the way the env assembles it."""
+    from go1_gym.response import EnvGrouping
+
+    grouping = EnvGrouping(8, group_size=4)
+    detrended = torch.zeros(8, 5)
+    detrended[1] = 0.2          # member of group 0 drifts
+    detrended[5] = 0.2          # member of group 1 drifts
+    twin = grouping.broadcast_from_twin(detrended)
+    weights = torch.ones(1, 5)
+
+    value = domain_consistency(detrended, twin, weights, grouping.valid)
+    assert float(value[1]) == pytest.approx(5 * 0.04)
+    assert float(value[0]) == 0.0      # twins never score
+    assert float(value[2]) == 0.0      # matches its twin exactly
+
+    grouping.mark_desync(torch.tensor([3]))
+    off = domain_consistency(detrended, twin, weights, grouping.valid)
+    assert float(off[1]) == 0.0        # group 0 is now desynchronised
+    assert float(off[5]) == pytest.approx(5 * 0.04)   # group 1 unaffected

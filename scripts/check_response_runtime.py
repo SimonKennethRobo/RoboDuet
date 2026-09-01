@@ -354,8 +354,14 @@ def check_r4(env, cfg, policy_path, seconds=40.0):
 
     env.reset()
     _, arm_a = zero_actions(env, cfg)
-    totals = {"ref_tracking": 0.0, "phase_variance": 0.0, "steady_gain": 0.0}
+    totals = {
+        "ref_tracking": 0.0,
+        "phase_variance": 0.0,
+        "steady_gain": 0.0,
+        "domain_consistency": 0.0,
+    }
     gate_shut = 0.0
+    desync = 0.0
     slip_samples, accel_samples = [], []
     steps = int(seconds / base.dt)
     reward_cfg = cfg.response.reward
@@ -368,6 +374,18 @@ def check_r4(env, cfg, policy_path, seconds=40.0):
             totals["ref_tracking"] += container._reward_ref_tracking().mean().item()
             totals["phase_variance"] += container._reward_phase_variance().mean().item()
             totals["steady_gain"] += container._reward_steady_gain().mean().item()
+            # R5's term is averaged over the envs it is ACTIVE for, not over all
+            # of them: it is masked off for twins, for ungrouped envs and for
+            # desynchronised groups, and a plain mean over everything would be
+            # diluted by roughly a factor of three by construction -- which would
+            # then be baked into the derived weight.
+            consistency = container._reward_domain_consistency()
+            active = base.grouping.valid > 0
+            if bool(active.any()):
+                totals["domain_consistency"] += consistency[active].mean().item()
+            scoreable = base.grouping.is_grouped & ~base.grouping.is_twin
+            if bool(scoreable.any()):
+                desync += float(1.0 - base.grouping.valid[scoreable].mean())
             gate_shut += (base.response_soft_gate == 0).float().mean().item()
             # Recompute the two trigger quantities so their distributions can be
             # inspected; the gate itself only exposes the combined result.
@@ -387,6 +405,7 @@ def check_r4(env, cfg, policy_path, seconds=40.0):
     print(f"  {seconds:.0f}s rollout, {cfg.env.num_envs} envs")
     print(f"  soft gate shut for {gate_shut / steps:.1%} of samples "
           f"(hold {base.soft_gate_hold_steps} steps)")
+    print(f"  R5 group desynchronised for {desync / steps:.1%} of samples")
     print(f"\n  {'trigger':<22}{'p50':>9}{'p90':>9}{'p99':>9}{'p99.9':>9}"
           f"{'threshold':>11}{'fires':>8}")
     for name, values, threshold in (
