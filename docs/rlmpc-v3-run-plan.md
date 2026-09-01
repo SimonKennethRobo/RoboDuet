@@ -59,6 +59,20 @@ python scripts/auto_train.py --headless --sim_device $SIM_DEVICE --graphics_devi
 
 `runs/<date>/stage1_rlmpc_calib_*/checkpoints_dog/ac_weights_last_dog.pt`
 
+### 第一次发车在 iteration 600 崩了（2026-09-01，已修）
+
+`_apply_stage1_arm_curriculum_actions` 里 R5 的 twin 分支拿 env 掩码去索引
+`arm_default`——而它是 `(1, num_actions_arm)` 的一行广播量，不是 per-env 张量。
+
+崩在 600 是因为 arm 课程的强度在 ramp 的前 10% 是 0，`6000 × 0.1 = 600` 才第一次真正
+执行到那个分支。**这条分支此前从未在任何地方执行过**：所有 check 和冒烟跑都短于
+2000 iter（旧 ramp 下的 10%），全部走的是 intensity == 0 的那条早退路径。
+把 ramp 改成 6000 只是让它早 1400 iter 暴露，不是原因。
+
+已加 `--check r5` 的最后一节：**强制** `stage1_arm_play_intensity = 1.0` 再步进，
+断言 twin 的 arm offset 恒为 0、非 twin 确实在动。
+教训是通用的：只访问"短 rollout 恰好走到的代码路径"的验收门不是验收门。
+
 ---
 
 ## 3. 标定闸门（Run A 与 Run B 之间，~30 min）

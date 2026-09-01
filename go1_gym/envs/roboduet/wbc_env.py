@@ -673,8 +673,11 @@ class WBCEnv(LeggedRobot):
             self.stage1_arm_target_offset[twins] = 0.0
             self.stage1_arm_target_vel[twins] = 0.0
             self.stage1_arm_target_accel[twins] = 0.0
+            # arm_default is (1, num_actions_arm) -- one row broadcast over
+            # envs, not a per-env tensor. Indexing it with the env mask is an
+            # IndexError, not a silent shape bug.
             self.actions[twins, arm_slice] = (
-                self.stage1_arm_fixed_dof_pos[twins] - arm_default[twins]
+                self.stage1_arm_fixed_dof_pos[twins] - arm_default
             ) / self.cfg.control.action_scale
 
     def _resample_stage1_ee_payload(self, env_ids):

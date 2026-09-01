@@ -575,6 +575,59 @@ def check_r5(env, cfg, steps=1200):
           f"(shared resample interval is {interval})")
     if recovered_at is None:
         failures.append(f"group {group} never recovered within one resample interval")
+
+    failures += _check_twin_arm_is_held_still(env, cfg)
+    return failures
+
+
+def _check_twin_arm_is_held_still(env, cfg):
+    """R5: "arm fixed" is part of the twin's definition, and it has to hold
+    while the stage-1 arm curriculum is actually moving everyone else's arm.
+
+    This needs forcing.  The curriculum's intensity is zero until 10% of its
+    ramp has elapsed, so every check and every smoke run so far exercised only
+    the intensity == 0 branch -- and the twin branch below it, which is the one
+    R5 added, had never executed anywhere.  It crashed the first time it ran, at
+    iteration 600 of a real training run.  Forcing the intensity is the whole
+    point of this check: an acceptance gate that only visits the code paths a
+    short rollout happens to reach is not a gate.
+    """
+    base = env.env
+    if not base._stage1_arm_curriculum_active():
+        print("  stage-1 arm curriculum is off; skipped the twin-arm check")
+        return []
+
+    failures = []
+    dog_a, arm_a = zero_actions(env, cfg)
+    previous = getattr(base, "stage1_arm_play_intensity", None)
+    arm_slice = slice(base.num_actions_loco, base.num_actions_loco + base.num_actions_arm)
+    twins = base.is_nominal_twin
+    others = base.grouping.is_grouped & ~twins
+    try:
+        base.stage1_arm_play_intensity = 1.0
+        for _ in range(20):
+            env.step(dog_a, arm_a)
+        twin_motion = float(base.stage1_arm_target_offset[twins].abs().max())
+        other_motion = float(base.stage1_arm_target_offset[others].abs().max())
+    finally:
+        if previous is None:
+            if hasattr(base, "stage1_arm_play_intensity"):
+                del base.stage1_arm_play_intensity
+        else:
+            base.stage1_arm_play_intensity = previous
+
+    print(f"  arm curriculum forced to full: twin |offset| max {twin_motion:.6f}, "
+          f"non-twin {other_motion:.4f}")
+    if twin_motion != 0.0:
+        failures.append(
+            f"the twin's arm moved ({twin_motion:.6f} rad) while the curriculum "
+            "was running -- the twin is supposed to be the no-disturbance reference"
+        )
+    if other_motion == 0.0:
+        failures.append(
+            "no non-twin arm moved at full curriculum intensity, so the check "
+            "proved nothing about the twin"
+        )
     return failures
 
 
