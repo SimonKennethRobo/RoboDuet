@@ -2701,7 +2701,7 @@ class WBCEnv(LeggedRobot):
         # End-effector position in the base frame.  end_effector_state is
         # refreshed unconditionally, ahead of the stage-2 switch, and already
         # carries the grasp-point offset -- so this needs no extra FK.
-        ee_pos_in_base = quat_rotate_inverse(
+        self.response_ee_pos_in_base = quat_rotate_inverse(
             self.base_quat, self.end_effector_state[:, :3] - self.base_pos
         )
         return torch.cat(
@@ -2709,7 +2709,7 @@ class WBCEnv(LeggedRobot):
                 reference.xi * scale,
                 reference.normalized_rate(),
                 (reference.xi - commands) * scale,
-                ee_pos_in_base,
+                self.response_ee_pos_in_base,
                 self.response_deviation.observation(),
             ),
             dim=-1,
