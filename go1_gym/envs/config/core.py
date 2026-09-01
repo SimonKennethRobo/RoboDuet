@@ -340,6 +340,14 @@ def dog_obs_dim_parts(cfg):
         parts["heading"] = 1
     if cfg.env.observe_contact_states:
         parts["contact_states"] = 4
+    # R7.1.  Appended last so the existing segment offsets are untouched; the
+    # widths are derived from the response config, never written as literals.
+    channels = len(cfg.response.channel_order)
+    parts["reference_state"] = channels
+    parts["reference_rate"] = channels
+    parts["reference_minus_cmd"] = channels
+    parts["ee_pos_in_base"] = 3
+    parts["response_deviation"] = 2 * len(cfg.response.deviation.channels)
     return parts
 
 

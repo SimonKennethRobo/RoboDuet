@@ -797,6 +797,44 @@ RESPONSE_GROUPING_OVERRIDES = {
 }
 
 
+# ============================================================
+# R7 -- observations.
+#
+# The five decision channels' reference state is handed to the policy rather
+# than left to be reconstructed.  The hard argument for it: the pitch channel's
+# reference takes 4/omega_n = 0.8 s to settle, and the ORIGINAL history window
+# was 30 x 0.02 = 0.6 s -- too short to contain one complete step response, so
+# reconstructing xi from the command history was not merely hard, it was
+# information-theoretically impossible.
+#
+# The history window goes to 50 steps (1.0 s) for the same reason, and because
+# teacher-student was vetoed: domain identification now has to happen inside the
+# actor's processing of this window, and 1.0 s is the shortest window that
+# covers both jobs.  It is the upper end of the 0.5-1.0 s that R7.2 itself
+# quotes for the proprioceptive history.
+# ============================================================
+RESPONSE_OBS_OVERRIDES = {
+    "dog.dog_num_observation_history": 50,
+    # (g, l) -- only for the channels with an absolute sensing anchor.  See the
+    # deployment contract: pitch and yaw rate come from the IMU, whose gravity
+    # reference does not drift.  vx/vy/height would need leg-odometry state
+    # estimation, which is biased and degrades exactly when the robot slips --
+    # and a 5 s EMA is the worst possible thing to feed a slow bias into.
+    "response.deviation.channels": ["wyaw", "pitch"],
+    # 5 s, against an MPC horizon of ~1 s.  Being 5x slower than the horizon is
+    # what lets the planner treat these as constant PARAMETERS rather than as
+    # states it has to predict.
+    "response.deviation.tau_s": 5.0,
+    "response.deviation.warmup_s": 2.0,
+    # Below this fraction of the channel's rate limit the reference is not
+    # moving enough for sign(xi_dot) to carry information.
+    "response.deviation.rate_deadband": 0.05,
+    # ...and below this fraction of a representative command amplitude (in RMS)
+    # the channel has not been driven hard enough to identify a gain at all.
+    "response.deviation.excitation_fraction": 0.1,
+}
+
+
 ROBODUET_OVERRIDES = {
     **RESPONSE_MODEL_OVERRIDES,
     **RESPONSE_EXCITATION_OVERRIDES,
@@ -806,6 +844,8 @@ ROBODUET_OVERRIDES = {
     **STAGE2_OVERRIDES,
     **STAGE2_IK_OVERRIDES,
     **GOAL_REACHING_OVERRIDES,
+    # Last, so it wins over the stage-1 table's history length of 30.
+    **RESPONSE_OBS_OVERRIDES,
     **{
         f"wbc.reward_scales.{name}": 0.0
         for name in {*GOAL_REACHING_REWARD_SCALES, *TRAJ_TRACKING_REWARD_SCALES}

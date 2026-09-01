@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
 from params_proto import PrefixProto
+
+from go1_gym.response.temporal import TemporalEncoder
 from torch.distributions import Normal
 
 
@@ -14,6 +16,18 @@ class DogAC_Args(PrefixProto, cli=False):
     adaptation_module_branch_hidden_dims = [256, 128]
 
     use_decoder = False
+
+    # R7.3: which temporal encoder consumes the observation history.
+    #   "flat" -- one Linear over the whole flattened window.  v1 default.
+    #   "tcn"  -- dilated causal convolutions over (T, C).
+    # v1 ships "flat" on ordering grounds, not on merit: the TCN changes no
+    # observation semantics, no reward and no config layout, so it can be
+    # swapped in at any time -- and precisely because it can, it must not be
+    # introduced next to R5, or a bad curve cannot be attributed to either one.
+    temporal_encoder = "flat"
+    tcn_channels = 128
+    tcn_kernel_size = 3
+    tcn_dilations = [1, 2, 4, 8, 16]
 
 
 class DogActorCritic(nn.Module):
@@ -65,8 +79,19 @@ class DogActorCritic(nn.Module):
             actor_input_dim += self.num_privileged_obs
 
         actor_layers = []
-        actor_layers.append(nn.Linear(actor_input_dim, DogAC_Args.actor_hidden_dims[0]))
-        actor_layers.append(activation)
+        # R7.3: the first stage is the temporal encoder rather than a bare
+        # Linear.  With temporal_encoder="flat" this is exactly the Linear it
+        # replaces, so v1 behaviour is unchanged.
+        actor_layers.append(
+            TemporalEncoder(
+                num_obs=num_obs,
+                num_history_steps=self.num_obs_history // max(1, num_obs),
+                out_dim=DogAC_Args.actor_hidden_dims[0],
+                activation=activation,
+                extra_dim=actor_input_dim - self.num_obs_history,
+                args=DogAC_Args,
+            )
+        )
         for l in range(len(DogAC_Args.actor_hidden_dims)):
             if l == len(DogAC_Args.actor_hidden_dims) - 1:
                 actor_layers.append(nn.Linear(DogAC_Args.actor_hidden_dims[l], num_actions))

@@ -1272,6 +1272,98 @@ Conv1d(128  -> 128, k=3, dilation=16)  + ELU     # 感受野 1+2*(1+2+4+8+16) = 
 
 ---
 
+### 实现结果（2026-09-01，第 8 步：已完成）
+
+obs 宽度 **112**（= `dog_obs_dim_parts` 各项之和，非写死），历史 **50**，展平 **5600**。
+新增 5 段全部追加在末尾，既有段偏移不动。
+
+#### ⚠️ 两处公式在本数据上无定义，已改
+
+方案给的 `g_c = EMA(y) / EMA(u)` **不能用**：
+5 个决策通道全部是零均值采样，`EMA(u)` 在 5 s 窗口上趋于 0——
+这不是"病态需要正则化"，是**分子分母同时趋于 0，比值无意义**；
+正则化分母只是把无意义的数变成小的无意义的数。
+改用最小二乘增益 `EMA(y·u) / EMA(u²)`：有直流分量时与原式一致，没有时仍有定义。
+
+`l_c = EMA((y−ξ)·sign(ξ̇))` 同样要改：稳态下 `sign(ξ̇)` 是任意的，
+不设门的 EMA 会在整个命令保持期间积分噪声——而在 10 s 重采样周期下那是大部分时间。
+改为**仅在参考确实在动时推进 EMA**（`|ξ̇| > 5%·ṙmax`）。
+
+#### 我自己的同类 bug：未激励通道会报告"增益为 0"
+
+改完比值后第一次冒烟就抓到：某通道从未被命令时 `EMA(u²)≈0`，
+回归增益给出 0 ⇒ 观测里是 `g−1 = −1`，即**"这个域完全没有增益"**——
+一个自信的错误答案，正是我否决原式的那个失效模式换了个地方出现。
+
+加**激励门**：`EMA(u²)` 必须超过（10% × 代表性命令幅值）² 才敢给增益。
+两半各有各的门，且门的物理量不同：**增益需要通道被"命令过"，滞后需要参考"动过"。**
+两者都没有时输出 0 = 标称。
+
+`g` 上报为**相对 1 的偏差**，因此 warmup 期输出 0 天然等于"暂无信息、按标称处理"，
+不需要在观测里额外占一位放 warmup 标志。
+
+#### 一个反直觉但吃重的性质：增益比值没有启动瞬态
+
+`cross` 与 `square` 是同 α、同零初值的两条 EMA，**比值的滞后互相抵消**——
+远在任何一条收敛之前，比值就已经对了。
+这正是 5 s 时间常数在这里"免费"的原因：它在 episode 开头不产生代价，
+只决定**域发生变化时**跟踪得多快。已钉进测试。
+
+#### R7.3 四条结构性约束
+
+`TemporalEncoder` 放在 `go1_gym/response/temporal.py`——
+理由与第 1 步相同：`go1_gym_learn.ppo_cse_automatic.__init__` 会拉入 IsaacGym，
+定义在它下面的东西无法脱离仿真器做单测。
+
+1. 历史缓冲按时间步连续（oldest→newest）——**钉进测试**。
+   交错布局不会报错，只会让 reshape 悄悄读错。
+2. `DogAC_Args.temporal_encoder = "flat" | "tcn"` 单一开关。
+3. **reshape 归编码器自己管**，对外签名恒为 `(B, T*C) -> (B, hidden)`。
+4. T、C 由 cfg 推导。
+
+> `jit.script` 测试抓到两个真实违规：`forward` 里的 `isinstance(layer, nn.Conv1d)`
+> 不可脚本化（改为把因果 padding 做成 `ConstantPad1d` **层**），
+> 以及 `head` 只在 tcn 分支存在（script 会编译所有分支，故无条件定义）。
+> **部署契约的测试值回票价了**——这两条只会在日后切 TCN 时炸，且炸在导出环节。
+
+TCN 参数量 < flat 首层的 1/5（已断言）；感受野 63 ≥ 50（已断言）。
+
+#### ⚠️ 冒烟测试此前用错了训练入口
+
+`TemporalEncoder` 与 checkpoint 检查改在 `ppo_cse_automatic`（`auto_train.py` 路径）——
+这与 `tmp/run_cluster.sh` 实际跑的一致，位置是对的。
+但**我前 7 步的冒烟训练全部用的是 `unified_train.py`**，它走
+`ppo_cse_unified` 的统一双头架构，根本不构造 `DogActorCritic`。
+env 侧改动（奖励、指标、命令、分组）两条路都经过，所以那些验证仍然有效；
+**R7.3/R7.4 此前从未被训练跑过**。第 8 步起改用 `auto_train.py`。
+详见 [facts §13b](rlmpc-v3-r0-facts.md)。
+
+#### 验收结果
+
+167 项单测；`auto_train.py` 200 iter（4096 env、seed 42）：
+
+```
+Dog Actor MLP: Sequential(
+  (0): TemporalEncoder(
+    (head): Identity()
+    (body): Sequential(
+      (0): Linear(in_features=5600, out_features=512, bias=True)
+      (1): ELU(alpha=1.0)
+```
+
+0 NaN、0 报错，**285.4 s**（R0 基线 287.5 s，同一入口，无实质开销变化），
+mean episode length 534.5。
+
+旧 checkpoint 加载实测报错：
+```
+This checkpoint was trained with a different dog observation layout:
+  dog_num_observations: checkpoint 90 != current 112
+  dog_num_observation_history: checkpoint 30 != current 50
+```
+
+> 另一条佐证：同 seed 下 `unified_train.py` 的结果与 R7 之前**逐位相同**
+> （reward 0.0588、episode 269.9），确认统一学习器确实看不到 dog 观测的改动。
+
 ### R7.4 旧 checkpoint 必须显式报错
 
 `Runner._load_matching_state_dict`（`ppo_cse_automatic/__init__.py`）
@@ -1458,7 +1550,7 @@ gait frequency、arm 状态、domain 特权参数、地形标签（v1 恒为 pla
 | 6 ✅ | R6 富激励（先不分组）（**已完成**） | 109 项单测；辨识组 660 跳变/episode；chirp 带内能量 92.4%；课程 spy 精确排除 16/161；PRBS 12.2 次（文档自相矛盾，已记录） |
 | 7a ✅ | **R5 分组骨架 + twin 标称化**（**已完成**） | 135 项单测；`--check r5` 全过：twin 逐参数标称、0 命令/相位失配、强制摔倒后 valid 1→0 并在 499 步恢复 |
 | 7b ✅ | R5 `_reward_domain_consistency` 奖励项（**已完成**） | 140 项单测；实测 raw 0.0351 ⇒ 末端目标 −3.0；出厂 0（同 R4.2/4.3）；掩码即梯度不对称 |
-| 8  | R7 观测（90→112）+ 历史窗口 30→50 + R7.3 的 4 条结构性约束            | obs 宽度断言通过；旧 ckpt 显式报错；历史布局连续性测试通过；`temporal_encoder` 开关就位 |
+| 8 ✅ | R7 观测（90→112）+ 历史 30→50 + R7.3 的 4 条结构性约束（**已完成**） | 167 项单测；obs 宽度 = parts 表之和 = 112、展平 5600；旧 ckpt 显式报错并指出两处不符；`flat`/`tcn` 均通过 `jit.script`；历史布局钉进测试 |
 | 9  | R8 四阶段课程 + 参考模型标定                                         | 四个 checkpoint；无步频同频波动        |
 | 10 | R9 评测与导出                                                        | 主图产出                               |
 

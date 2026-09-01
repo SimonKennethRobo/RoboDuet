@@ -30,6 +30,7 @@ from go1_gym.response import (
     GAIT_FREQUENCY,
     EnvGrouping,
     ExcitationSampler,
+    ResponseDeviationEstimator,
     PhaseResidualEstimator,
     ReferenceModel,
     build_channels,
@@ -509,6 +510,10 @@ class LeggedRobot(BaseTask):
         # measurement buffers here still hold pre-reset values -- they are
         # refreshed at the top of the next post_physics_step().
         self.response_ref.request_alignment(env_ids)
+        # R7.1: the (g, l) statistics describe a domain via the robot's own
+        # response, and after a reset the robot's state no longer matches what
+        # produced them.
+        self.response_deviation.reset(env_ids)
         self.response_soft_gate_timer[env_ids] = 0.0
         self.prev_base_lin_vel[env_ids] = 0.0
         self.feet_air_time[env_ids] = 0.0
@@ -963,6 +968,16 @@ class LeggedRobot(BaseTask):
         # difference that R4.2 already governs and that R5 is not about.
         self.response_twin_detrended = self.grouping.broadcast_from_twin(
             self.response_detrended
+        )
+
+        # R7.1: the slow domain statistics.  After the reference has stepped, so
+        # xi and xi_dot are this step's values -- the same ordering requirement
+        # the rewards have, for the same reason.
+        self.response_deviation.update(
+            self.response_measured,
+            commands,
+            self.response_ref.xi,
+            self.response_ref.xi_dot,
         )
 
         self.steps_since_command_change += 1.0
@@ -2382,6 +2397,37 @@ class LeggedRobot(BaseTask):
         )
         self.response_soft_gate = torch.ones(self.num_envs, device=self.device, dtype=torch.float)
         self.prev_base_lin_vel = torch.zeros(self.num_envs, 3, device=self.device, dtype=torch.float)
+
+        # R7.1: the (g, l) statistics.  Only the IMU-anchored channels are
+        # observed -- see the deployment contract in the R0 plan.
+        deviation_cfg = self.cfg.response.deviation
+        deviation_channels = [names.index(name) for name in deviation_cfg.channels]
+        self.response_deviation = ResponseDeviationEstimator(
+            num_envs=self.num_envs,
+            channel_index=deviation_channels,
+            rate_limit=[c.rate_limit for c in self.response_ref.channels],
+            # A "representative command" for this channel: the same half-width
+            # of the sampling range that sigma is calibrated at, so the two
+            # cannot drift apart.
+            command_scale=[float(reward_cfg.calibration_amplitudes[n]) for n in names],
+            dt=self.dt,
+            tau_s=float(deviation_cfg.tau_s),
+            warmup_s=float(deviation_cfg.warmup_s),
+            rate_deadband=float(deviation_cfg.rate_deadband),
+            excitation_fraction=float(deviation_cfg.excitation_fraction),
+            device=self.device,
+        )
+
+        # R7.1 observation scale.  xi and (xi - u) carry the command's units, so
+        # they reuse commands_scale_dog gathered onto the decision channels.
+        # xi_dot instead uses ReferenceModel.normalized_rate(), which already
+        # divides by the rate limit -- the channels' units differ (m/s^2 for
+        # velocity, rad/s for pitch) so a shared scale would be meaningless.
+        self.response_obs_scale = self.commands_scale_dog[
+            torch.tensor(
+                [c.cmd_index for c in self.response_ref.channels], device=self.device
+            )
+        ].unsqueeze(0)
 
         residual_cfg = self.cfg.response.residual
         self.response_residual = PhaseResidualEstimator(

@@ -151,14 +151,30 @@ def test_frozen_and_semi_free_channels_get_one_bin_each(cfg):
         assert count == 1, f"{name} should have 1 curriculum bin, has {count}"
 
 
-def test_command_width_and_observation_width_are_unchanged(cfg):
-    """R1 acceptance: freezing must not change any dimension.
+def test_command_width_is_unchanged_by_freezing(cfg):
+    """R1 acceptance: freezing must not change the command vector's width.
 
-    Frozen channels keep their slot, so both the command vector and the dog
-    observation stay exactly as wide as they were before the trimming.
+    Frozen channels keep their slot rather than being deleted, so the command
+    vector is exactly as wide as before the trimming.  This is R1's invariant
+    and it still holds; the observation width is no longer part of it.
     """
     assert cfg.dog.dog_num_commands == 11
-    assert cfg.dog.dog_num_observations == 90
+
+
+def test_observation_width_is_whatever_the_parts_table_says(cfg):
+    """R1 originally pinned this at 90 to prove freezing changed nothing.
+
+    R7 then raised it to 112 on purpose (reference state, its rate, the command
+    gap, the end-effector position, and the two IMU-anchored (g, l) pairs), so
+    the literal is now R7's to own.  What still has to hold -- and is the thing
+    worth asserting -- is that the configured width is derived from the parts
+    table rather than written down twice.
+    """
+    from go1_gym.envs.config.core import dog_obs_dim_parts
+
+    assert cfg.dog.dog_num_observations == sum(dog_obs_dim_parts(cfg).values())
+    assert cfg.dog.dog_num_observations == 112
+    assert cfg.dog.dog_num_obs_history == 112 * cfg.dog.dog_num_observation_history
 
 
 def test_curriculum_grid_is_small_enough_to_be_covered(cfg):

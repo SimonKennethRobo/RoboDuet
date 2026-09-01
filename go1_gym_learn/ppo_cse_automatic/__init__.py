@@ -3,6 +3,7 @@
 import copy
 import os
 import os.path as osp
+import pickle
 import shutil
 import statistics
 import time
@@ -51,6 +52,46 @@ def _load_matching_state_dict(model, checkpoint_state, *, skip_prefixes=()):
     if missing_required:
         raise RuntimeError(f"Checkpoint is missing required tensors: {missing_required}")
     return skipped
+
+
+def _check_dog_obs_layout(ckpt_path, cfg):
+    """R7.4: refuse a checkpoint from a different observation layout, loudly.
+
+    The R7 observation change (90 -> 112 dims, history 30 -> 50) already makes
+    the actor's first layer mismatch, so loading would fail anyway -- but it
+    fails as a bare shape mismatch on a tensor named ``actor_body.0.weight``,
+    which says nothing about the cause.  The run directory keeps a
+    ``parameters.pkl`` snapshot of the config it was trained with, so the real
+    answer is available: say it.
+
+    Silently loading what happens to fit would be far worse than either.  The
+    layout change is not a resize, it is a different observation vector, and a
+    partially loaded policy would be reading pitch where it learned velocity.
+    """
+    snapshot = os.path.join(os.path.dirname(os.path.dirname(ckpt_path)), "parameters.pkl")
+    if not os.path.exists(snapshot):
+        return
+    try:
+        with open(snapshot, "rb") as handle:
+            parameters = pickle.load(handle)
+        trained = parameters.get("Cfg", {}).get("dog", {})
+    except Exception:
+        return
+    mismatches = []
+    for key in ("dog_num_observations", "dog_num_observation_history"):
+        before = trained.get(key)
+        now = getattr(cfg.dog, key, None)
+        if before is not None and now is not None and int(before) != int(now):
+            mismatches.append(f"{key}: checkpoint {before} != current {now}")
+    if mismatches:
+        raise RuntimeError(
+            "This checkpoint was trained with a different dog observation layout:\n  "
+            + "\n  ".join(mismatches)
+            + f"\n(snapshot: {snapshot})\n"
+            "The observation vector changed, it was not merely resized, so the "
+            "weights cannot be reused even in part -- stage-1 has to be retrained "
+            "from scratch. Use this checkpoint only as an evaluation baseline."
+        )
 
 
 def class_to_dict(obj) -> dict:
@@ -148,6 +189,7 @@ class Runner:
         ).to(self.device)
 
         if DogRunnerArgs.ckpt_path is not None:
+            _check_dog_obs_layout(DogRunnerArgs.ckpt_path, self.env.cfg)
             weights = torch.load(DogRunnerArgs.ckpt_path, map_location=self.device)
             if DogRunnerArgs.stage2_freeze_loco_policy:
                 skipped = _load_matching_state_dict(self.dog_model, weights, skip_prefixes=("critic_body.",))

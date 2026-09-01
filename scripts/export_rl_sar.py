@@ -249,12 +249,26 @@ def observation_terms(cfg):
     if bool(cfg.env.observe_contact_states):
         raise NotImplementedError("env.observe_contact_states has no rl_sar term")
     terms += ["roboduet/arm_dof_pos", "roboduet/arm_dof_vel"]      # 6, 6
+    # R7.1.  The first three are the same second-order integrator the MPC
+    # already runs as its nominal dynamics, so rl_sar implements it once and
+    # reads three terms off it -- and the agreement between the on-robot xi and
+    # the MPC's own xi becomes a free diagnostic: if they diverge, the command
+    # path, the clock or the parameters are wrong, and it shows up before the
+    # behaviour does.
+    terms += [
+        "roboduet/reference_state",       # xi                      5
+        "roboduet/reference_rate",        # xi_dot / rate_limit     5
+        "roboduet/reference_minus_cmd",   # xi - u                  5
+        "roboduet/ee_pos_in_base",        # arm FK                  3
+        "roboduet/response_deviation",    # (g-1, l) x IMU channels 4
+    ]
     return terms
 
 
 def expected_obs_width(cfg, terms):
     num_leg = int(cfg.dog.num_actions_loco)
     num_arm = int(cfg.arm.num_actions_arm)
+    num_channels = len(cfg.response.channel_order)
     widths = {
         "gravity_vec": 3,
         "ang_vel": 3,
@@ -270,6 +284,11 @@ def expected_obs_width(cfg, terms):
         "roboduet/velocity_error": 3,
         "roboduet/arm_dof_pos": num_arm,
         "roboduet/arm_dof_vel": num_arm,
+        "roboduet/reference_state": num_channels,
+        "roboduet/reference_rate": num_channels,
+        "roboduet/reference_minus_cmd": num_channels,
+        "roboduet/ee_pos_in_base": 3,
+        "roboduet/response_deviation": 2 * len(cfg.response.deviation.channels),
     }
     return sum(widths[name] for name in terms)
 

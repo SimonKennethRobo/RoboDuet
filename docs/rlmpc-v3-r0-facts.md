@@ -514,6 +514,25 @@ python scripts/auto_train.py --train_stage stage1 --dyna_gait --headless \
 
 ---
 
+
+## 13b. ⚠️ 两条训练入口，用的是不同的 learner（2026-09-01 发现）
+
+| 入口 | learner 包 | actor 架构 |
+| --- | --- | --- |
+| **`scripts/auto_train.py`** | `go1_gym_learn/ppo_cse_automatic` | dog / arm **分离**，`DogActorCritic`，actor 吃 `obs_history`（非对称 actor-critic） |
+| `scripts/unified_train.py` | `go1_gym_learn/ppo_cse_unified` | **统一双头** `Unified2AC`，actor 吃 `(privileged_estimate, obs)`，历史只喂 adaptation module 与 critic |
+
+**`tmp/run_cluster.sh` 跑的是 `auto_train.py`**，因此
+R7 的观测/编码器改动落在 `ppo_cse_automatic` 是正确的。
+
+⚠️ 但我在第 1–7 步的冒烟训练全部用的是 `unified_train.py`——
+**env 侧改动两条路都会经过（奖励、指标、命令、分组都在 env 里），
+但 R7.3 的 `TemporalEncoder` 与 R7.4 的 checkpoint 检查只在 `auto_train.py` 路径上**。
+第 8 步起冒烟测试改用 `auto_train.py`。
+
+> 教训：`--train_stage stage1` 这个参数两个脚本都接受，跑起来都不报错、
+> 曲线也都正常，**没有任何症状提示你选错了 learner**。
+
 ## 14. 与 R1–R9 相关的其它既有资产
 
 | 资产 | 位置 | 对哪条需求有用 |

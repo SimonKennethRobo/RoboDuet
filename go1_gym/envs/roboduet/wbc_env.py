@@ -8,7 +8,15 @@ import numpy as np
 import pytorch3d.transforms as pt3d
 import torch
 from isaacgym import gymapi, gymtorch, gymutil
-from isaacgym.torch_utils import quat_apply, quat_from_euler_xyz, quat_mul, quat_rotate, to_torch, torch_rand_float
+from isaacgym.torch_utils import (
+    quat_apply,
+    quat_from_euler_xyz,
+    quat_mul,
+    quat_rotate,
+    quat_rotate_inverse,
+    to_torch,
+    torch_rand_float,
+)
 
 from go1_gym.envs.config import ARM_ACTION_MODES, ConfigNode
 from go1_gym.utils.global_switch import global_switch
@@ -2657,7 +2665,55 @@ class WBCEnv(LeggedRobot):
 
         layout.append(("arm_dof_pos", self.num_actions_arm, ns.dof_pos * level * s.dof_pos, True))
         layout.append(("arm_dof_vel", self.num_actions_arm, ns.dof_vel * level * s.dof_vel, True))
+
+        # R7.1.  Appended last, matching core.dog_obs_dim_parts.
+        #
+        # droppable=False for everything except the end-effector position: the
+        # reference state and its rate are integrated from the COMMAND and never
+        # touch a sensor -- there is nothing to drop and nothing to be noisy --
+        # and (g, l) are slow statistics computed from quantities that were
+        # already noised upstream.  Noising them again here would double-count.
+        # ee_pos_in_base does come from the arm encoders, through forward
+        # kinematics, so it drops and is noised like the encoders it derives
+        # from.
+        channels = len(self.cfg.response.channel_order)
+        layout.append(("reference_state", channels, 0.0, False))
+        layout.append(("reference_rate", channels, 0.0, False))
+        layout.append(("reference_minus_cmd", channels, 0.0, False))
+        layout.append(("ee_pos_in_base", 3, ns.dof_pos * level * s.dof_pos, True))
+        layout.append(
+            ("response_deviation", 2 * len(self.cfg.response.deviation.channels), 0.0, False)
+        )
         return layout
+
+    def _response_observation(self):
+        """R7.1's five new segments, in layout order.
+
+        Scaling: xi and (xi - u) share the command's units, so they reuse the
+        command scales rather than inventing new ones -- if the two disagreed,
+        the policy would see the reference and the command it is converging to
+        in different spaces.  xi_dot is normalised by the channel's own rate
+        limit instead, which maps the saturation boundary exactly to +-1.
+        """
+        reference = self.response_ref
+        commands = reference.gather_commands(self.commands_dog)
+        scale = self.response_obs_scale
+        # End-effector position in the base frame.  end_effector_state is
+        # refreshed unconditionally, ahead of the stage-2 switch, and already
+        # carries the grasp-point offset -- so this needs no extra FK.
+        ee_pos_in_base = quat_rotate_inverse(
+            self.base_quat, self.end_effector_state[:, :3] - self.base_pos
+        )
+        return torch.cat(
+            (
+                reference.xi * scale,
+                reference.normalized_rate(),
+                (reference.xi - commands) * scale,
+                ee_pos_in_base,
+                self.response_deviation.observation(),
+            ),
+            dim=-1,
+        )
 
     def get_dog_observations(self):
         """Computes observations"""
@@ -2806,6 +2862,8 @@ class WBCEnv(LeggedRobot):
         arm_pos = (self.dof_pos[:, arm_slice] - self.default_dof_pos[:, arm_slice]) * self.obs_scales.dof_pos
         arm_vel = self.dof_vel[:, arm_slice] * self.obs_scales.dof_vel
         obs_buf = torch.cat((obs_buf, arm_pos, arm_vel), dim=-1)
+
+        obs_buf = torch.cat((obs_buf, self._response_observation()), dim=-1)
 
         if dog_obs_noise_enabled:
             # Per-element zero-mean Gaussian sensor noise. The configured

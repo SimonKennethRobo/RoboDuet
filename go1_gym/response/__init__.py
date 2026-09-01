@@ -40,6 +40,7 @@ from .excitation import (
     SIGNAL_NAMES,
     ExcitationSampler,
 )
+from .deviation import ResponseDeviationEstimator
 from .grouping import EnvGrouping
 from .residual import PhaseResidualEstimator
 from .reference import (
@@ -68,6 +69,7 @@ __all__ = [
     "SIGNAL_NAMES",
     "ExcitationSampler",
     "EnvGrouping",
+    "ResponseDeviationEstimator",
     "DEFAULT_CHANNELS",
     "ChannelSpec",
     "PhaseResidualEstimator",
