@@ -68,6 +68,17 @@ def build_env(num_envs, sim_device, robot):
     cfg.env.record_video = False
     # Excitation would fight the step commands this script issues.
     cfg.response.excitation.enabled = False
+    # R8.2 measures over the FULL randomisation range and takes the 20th
+    # percentile across domains.  Without this the env would be built at
+    # iteration 0, i.e. at the stage-1 randomisation floor (0.30), and the
+    # percentile would be taken over an easy domain set -- yielding an omega_n
+    # that is unachievable in the domains the policy will actually be trained
+    # in, which is precisely the failure the percentile rule exists to prevent.
+    # Set before the env is constructed: friction, restitution and payload are
+    # sampled in _create_envs and never resampled here.  The disturbance
+    # schedule is left alone -- pushes during a step response would corrupt the
+    # measurement, and stage 1 is where it is off.
+    cfg.response.curriculum.randomization_floor = 1.0
     global_switch.pretrained_to_wbc_start = 10 ** 9
     global_switch.pretrained_to_wbc_end = 10 ** 9 + 1
     global_switch.init_sigmoid_lr()
