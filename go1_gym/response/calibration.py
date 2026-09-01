@@ -169,3 +169,117 @@ def calibrate_channels(
         )
         for c in channels
     }
+
+
+# ---------------------------------------------------------------------------
+# R8.2 -- recovering (omega_n, rate_limit) from a measured step response
+# ---------------------------------------------------------------------------
+
+
+def normalised_rise_time(fraction: float, tolerance: float = 1e-12) -> float:
+    """``omega_n * t`` at which a critically damped step reaches ``fraction``.
+
+    Solves ``1 - (1 + x) exp(-x) = fraction`` by bisection.  The response is
+    monotone in ``x``, so this is exact to tolerance.
+    """
+    if not 0.0 < fraction < 1.0:
+        raise ValueError(f"fraction must be in (0, 1), got {fraction}")
+    low, high = 0.0, 50.0
+    while high - low > tolerance:
+        mid = 0.5 * (low + high)
+        if 1.0 - (1.0 + mid) * math.exp(-mid) < fraction:
+            low = mid
+        else:
+            high = mid
+    return 0.5 * (low + high)
+
+
+def omega_from_rise_time(rise_time: float, fraction: float = 0.5) -> float:
+    """Identify ``omega_n`` from the time to reach a fraction of the step.
+
+    **Preferred over differentiating the response.**  A peak-acceleration
+    estimate has to differentiate a sampled signal, and on a real robot that
+    signal carries the gait ripple, contact transients and sensor noise -- all
+    of which differentiation amplifies.  A rise time integrates instead, and is
+    read off the quantity that was measured directly.
+
+    It also avoids a sampling bias that is easy to miss: a one-step finite
+    difference of a critically damped step measures ``A * omega_n^2 *
+    exp(-omega_n * dt)``, not ``A * omega_n^2``, so the recovered ``omega_n`` is
+    low by ``exp(-omega_n * dt / 2)`` -- a bias that depends on the very
+    quantity being estimated.  At omega_n = 4 and dt = 0.02 that is already
+    -3.9%, and it grows with bandwidth.
+    """
+    if rise_time <= 0.0:
+        raise ValueError(f"rise_time must be > 0, got {rise_time}")
+    return normalised_rise_time(fraction) / float(rise_time)
+
+
+def omega_from_peak_acceleration(peak_acceleration, amplitude, dt: float = 0.0):
+    """Invert ``ydd_max = A * omega_n^2`` for a critically damped step.
+
+    Peak acceleration occurs at ``t = 0``, so in principle it reads the plant's
+    authority before any rate limit can bite.  In practice it must be estimated
+    from samples, and a one-step difference underestimates it by
+    ``exp(-omega_n * dt)``; pass ``dt`` to correct for that.  Prefer
+    :func:`omega_from_rise_time` on measured data -- see its docstring.
+    """
+    if amplitude <= 0.0:
+        raise ValueError(f"amplitude must be > 0, got {amplitude}")
+    omega = math.sqrt(max(float(peak_acceleration), 0.0) / float(amplitude))
+    if dt > 0.0 and omega > 0.0:
+        # omega_measured = omega * exp(-omega * dt / 2); invert by fixed point,
+        # which converges in a handful of steps for omega * dt << 1.
+        for _ in range(20):
+            omega = math.sqrt(
+                max(float(peak_acceleration), 0.0)
+                / float(amplitude)
+                / math.exp(-omega * dt)
+            )
+    return omega
+
+
+def rate_limit_from_peak_rate(peak_rate):
+    """The rate limit is the achievable peak rate, read directly.
+
+    Deliberately a separate measurement from omega_n rather than the analytic
+    ``A * omega_n / e``.  If the plant is genuinely rate-limited those two
+    disagree, and the disagreement is the entire signal: it says the response is
+    slew-bound rather than bandwidth-bound, which is a different reference model
+    and a different thing for the MPC to plan against.
+    """
+    return max(float(peak_rate), 0.0)
+
+
+def saturation_ratio(peak_rate, omega_n, amplitude):
+    """Measured peak rate over the rate an unsaturated response would reach.
+
+    ``A * omega_n / e`` is the analytic peak of a critically damped step.  A
+    ratio near 1 means bandwidth-limited; well below 1 means the channel hit a
+    slew limit before it could express its bandwidth.
+    """
+    unsaturated = float(amplitude) * float(omega_n) / math.e
+    if unsaturated <= 0.0:
+        return float("nan")
+    return float(peak_rate) / unsaturated
+
+
+def percentile(values: Sequence[float], fraction: float) -> float:
+    """Lower-tail percentile, the R8.2 way.
+
+    R8.2 is explicit that this is a **20th percentile, not a mean and not a
+    maximum**, and the reason is worth restating: a reference model the hard
+    domains cannot realise leaves the policy choosing between failing to track
+    and destabilising itself to try.  A reference with margin keeps the
+    consistency reward reachable everywhere, so nothing has to be traded.
+    """
+    ordered = sorted(float(v) for v in values)
+    if not ordered:
+        raise ValueError("no samples to take a percentile of")
+    if not 0.0 <= fraction <= 1.0:
+        raise ValueError(f"fraction must be in [0, 1], got {fraction}")
+    position = fraction * (len(ordered) - 1)
+    low = int(math.floor(position))
+    high = min(low + 1, len(ordered) - 1)
+    weight = position - low
+    return ordered[low] * (1.0 - weight) + ordered[high] * weight

@@ -231,8 +231,13 @@ COMMON_OVERRIDES = {
     # ref_tracking is the task term (positive -> multiplies); the other two are
     # aux factors (negative -> attenuate). Weights are set from measured term
     # magnitudes; see docs/rlmpc-v3-r0-plan.md.
+    # These four are END-OF-RAMP TARGETS, not starting weights.  R8's curriculum
+    # multiplies each by a factor that starts at 0, so the term is registered
+    # from the beginning (LeggedRobot._prepare_reward_function drops zero-scale
+    # terms outright, which would make a later ramp impossible) but contributes
+    # nothing until its stage begins.
     "reward_scales.ref_tracking": 2.0,
-    # OFF until R8's stage-3 ramp exists. This is not caution, it is measured:
+    # Gated to stage 3 by the curriculum. This is not caution, it is measured:
     # enabling them at their end-of-ramp weight from iteration 0 destroys the
     # reward signal. Against a TRAINED policy the raw phase-variance term is
     # 0.0036; against a from-scratch policy it is 0.34 -- 95x larger -- and at
@@ -248,8 +253,8 @@ COMMON_OVERRIDES = {
     # End-of-ramp targets, from the measured magnitudes (weight =
     # -ln(attenuation) / mean_term_value, ~10% attenuation against a trained
     # policy): phase_variance -20.0, steady_gain -0.5.
-    "reward_scales.phase_variance": 0.0,
-    "reward_scales.steady_gain": 0.0,
+    "reward_scales.phase_variance": -20.0,
+    "reward_scales.steady_gain": -0.5,
     # ---- R5 ------------------------------------------------------------------
     # Same reasoning, same default. R5's term is structurally the same shape as
     # R4.2 -- a squared deviation entering the exponent -- and it is switched on
@@ -280,7 +285,7 @@ COMMON_OVERRIDES = {
     # and desynchronised groups are masked out -- measured, that is 31.5% of
     # samples even for a policy that walks -- and averaging over everything
     # would understate the term by about a third and bake that into the weight.
-    "reward_scales.domain_consistency": 0.0,
+    "reward_scales.domain_consistency": -3.0,
     "reward_scales.loco_energy": -0.00004,
     # domain randomization: base & mount
     "domain_rand.dog_obs_frame_drop_prob": 0.0,
@@ -835,6 +840,35 @@ RESPONSE_OBS_OVERRIDES = {
 }
 
 
+# ============================================================
+# R8.1 -- the four-stage curriculum.
+#
+# The reward scales above are end-of-ramp TARGETS; this schedule supplies the
+# multiplier that gets them there.  Expressing "off" as a multiplier rather than
+# as a zero scale is what makes the ramp possible at all: a zero-scale term is
+# never registered, so it could not be turned on later.
+#
+# R4.1 is gated to stage 2 even though it trains fine from iteration 0.  The
+# reason is circularity, not stability: R8.2 calibrates the reference model from
+# the stage-1 checkpoint, and a policy already pulled towards a reference model
+# is not a neutral measurement of what the hardware can do.
+# ============================================================
+RESPONSE_CURRICULUM_OVERRIDES = {
+    "response.curriculum.enabled": True,
+    # Stage 1 ends / 2 ends / 3 ends, in iterations.
+    "response.curriculum.stage_boundaries": [3000, 6000, 12000],
+    # R8: "stage 3 is the one most likely to collapse, the weights must rise
+    # slowly"; 1000 iterations is the figure it suggests.
+    "response.curriculum.ramp_iterations": 1000,
+    "response.curriculum.term_stage": {
+        "ref_tracking": 2,
+        "phase_variance": 3,
+        "steady_gain": 3,
+        "domain_consistency": 3,
+    },
+}
+
+
 ROBODUET_OVERRIDES = {
     **RESPONSE_MODEL_OVERRIDES,
     **RESPONSE_EXCITATION_OVERRIDES,
@@ -846,6 +880,7 @@ ROBODUET_OVERRIDES = {
     **GOAL_REACHING_OVERRIDES,
     # Last, so it wins over the stage-1 table's history length of 30.
     **RESPONSE_OBS_OVERRIDES,
+    **RESPONSE_CURRICULUM_OVERRIDES,
     **{
         f"wbc.reward_scales.{name}": 0.0
         for name in {*GOAL_REACHING_REWARD_SCALES, *TRAJ_TRACKING_REWARD_SCALES}

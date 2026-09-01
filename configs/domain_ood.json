@@ -1,0 +1,39 @@
+{
+  "tier": "ood",
+  "description": "Outside the training ranges, by 50% of the training half-width on each side. Consistency is EXPECTED to degrade here; what is being shown is that it degrades gracefully and that robustness takes priority, which is the claim R5 makes about consistency being a soft objective.",
+  "sampling": "uniform over the widened range",
+  "ranges": {
+    "friction": [
+      0.02,
+      4.45
+    ],
+    "restitution": [
+      0.0,
+      0.6
+    ],
+    "base_payload_kg": [
+      -4.0,
+      4.0
+    ],
+    "motor_strength": [
+      0.8,
+      1.2
+    ],
+    "Kp_factor": [
+      0.55,
+      1.55
+    ],
+    "Kd_factor": [
+      0.0,
+      2.0
+    ],
+    "arm_link_mass_scale": [
+      0.0,
+      2.95
+    ],
+    "ee_payload_kg": [
+      0.0,
+      2.25
+    ]
+  }
+}

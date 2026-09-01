@@ -30,6 +30,7 @@ from go1_gym.response import (
     GAIT_FREQUENCY,
     EnvGrouping,
     ExcitationSampler,
+    ResponseCurriculum,
     ResponseDeviationEstimator,
     PhaseResidualEstimator,
     ReferenceModel,
@@ -997,6 +998,12 @@ class LeggedRobot(BaseTask):
         adds each terms to the episode sums and to the total reward
         """
         reward_scales = global_switch.get_reward_scales()
+        # R8.1.  Applied here rather than folded into the config so the target
+        # weight stays written down exactly once, and so the schedule is visible
+        # at the point the weights are used.
+        reward_scales = self.response_curriculum.apply(
+            reward_scales, int(getattr(global_switch, "count", 0))
+        )
 
         disable_dog_rewards = bool(getattr(self, "disable_dog_policy_rewards", False))
 
@@ -1537,6 +1544,10 @@ class LeggedRobot(BaseTask):
         extras["perf_phase_variance_raw"] = mean_valid(episode_mean("phase_variance_raw"))
         extras["perf_steady_gain_raw"] = mean_valid(episode_mean("steady_gain_raw"))
         active_steps = sums["domain_consistency_active"][train_env_ids]
+        for name, value in self.response_curriculum.report(
+            int(getattr(global_switch, "count", 0))
+        ).items():
+            extras[name] = torch.tensor(value, device=self.device)
         extras["perf_domain_consistency_raw"] = self._mean_valid_metric(
             sums["domain_consistency_raw"][train_env_ids] / torch.clamp(active_steps, min=1.0),
             valid & (active_steps > 0),
@@ -2428,6 +2439,17 @@ class LeggedRobot(BaseTask):
                 [c.cmd_index for c in self.response_ref.channels], device=self.device
             )
         ].unsqueeze(0)
+
+        # R8.1: the stage schedule that gates every consistency term.  The
+        # configured reward scales are end-of-ramp targets; this supplies the
+        # multiplier.
+        curriculum_cfg = self.cfg.response.curriculum
+        self.response_curriculum = ResponseCurriculum(
+            stage_boundaries=list(curriculum_cfg.stage_boundaries),
+            ramp_iterations=int(curriculum_cfg.ramp_iterations),
+            term_stage=dict(curriculum_cfg.term_stage),
+            enabled=bool(curriculum_cfg.enabled),
+        )
 
         residual_cfg = self.cfg.response.residual
         self.response_residual = PhaseResidualEstimator(

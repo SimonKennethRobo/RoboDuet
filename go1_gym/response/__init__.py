@@ -40,6 +40,7 @@ from .excitation import (
     SIGNAL_NAMES,
     ExcitationSampler,
 )
+from .curriculum import ResponseCurriculum, gait_frequency_ripple
 from .deviation import ResponseDeviationEstimator
 from .grouping import EnvGrouping
 from .residual import PhaseResidualEstimator
@@ -70,6 +71,8 @@ __all__ = [
     "ExcitationSampler",
     "EnvGrouping",
     "ResponseDeviationEstimator",
+    "ResponseCurriculum",
+    "gait_frequency_ripple",
     "DEFAULT_CHANNELS",
     "ChannelSpec",
     "PhaseResidualEstimator",

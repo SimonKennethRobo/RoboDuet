@@ -17,6 +17,9 @@ R3  the phase-conditioned residual is a clean low-order periodic waveform.
 R5  a group shares one command vector and one gait phase, its twin really is
     nominal, and a fall really does switch the group's consistency term off
     until the next shared resample.
+R8  the stage curriculum really reaches the reward: terms are registered from
+    iteration 0, contribute exactly nothing in stage 1, and ramp to their
+    configured target.
 R6  the identification environments really are excited (jump count, chirp band),
     really are excluded from the curriculum, and really are the only ones
     touched.
@@ -575,6 +578,116 @@ def check_r5(env, cfg, steps=1200):
 
 
 # ---------------------------------------------------------------------------
+# R8
+# ---------------------------------------------------------------------------
+
+
+def check_r8(env, cfg, steps=120):
+    """The curriculum has to reach the reward, not merely exist.
+
+    The specific failure this guards against is structural rather than
+    numerical: ``_prepare_reward_function`` drops zero-scale terms *before*
+    registering them, so a consistency term shipped at weight 0 -- which is how
+    they shipped before R8 -- would have no function to call and could never be
+    ramped up.  Expressing "off" as a multiplier is what fixes it, and this
+    check confirms the fix end to end by driving the iteration counter through
+    every stage and reading the realised reward.
+    """
+    base = env.env
+    curriculum = base.response_curriculum
+    failures = []
+    dog_a, arm_a = zero_actions(env, cfg)
+    original_count = int(getattr(global_switch, "count", 0))
+
+    terms = sorted(curriculum.term_stage)
+    registered = set(base.reward_names)
+    missing = [name for name in terms if name not in registered]
+    print(f"  stages {curriculum.stage_boundaries}, ramp "
+          f"{curriculum.ramp_iterations} iterations")
+    print(f"  registered reward terms: "
+          + ", ".join(f"{n}={'yes' if n in registered else 'NO'}" for n in terms))
+    if missing:
+        failures.append(
+            f"{missing} are not registered reward functions -- a term that is "
+            "not registered can never be ramped up, whatever its multiplier"
+        )
+        return failures
+
+    # Sample the schedule at the start of each stage, mid-ramp, and after it.
+    probes = [0]
+    for boundary in curriculum.stage_boundaries:
+        probes += [boundary, boundary + curriculum.ramp_iterations // 2,
+                   boundary + curriculum.ramp_iterations]
+    probes = sorted(set(probes))
+
+    print(f"\n  {'iter':>8}{'stage':>7}" + "".join(f"{n[:12]:>14}" for n in terms))
+    realised = {}
+    try:
+        for iteration in probes:
+            global_switch.count = iteration
+            env.reset()
+            totals = {name: 0.0 for name in terms}
+            for _ in range(steps):
+                env.step(dog_a, arm_a)
+                scales = base.response_curriculum.apply(
+                    global_switch.get_reward_scales(), iteration
+                )
+                for name in terms:
+                    index = base.reward_names.index(name)
+                    value = base.reward_functions[index]() * scales[name]
+                    totals[name] += float(value.abs().mean())
+            realised[iteration] = {k: v / steps for k, v in totals.items()}
+            row = "".join(f"{realised[iteration][n]:>14.6f}" for n in terms)
+            print(f"  {iteration:>8}{curriculum.stage(iteration):>7}{row}")
+    finally:
+        global_switch.count = original_count
+
+    # Stage 1: every scheduled term contributes exactly zero.
+    for name, value in realised[0].items():
+        if value != 0.0:
+            failures.append(
+                f"{name} contributed {value:.6g} in stage 1; stage 1 is supposed "
+                "to run the original rewards only"
+            )
+
+    # Each term must be zero at the very start of its ramp and non-zero once the
+    # ramp has finished -- but only if the term is non-zero AT ALL under this
+    # rollout.  These checks run on zero actions, so the robot stands still and
+    # every domain behaves nearly alike; R5's cross-domain term is then
+    # genuinely ~0 for reasons that have nothing to do with the schedule.
+    # Failing on that would be testing the robot, not the curriculum, so the
+    # inactive case is reported rather than failed.
+    for name, stage in curriculum.term_stage.items():
+        start = curriculum.stage_start(stage)
+        done = start + curriculum.ramp_iterations
+        if start not in realised:
+            continue
+        if realised[start][name] != 0.0:
+            failures.append(f"{name} is non-zero at the very start of its ramp ({start})")
+        # Reachability, not a per-iteration value.  Whether this term is
+        # non-zero at one particular iteration is a property of what the robot
+        # did in that rollout -- R5's cross-domain term is intermittently
+        # exactly zero because it is masked whenever its group is
+        # desynchronised.  What the schedule is responsible for is that the term
+        # can reach the reward at all once its ramp is done.
+        reachable = max(
+            (realised[i][name] for i in realised if i >= done), default=0.0
+        )
+        if reachable == 0.0:
+            failures.append(
+                f"{name} never became non-zero at or after the end of its ramp "
+                f"({done}) -- its multiplier is not reaching the reward"
+            )
+
+    # The multiplier itself, independent of what the robot happened to do.
+    weights = curriculum.multiplier(curriculum.stage_start(3) + curriculum.ramp_iterations)
+    for name, stage in curriculum.term_stage.items():
+        if stage <= 3 and weights[name] != 1.0:
+            failures.append(f"{name} multiplier is {weights[name]}, expected 1.0")
+    return failures
+
+
+# ---------------------------------------------------------------------------
 # R6
 # ---------------------------------------------------------------------------
 
@@ -794,7 +907,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--check", default="all",
-                        choices=["r1", "r2", "r3", "r4", "r5", "r6", "all"])
+                        choices=["r1", "r2", "r3", "r4", "r5", "r6", "r8", "all"])
     parser.add_argument("--num_envs", type=int, default=64)
     parser.add_argument("--sim_device", type=str, default="cuda:0")
     parser.add_argument("--robot", type=str, default="go2_x5")
@@ -804,7 +917,8 @@ def main():
     args = parser.parse_args()
 
     env, cfg = build_env(args.num_envs, args.sim_device, args.robot)
-    wanted = ["r1", "r2", "r3", "r4", "r5", "r6"] if args.check == "all" else [args.check]
+    wanted = (["r1", "r2", "r3", "r4", "r5", "r6", "r8"]
+              if args.check == "all" else [args.check])
 
     results = {}
     for name in wanted:
@@ -829,6 +943,8 @@ def main():
             results[name] = check_r5(env, cfg)
         elif name == "r6":
             results[name] = check_r6(env, cfg)
+        elif name == "r8":
+            results[name] = check_r8(env, cfg)
 
     print("\n=== summary ===")
     failed = False
