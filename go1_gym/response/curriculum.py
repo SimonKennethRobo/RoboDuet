@@ -55,6 +55,8 @@ class ResponseCurriculum:
         stage_boundaries: Sequence[int],
         ramp_iterations: int,
         term_stage: Mapping[str, int],
+        term_handover: Optional[Mapping[str, int]] = None,
+        handover_floor: float = 0.15,
         enabled: bool = True,
         randomization_stage: int = 3,
         randomization_floor: float = 0.3,
@@ -77,6 +79,20 @@ class ResponseCurriculum:
                 f"term_stage entries outside 1..{self.num_stages}: {bad}"
             )
         self.term_stage = {name: int(stage) for name, stage in term_stage.items()}
+        handover = dict(term_handover or {})
+        bad = {name: stage for name, stage in handover.items()
+               if not 1 <= int(stage) <= self.num_stages}
+        if bad:
+            raise ValueError(f"term_handover entries outside 1..{self.num_stages}: {bad}")
+        overlap = set(handover) & set(self.term_stage)
+        if overlap:
+            raise ValueError(
+                f"a term cannot both ramp up and hand over: {sorted(overlap)}"
+            )
+        if not 0.0 <= handover_floor <= 1.0:
+            raise ValueError(f"handover_floor must be in [0, 1], got {handover_floor}")
+        self.term_handover = {name: int(stage) for name, stage in handover.items()}
+        self.handover_floor = float(handover_floor)
         self.enabled = bool(enabled)
         for label, stage in (("randomization_stage", randomization_stage),
                              ("disturbance_stage", disturbance_stage)):
@@ -117,16 +133,21 @@ class ResponseCurriculum:
         return self.stage_boundaries[stage - 2]
 
     def multiplier(self, iteration: int) -> Dict[str, float]:
-        """Per-term multiplier in ``[0, 1]``, linear over the ramp."""
+        """Per-term multiplier in ``[0, 1]``, linear over the ramp.
+
+        Two kinds of term.  ``term_stage`` entries ramp UP from 0 as their stage
+        begins.  ``term_handover`` entries ramp DOWN from 1 to
+        ``handover_floor`` over the same window: they are the instantaneous
+        posture penalties R4.1 replaces, and the handover has to be a crossfade
+        rather than a step, or there is an interval -- the whole of stage 1, as
+        it turned out -- with neither at full strength and nothing holding the
+        body's posture.
+        """
         result = {}
         for name, stage in self.term_stage.items():
-            start = self.stage_start(stage)
-            if not self.enabled or iteration < start:
-                result[name] = 0.0
-            elif self.ramp_iterations == 0:
-                result[name] = 1.0
-            else:
-                result[name] = min(1.0, (iteration - start) / self.ramp_iterations)
+            result[name] = self._ramp(iteration, stage)
+        for name, stage in self.term_handover.items():
+            result[name] = 1.0 - (1.0 - self.handover_floor) * self._ramp(iteration, stage)
         return result
 
     def _ramp(self, iteration: int, stage: int) -> float:

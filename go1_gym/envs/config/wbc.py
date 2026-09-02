@@ -219,14 +219,23 @@ COMMON_OVERRIDES = {
     # namespace shared by pretrained-dog and WBC reward tables alike (see
     # LeggedRobot._prepare_reward_function's pretrained -> wbc fallback merge)
     "rewards.terminal_body_height": 0.17,
-    # ---- R4.4: keep the instantaneous posture terms, down-weighted to 15% ----
-    # NOT deleted. They guard a real failure mode: a policy can swing the body
-    # violently inside a gait cycle and still look correct to R4.1, which sees
-    # only the detrended (oscillation-removed) signal.
-    #   orientation_control  -5.0 -> -0.75   (pitch/roll attitude)
-    #   jump                 10.0 ->  1.5    (body height, despite the name)
-    "reward_scales.orientation_control": -0.75,
-    "reward_scales.jump": 1.5,
+    # ---- R4.4: hand the instantaneous posture terms over to R4.1 -------------
+    # They guard a real failure mode: a policy can swing the body violently
+    # inside a gait cycle and still look correct to R4.1, which sees only the
+    # detrended (oscillation-removed) signal.  So they are kept and the
+    # curriculum fades them as R4.1 ramps in, rather than being cut outright.
+    #
+    # The first version set 15% here, which was wrong twice.  It assumed R4.1
+    # was always on -- R8 then gated R4.1 to stage 2, leaving all of stage 1
+    # with posture at 15% and nothing replacing it.  And it applied to ROLL,
+    # which R4.1 never covers: the decision channels are vx/vy/wyaw/height/pitch
+    # and R1 freezes roll out of the command space entirely.
+    #
+    # orientation_control is now roll only and is NEVER faded.  pitch_control
+    # and jump (body height, despite the name) fade, because R4.1 covers those.
+    "reward_scales.orientation_control": -5.0,
+    "reward_scales.pitch_control": -5.0,
+    "reward_scales.jump": 10.0,
     # ---- R4.1/4.2/4.3 -------------------------------------------------------
     # ref_tracking is the task term (positive -> multiplies); the other two are
     # aux factors (negative -> attenuate). Weights are set from measured term
@@ -888,6 +897,13 @@ RESPONSE_CURRICULUM_OVERRIDES = {
         "steady_gain": 3,
         "domain_consistency": 3,
     },
+    # Faded DOWN over the same window R4.1 ramps up, so posture is never
+    # unguarded.  Roll is deliberately absent: R4.1 has no roll channel.
+    "response.curriculum.term_handover": {
+        "pitch_control": 2,
+        "jump": 2,
+    },
+    "response.curriculum.handover_floor": 0.15,
     # ---- R8.1's other two columns: randomisation and disturbance ------------
     # Stage 3 is where cross-domain consistency is first asked for, so it is
     # also where the domain ranges open fully.  The order is the point: a policy

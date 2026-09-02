@@ -366,20 +366,52 @@ class Rewards:
 
         return torch.sum(rew_foot_impact_vel, dim=1)
 
-    def _reward_orientation_control(self):
-        # Penalize non flat base orientation
-        # import ipdb; ipdb.set_trace()
-        roll_pitch_commands = self.env.commands_dog[:, 3:5]
-        # print(roll_pitch_commands)
-        quat_roll = quat_from_angle_axis(-roll_pitch_commands[:, 1],
+    def _orientation_error(self):
+        """Squared projected-gravity error against the commanded attitude.
+
+        **Sign convention (decided 2026-09-02): a command of +0.3 means the body
+        pitches to +0.3 rad in the standard rpy sense.**  This used to negate the
+        commands, which put it in direct conflict with the rest of the codebase:
+        the observation hands the policy ``pose_target - pose_measured`` with
+        ``pose_target = +command`` and ``pose_measured = +self.pitch``, and R2's
+        reference model and R4.1/R4.3 all read ``+command`` too.  Only this term
+        disagreed, and it won while it was the only pitch term -- a trained
+        stage-1 policy measured a DC gain of **-0.28**: inverted, and weak.
+
+        Left unfixed it would have got worse rather than better: once R4.1 ramps
+        in at stage 2 it drives pitch to +command at weight 2.0 while this term
+        drove it to -command, so the two would have fought.
+
+        Returns the two axes separately.  ``projected_gravity[:, 0]`` tracks
+        pitch and ``[:, 1]`` tracks roll, and they need different weights: R4.1
+        tracks a reference for **pitch** (one of the five decision channels) but
+        there is no decision channel for **roll** -- R1 freezes roll to zero and
+        excludes it from the command space.  So the roll half is the only thing
+        keeping the body level and must never be weakened on the assumption that
+        R4.1 takes over, because for roll it never does.
+        """
+        pitch_command = self.env.commands_dog[:, 3]
+        roll_command = self.env.commands_dog[:, 4]
+        quat_roll = quat_from_angle_axis(roll_command,
                                          torch.tensor([1, 0, 0], device=self.env.device, dtype=torch.float))
-        quat_pitch = quat_from_angle_axis(-roll_pitch_commands[:, 0],
+        quat_pitch = quat_from_angle_axis(pitch_command,
                                           torch.tensor([0, 1, 0], device=self.env.device, dtype=torch.float))
 
         desired_base_quat = quat_mul(quat_roll, quat_pitch)
         desired_projected_gravity = quat_rotate_inverse(desired_base_quat, self.env.gravity_vec)
+        error = torch.square(
+            self.env.projected_gravity[:, :2] - desired_projected_gravity[:, :2]
+        )
+        return error[:, 0], error[:, 1]      # pitch, roll
 
-        return torch.sum(torch.square(self.env.projected_gravity[:, :2] - desired_projected_gravity[:, :2]), dim=1)
+    def _reward_orientation_control(self):
+        # Roll only. Nothing else in the reward set controls roll.
+        return self._orientation_error()[1]
+
+    def _reward_pitch_control(self):
+        # Pitch only, so the curriculum can hand this channel over to R4.1 as
+        # R4.1 ramps in without also releasing roll.
+        return self._orientation_error()[0]
 
     def _reward_raibert_heuristic(self):
         cur_footsteps_translated = self.env.foot_positions - self.env.base_pos.unsqueeze(1)

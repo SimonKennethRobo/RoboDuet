@@ -17,6 +17,8 @@ R3  the phase-conditioned residual is a clean low-order periodic waveform.
 R5  a group shares one command vector and one gait phase, its twin really is
     nominal, and a fall really does switch the group's consistency term off
     until the next shared resample.
+CONV the pitch/roll sign convention agrees across the observation, the
+    reference model and the attitude reward.
 R8  the stage curriculum really reaches the reward: terms are registered from
     iteration 0, contribute exactly nothing in stage 1, and ramp to their
     configured target; the randomisation and disturbance intensities reach the
@@ -33,6 +35,7 @@ import sys
 
 import isaacgym  # noqa: F401  must precede torch
 from isaacgym import gymtorch
+from isaacgym.torch_utils import quat_from_angle_axis, quat_mul, quat_rotate_inverse
 import torch
 
 from go1_gym.envs.config import build_roboduet_config
@@ -632,6 +635,99 @@ def _check_twin_arm_is_held_still(env, cfg):
 
 
 # ---------------------------------------------------------------------------
+# Sign conventions
+# ---------------------------------------------------------------------------
+
+
+def check_conv(env, cfg, amplitude=0.3):
+    """One sign convention for body attitude, checked in all three places.
+
+    This exists because they silently disagreed.  ``_reward_orientation_control``
+    negated the command, so it drove pitch to **-command**, while the
+    observation handed the policy ``pose_target - pose_measured`` with
+    ``pose_target = +command`` and R2's reference model read ``+command`` too.
+    A trained stage-1 policy measured a DC gain of -0.28: inverted and weak.
+
+    It would have got worse rather than better -- once R4.1 ramps in at stage 2
+    it drives pitch to +command at weight 2.0 against this term's -command, so
+    the two would have fought each other with the policy in between.
+
+    The convention, decided 2026-09-02: **a command of +x means the body reaches
+    +x radians in the standard rpy sense**, everywhere.
+    """
+    base = env.env
+    failures = []
+    env.reset()
+    dog_a, arm_a = zero_actions(env, cfg)
+    env.step(dog_a, arm_a)
+
+    print("  convention: a command of +x means the body reaches +x rad\n")
+    print(f"  {'channel':<8}{'command':>9}{'reward wants':>14}{'reference xi':>14}"
+          f"{'observed target':>17}")
+    # projected_gravity[0] = +sin(pitch); projected_gravity[1] = -sin(roll)
+    for name, column, axis in (("pitch", 3, 0), ("roll", 4, 1)):
+        for sign in (-1.0, 1.0):
+            command = sign * amplitude
+            base.commands_dog[:, 3] = 0.0
+            base.commands_dog[:, 4] = 0.0
+            base.commands_dog[:, column] = command
+
+            # 1. what the attitude reward is minimised at
+            pitch_command = base.commands_dog[:, 3]
+            roll_command = base.commands_dog[:, 4]
+            quat_roll = quat_from_angle_axis(
+                roll_command, torch.tensor([1.0, 0.0, 0.0], device=base.device))
+            quat_pitch = quat_from_angle_axis(
+                pitch_command, torch.tensor([0.0, 1.0, 0.0], device=base.device))
+            desired = quat_rotate_inverse(
+                quat_mul(quat_roll, quat_pitch), base.gravity_vec)
+            wanted = float(torch.asin(desired[:, axis].clamp(-1, 1).mean()))
+            if name == "roll":
+                wanted = -wanted     # projected_gravity[1] = -sin(roll)
+
+            # 2. what the reference model integrates towards (pitch only)
+            xi_target = (float(base.response_ref.gather_commands(base.commands_dog)[:, 4].mean())
+                         if name == "pitch" else float("nan"))
+
+            # 3. what the observation presents as the target
+            observed = float(
+                base.commands_dog[:, column].mean() * (
+                    base.obs_scales.body_pitch_cmd if name == "pitch"
+                    else base.obs_scales.body_roll_cmd
+                )
+            )
+            print(f"  {name:<8}{command:>9.3f}{wanted:>14.4f}{xi_target:>14.4f}"
+                  f"{observed:>17.4f}")
+
+            if abs(wanted - command) > 0.02:
+                failures.append(
+                    f"the attitude reward drives {name} to {wanted:+.3f} for a "
+                    f"command of {command:+.3f} -- signs disagree"
+                )
+            if name == "pitch" and abs(xi_target - command) > 1e-6:
+                failures.append(
+                    f"the reference model integrates pitch towards {xi_target:+.3f} "
+                    f"for a command of {command:+.3f}"
+                )
+            if observed * command < 0:
+                failures.append(
+                    f"the observation presents {name} target {observed:+.3f} for a "
+                    f"command of {command:+.3f} -- opposite sign"
+                )
+
+    registered = set(base.reward_names)
+    if "pitch_control" in registered and "orientation_control" in registered:
+        print("\n  attitude reward is split: orientation_control = roll, "
+              "pitch_control = pitch")
+    else:
+        failures.append(
+            "expected both orientation_control (roll) and pitch_control (pitch) "
+            f"to be registered, found {sorted(registered & {'orientation_control', 'pitch_control'})}"
+        )
+    return failures
+
+
+# ---------------------------------------------------------------------------
 # R8
 # ---------------------------------------------------------------------------
 
@@ -1043,12 +1139,20 @@ def check_r6(env, cfg, steps=1100):
         in_band = (freqs >= 0.1) & (freqs <= 2.0)
         share = float(spectrum[in_band].sum() / spectrum.sum())
         duration = (hi - lo) * base.dt
-        gaps = [
-            f"{lo_hz}-{2 * lo_hz}Hz"
-            for lo_hz in (0.1, 0.25, 0.5, 1.0)
-            if float(spectrum[(freqs >= lo_hz) & (freqs < 2 * lo_hz)].max())
-            <= 0.02 * float(spectrum.max())
-        ]
+        # An octave with no FFT bin at all is a resolution limit, not a gap in
+        # the sweep: a short segment gives coarse bins and the lowest octave can
+        # fall entirely between two of them.  Reporting that as a spectral gap
+        # would be blaming the signal for the measurement.
+        gaps, unresolved = [], []
+        for lo_hz in (0.1, 0.25, 0.5, 1.0):
+            octave = spectrum[(freqs >= lo_hz) & (freqs < 2 * lo_hz)]
+            if octave.numel() == 0:
+                unresolved.append(f"{lo_hz}-{2 * lo_hz}Hz")
+            elif float(octave.max()) <= 0.02 * float(spectrum.max()):
+                gaps.append(f"{lo_hz}-{2 * lo_hz}Hz")
+        if unresolved:
+            print(f"      note: {', '.join(unresolved)} has no FFT bin over a "
+                  f"{duration:.1f}s segment; not enough resolution to judge it")
         print(f"  chirp env {env_index} ({DOG_COMMAND_NAMES[column]}), "
               f"{duration:.1f}s uninterrupted: "
               f"{share:.1%} of spectral energy inside 0.1-2.0 Hz")
@@ -1110,7 +1214,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--check", default="all",
-                        choices=["r1", "r2", "r3", "r4", "r5", "r6", "r8", "all"])
+                        choices=["r1", "r2", "r3", "r4", "r5", "r6", "r8", "conv", "all"])
     parser.add_argument("--num_envs", type=int, default=64)
     parser.add_argument("--sim_device", type=str, default="cuda:0")
     parser.add_argument("--robot", type=str, default="go2_x5")
@@ -1120,7 +1224,7 @@ def main():
     args = parser.parse_args()
 
     env, cfg = build_env(args.num_envs, args.sim_device, args.robot)
-    wanted = (["r1", "r2", "r3", "r4", "r5", "r6", "r8"]
+    wanted = (["conv", "r1", "r2", "r3", "r4", "r5", "r6", "r8"]
               if args.check == "all" else [args.check])
 
     results = {}
@@ -1148,6 +1252,8 @@ def main():
             results[name] = check_r6(env, cfg)
         elif name == "r8":
             results[name] = check_r8(env, cfg)
+        elif name == "conv":
+            results[name] = check_conv(env, cfg)
 
     print("\n=== summary ===")
     failed = False

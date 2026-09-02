@@ -69,6 +69,7 @@ CONSISTENCY_REWARDS = (
     "phase_variance",
     "steady_gain",
     "domain_consistency",
+    "pitch_control",
 )
 
 
@@ -1146,6 +1147,8 @@ class LeggedRobot(BaseTask):
             stage_boundaries=list(cfg.stage_boundaries),
             ramp_iterations=int(cfg.ramp_iterations),
             term_stage=dict(cfg.term_stage),
+            term_handover=dict(cfg.term_handover),
+            handover_floor=float(cfg.handover_floor),
             enabled=bool(cfg.enabled),
             randomization_stage=int(cfg.randomization_stage),
             randomization_floor=float(cfg.randomization_floor),

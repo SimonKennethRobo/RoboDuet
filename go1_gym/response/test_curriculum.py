@@ -351,3 +351,58 @@ def test_a_dc_offset_does_not_hide_the_ripple():
 def test_the_series_must_be_time_by_env():
     with pytest.raises(ValueError, match=r"\(T, E\)"):
         gait_frequency_ripple_batch(torch.zeros(WINDOW), DT, torch.full((1,), 3.0))
+
+
+# --- the hand-over ramp -----------------------------------------------------
+
+
+def handover():
+    return make(term_handover={"pitch_control": 2, "jump": 2}, handover_floor=0.15)
+
+
+def test_posture_terms_are_at_full_weight_while_ref_tracking_is_off():
+    """The bug this exists for: R4.4 set these to 15% in the config assuming
+    R4.1 was always on, and R8 then gated R4.1 to stage 2 -- leaving all of
+    stage 1 with posture at 15% and nothing replacing it."""
+    weights = handover().multiplier(0)
+    assert weights["pitch_control"] == 1.0
+    assert weights["jump"] == 1.0
+    assert weights["ref_tracking"] == 0.0
+
+
+def test_the_hand_over_is_a_crossfade_not_a_step():
+    curriculum = handover()
+    for iteration in (3000, 3250, 3500, 3750, 4000):
+        weights = curriculum.multiplier(iteration)
+        rising, falling = weights["ref_tracking"], weights["pitch_control"]
+        assert falling == pytest.approx(1.0 - 0.85 * rising)
+        assert rising + falling > 0.99      # something always holds posture
+
+
+def test_the_hand_over_settles_at_the_floor():
+    weights = handover().multiplier(50000)
+    assert weights["pitch_control"] == pytest.approx(0.15)
+    assert weights["jump"] == pytest.approx(0.15)
+
+
+def test_roll_is_never_handed_over():
+    """R4.1's channels are vx/vy/wyaw/height/pitch -- there is no roll channel,
+    so orientation_control (roll only) must never be faded."""
+    assert "orientation_control" not in handover().term_handover
+
+
+def test_a_disabled_curriculum_keeps_posture_at_full_weight():
+    curriculum = make(term_handover={"pitch_control": 2}, enabled=False)
+    assert curriculum.multiplier(1_000_000)["pitch_control"] == 1.0
+
+
+def test_a_term_cannot_both_ramp_up_and_hand_over():
+    with pytest.raises(ValueError, match="both ramp up and hand over"):
+        make(term_handover={"ref_tracking": 2})
+
+
+def test_handover_configuration_is_validated():
+    with pytest.raises(ValueError, match="term_handover entries outside"):
+        make(term_handover={"jump": 9})
+    with pytest.raises(ValueError, match="handover_floor"):
+        make(term_handover={"jump": 2}, handover_floor=-0.1)
