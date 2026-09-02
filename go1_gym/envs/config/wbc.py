@@ -233,9 +233,20 @@ COMMON_OVERRIDES = {
     #
     # orientation_control is now roll only and is NEVER faded.  pitch_control
     # and jump (body height, despite the name) fade, because R4.1 covers those.
-    "reward_scales.orientation_control": -5.0,
-    "reward_scales.pitch_control": -5.0,
-    "reward_scales.jump": 10.0,
+    # Weights MEASURED, not restored from history.  Setting these back to the
+    # pre-R4.4 values (-5.0 / 10.0) because "that is what they used to be"
+    # collapsed a 1500-iteration run: rew_orientation_control reached -36, the
+    # total reward sat at 0.001-0.07, and roll RMS ran to 1.0-1.6 rad.  That is
+    # the same failure R4.2 was measured to have -- a negative weight sized for
+    # one context applied in another -- and the old value was measured against a
+    # reward set that had none of R1-R8 in it.
+    #
+    # -0.75 is the value the R5/R6 runs actually trained under, reaching roll
+    # RMS 0.124 by 40k iterations. Split across the two axes it keeps the same
+    # total attitude penalty as before this change.
+    "reward_scales.orientation_control": -0.75,
+    "reward_scales.pitch_control": -0.75,
+    "reward_scales.jump": 1.5,
     # ---- R4.1/4.2/4.3 -------------------------------------------------------
     # ref_tracking is the task term (positive -> multiplies); the other two are
     # aux factors (negative -> attenuate). Weights are set from measured term
