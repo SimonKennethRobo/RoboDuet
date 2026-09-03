@@ -89,12 +89,15 @@ conda run -n roboduet python -m benchmark.cli \
 
 统一入口 `benchmark.cli` 负责选择 benchmark 模式。当前 `--dog_only` 已实现，`--candidate_dir` 会递归扫描所有包含 `parameters.pkl` 的 run-like 目录，支持多级目录和本地目录 symlink，并只选择包含 `checkpoints_dog/` 的 candidate。
 
-未来模式：
+可用的 Stage-2 WBC 模式：
 
-- `--arm_only`: 只评估 arm policy，要求 candidate 有 `checkpoints_arm/`。
-- `--wbc`: 评估 dog + arm pair，要求 candidate 同时有 `checkpoints_dog/` 和 `checkpoints_arm/`。
+```bash
+conda run -n roboduet python -m benchmark.cli --wbc \
+  --logdirs runs/run_A runs/run_B --names A B --headless \
+  --num_envs_per_policy 16 --bank_seed 12345 --bank_per_cell 8
+```
 
-这两个模式的统一入口参数已预留，但当前尚未实现。
+WBC benchmark 会按完整 dog+arm/trajectory layout 自动拆组，使用确定的 held-out bank rows，按 wave 并行执行，并输出 `trajectory_suite.json`、cell/wave aggregate 与逐轨迹结果。`--suite_rows_per_cell 0` 表示评估 bank 中每个 cell 的所有轨迹。`--arm_only` 仍是预留模式。
 
 ## Compatibility
 

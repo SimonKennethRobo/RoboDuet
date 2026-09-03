@@ -19,11 +19,16 @@ SCENARIO_TITLES = {
     "arm_sweep": "Arm Disturbance Sweep",
     "body_pose": "Body Pose Tracking",
     "gait": "Gait Tracking",
+    "wbc_aggregate": "WBC Curriculum Aggregate",
+    "wbc_trajectories": "WBC Per-Trajectory Results",
 }
 
-SCENARIO_ORDER = ["vel_grid", "arm_sweep", "body_pose", "gait"]
+SCENARIO_ORDER = ["vel_grid", "arm_sweep", "body_pose", "gait", "wbc_aggregate", "wbc_trajectories"]
 
 PRIMARY_METRICS = [
+    ("ee_pos_rmse_m", "EE pos RMSE", "lower"),
+    ("ee_rot_rmse_rad", "EE rot RMSE", "lower"),
+    ("completion_rate", "completion rate", "higher"),
     ("lin_vel_xy_rmse", "xy RMSE", "lower"),
     ("lin_vel_x_rmse", "vx RMSE", "lower"),
     ("lin_vel_y_rmse", "vy RMSE", "lower"),
@@ -87,6 +92,28 @@ DETAIL_METRICS = {
         ("height fall", "fall_rate_height"),
         ("fall rate", "fall_rate"),
     ],
+    "wbc_aggregate": [
+        ("EE pos RMSE m", "ee_pos_rmse_m"),
+        ("EE rot RMSE rad", "ee_rot_rmse_rad"),
+        ("lateral error m", "d_lat_mean_m"),
+        ("timing error m", "timing_err_mean_m"),
+        ("progress", "progress_mean"),
+        ("completion", "completion_rate"),
+        ("fall rate", "fall_rate"),
+        ("motor power W", "motor_power_mean_w"),
+    ],
+    "wbc_trajectories": [
+        ("EE pos RMSE m", "ee_pos_rmse_m"),
+        ("EE rot RMSE rad", "ee_rot_rmse_rad"),
+        ("lateral error m", "d_lat_mean_m"),
+        ("timing error m", "timing_err_mean_m"),
+        ("progress", "progress_mean"),
+        ("motor power W", "motor_power_mean_w"),
+        ("span x m", "span_x_m"),
+        ("span y m", "span_y_m"),
+        ("span z m", "span_z_m"),
+        ("curvature p90 rad/m", "curvature_p90_rad_m"),
+    ],
 }
 
 NEUTRAL_HEATMAP_METRICS = {"base_height_mean"}
@@ -147,6 +174,12 @@ def _metric_average(rows: Iterable[dict], metric: str) -> Optional[float]:
     if not values:
         return None
     return mean(values)
+
+
+def _preferred_result_rows(scenarios):
+    if scenarios.get("wbc_trajectories"):
+        return scenarios["wbc_trajectories"]
+    return [row for scenario_rows in scenarios.values() for row in scenario_rows]
 
 
 def _table(headers: List[str], rows: List[List[Tuple[str, str]]], sortable: bool = True) -> str:
@@ -316,7 +349,7 @@ def _candidate_cards(results: Dict[str, Dict[str, List[dict]]]) -> str:
         points = sum(len(rows) for rows in scenarios.values())
         scenario_names = _scenario_names({run_name: scenarios})
         scenario_text = ", ".join(SCENARIO_TITLES.get(name, name) for name in scenario_names)
-        all_rows = [row for scenario_rows in scenarios.values() for row in scenario_rows]
+        all_rows = _preferred_result_rows(scenarios)
         cards.append(
             '<div class="card">'
             f"<h3>{escape(run_name)}</h3>"
