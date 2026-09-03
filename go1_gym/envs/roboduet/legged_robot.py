@@ -9,6 +9,7 @@ from isaacgym import gymapi, gymtorch, gymutil
 from isaacgym.torch_utils import (
     get_axis_params,
     quat_apply,
+    quat_conjugate,
     quat_from_angle_axis,
     quat_mul,
     quat_rotate_inverse,
@@ -125,9 +126,10 @@ class LeggedRobot(BaseTask):
     def render_gui(self, sync_frame_time=True):
         if self.viewer:
             if self.fixed_cam:  # fixed camera to tracking the robot
-                cam_target = gymapi.Vec3(self.root_states[0, 0], self.root_states[0, 1], self.root_states[0, 2])
+                e = self.render_env_index
+                cam_target = gymapi.Vec3(self.root_states[e, 0], self.root_states[e, 1], self.root_states[e, 2])
                 cam_pos = cam_target + gymapi.Vec3(1, 1, 1)
-                self.gym.viewer_camera_look_at(self.viewer, self.envs[0], cam_pos, cam_target)
+                self.gym.viewer_camera_look_at(self.viewer, self.envs[e], cam_pos, cam_target)
 
             # check for window closed
             if self.gym.query_viewer_has_closed(self.viewer):
@@ -1493,6 +1495,10 @@ class LeggedRobot(BaseTask):
             "domain_consistency_raw",
             "domain_consistency_active",
             "excitation_jumps",
+            "stance_width_m",
+            "stance_length_m",
+            "stance_width_abs_err",
+            "stance_length_abs_err",
         )
         self.performance_metric_sums = {
             name: torch.zeros(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
@@ -1505,6 +1511,16 @@ class LeggedRobot(BaseTask):
             requires_grad=False,
         )
         self._arm_init_performance_metrics_hook()
+
+    def _stance_geometry(self):
+        """Realised stance width and length, in metres, in the yaw-aligned body frame."""
+        translated = self.foot_positions - self.base_pos.unsqueeze(1)
+        feet = torch.zeros(self.num_envs, 4, 3, device=self.device)
+        for i in range(4):
+            feet[:, i, :] = quat_apply_yaw(quat_conjugate(self.base_quat), translated[:, i, :])
+        width = (feet[:, 0, 1] + feet[:, 2, 1]) / 2 - (feet[:, 1, 1] + feet[:, 3, 1]) / 2
+        length = (feet[:, 0, 0] + feet[:, 1, 0]) / 2 - (feet[:, 2, 0] + feet[:, 3, 0]) / 2
+        return width, length
 
     def _update_performance_metrics(self):
         """Accumulate one simulator-step sample in physical units, without reward functions or scales."""
@@ -1520,6 +1536,17 @@ class LeggedRobot(BaseTask):
         sums["pitch_sq"] += torch.square(self.pitch)
         sums["vertical_velocity_sq"] += torch.square(self.base_lin_vel[:, 2])
         sums["horizontal_angular_velocity_sq"] += torch.sum(torch.square(self.base_ang_vel[:, :2]), dim=-1)
+
+        # Realised stance geometry, in the same body frame and foot order
+        # _reward_raibert_heuristic uses (feet 0/2 left, 1/3 right; 0/1 front,
+        # 2/3 rear).  Reported because "the gait collapsed to a line" is
+        # otherwise invisible in the log -- every velocity- and posture-side
+        # metric can look healthy while the feet walk a tightrope.
+        width_m, length_m = self._stance_geometry()
+        sums["stance_width_m"] += width_m
+        sums["stance_length_m"] += length_m
+        sums["stance_width_abs_err"] += torch.abs(width_m - self.commands_dog[:, 8])
+        sums["stance_length_abs_err"] += torch.abs(length_m - self.commands_dog[:, 9])
 
         if isinstance(self.measured_heights, torch.Tensor):
             if self.measured_heights.ndim > 1:
@@ -1741,6 +1768,10 @@ class LeggedRobot(BaseTask):
             torch.sqrt(episode_mean("horizontal_angular_velocity_sq"))
         )
         extras["perf_base_height_rmse_m"] = mean_valid(torch.sqrt(episode_mean("base_height_sq_error")))
+        extras["perf_stance_width_m"] = mean_valid(episode_mean("stance_width_m"))
+        extras["perf_stance_length_m"] = mean_valid(episode_mean("stance_length_m"))
+        extras["perf_stance_width_mae_m"] = mean_valid(episode_mean("stance_width_abs_err"))
+        extras["perf_stance_length_mae_m"] = mean_valid(episode_mean("stance_length_abs_err"))
         contact_samples = sums["foot_contact_samples"][train_env_ids]
         contact_valid = valid & (contact_samples > 0)
         slip_speed = sums["foot_slip_speed_sum"][train_env_ids] / torch.clamp(contact_samples, min=1.0)
@@ -2858,10 +2889,16 @@ class LeggedRobot(BaseTask):
             if name not in self.wbc_reward_scales:
                 self.wbc_reward_scales[name] = scale
 
-        # remove WBC-side zero scales (dt-scaling above turns them into
-        # exactly 0 too, so this also catches those)
+        # Registration below walks this table, but compute_reward walks the
+        # resulting name list in *both* stages -- so a name dropped here is
+        # never computed in stage 1 either, however nonzero its stage-1 scale.
+        # That silently killed raibert_heuristic (the very example the comment
+        # above cites): stage 1 asked for -10.0 and got nothing, leaving no
+        # term with an opinion about where the feet go in x/y.  So drop a name
+        # only when *both* stages have it at zero; a per-stage zero stays in
+        # its own table, and compute_reward multiplies by it.
         for key in list(self.wbc_reward_scales.keys()):
-            if self.wbc_reward_scales[key] == 0:
+            if self.wbc_reward_scales[key] == 0 and key not in self.pretrained_reward_scales:
                 self.wbc_reward_scales.pop(key)
 
         # prepare list of functions
@@ -3297,9 +3334,21 @@ class LeggedRobot(BaseTask):
             self.camera_props = gymapi.CameraProperties()
             self.camera_props.width = int(self.cfg.env.recording_width_px)
             self.camera_props.height = int(self.cfg.env.recording_height_px)
-            self.rendering_camera = self.gym.create_camera_sensor(self.envs[0], self.camera_props)
+            # The camera sensor belongs to the env it is created in, and
+            # set_camera_location only accepts that same env -- so which robot
+            # the video follows has to be decided here, at creation, not at
+            # render time.  Grouping is already resolved by this point
+            # (_is_nominal_twin_env calls _ensure_grouping during env creation),
+            # so render_env_index is final.
+            self._render_camera_env = self.render_env_index
+            self.rendering_camera = self.gym.create_camera_sensor(
+                self.envs[self._render_camera_env], self.camera_props
+            )
             self.gym.set_camera_location(
-                self.rendering_camera, self.envs[0], gymapi.Vec3(1.5, 1, 3.0), gymapi.Vec3(0, 0, 0)
+                self.rendering_camera,
+                self.envs[self._render_camera_env],
+                gymapi.Vec3(1.5, 1, 3.0),
+                gymapi.Vec3(0, 0, 0),
             )
             if self.eval_cfg is not None:
                 self.rendering_camera_eval = self.gym.create_camera_sensor(
@@ -3329,16 +3378,56 @@ class LeggedRobot(BaseTask):
         w, h = img.shape
         return img.reshape([w, h // 4, 4])
 
+    @property
+    def render_env_index(self):
+        """Which env the viewer and the recorded video follow -- never a twin.
+
+        R5 holds the nominal twin at nominal friction, mass, payload and motor
+        strength *and* pins its arm at the default pose, because a moving arm is
+        a disturbance and the twin is the group's no-disturbance reference.  So
+        the twin is the one robot in the batch whose behaviour is deliberately
+        not representative of what is being trained.
+
+        Group g owns envs [4g, 4g+4) with 4g as the twin, so env 0 -- the
+        default camera target -- is *always* a twin.  Pointed there, the video
+        shows an arm that never moves however far the stage-1 arm curriculum has
+        ramped, which reads as "the arm disturbance curriculum is broken", and a
+        gait tuned for one un-randomised domain.
+        """
+        cached = getattr(self, "_render_env_index_cache", None)
+        if cached is not None:
+            return cached
+        twin = getattr(self, "is_nominal_twin", None)
+        if twin is None:
+            # Grouping is built lazily; stay on env 0 and re-check next frame
+            # rather than caching a choice made before the twins are known.
+            return 0
+        index = 0
+        if bool(twin[0]):
+            candidates = (~twin).nonzero()
+            if candidates.numel() > 0:
+                index = int(candidates[0])
+        self._render_env_index_cache = index
+        return index
+
     def _render_headless(self):
         capture_train = self._should_capture_recording_frame(eval_video=False)
         capture_eval = self._should_capture_recording_frame(eval_video=True) and self.eval_cfg is not None
         if not capture_train and not capture_eval:
             return
 
+        render_env = getattr(self, "_render_camera_env", 0)
         if capture_train:
-            bx, by, bz = self.root_states[0, 0], self.root_states[0, 1], self.root_states[0, 2]
+            bx, by, bz = (
+                self.root_states[render_env, 0],
+                self.root_states[render_env, 1],
+                self.root_states[render_env, 2],
+            )
             self.gym.set_camera_location(
-                self.rendering_camera, self.envs[0], gymapi.Vec3(bx, by - 1.0, bz + 1.0), gymapi.Vec3(bx, by, bz)
+                self.rendering_camera,
+                self.envs[render_env],
+                gymapi.Vec3(bx, by - 1.0, bz + 1.0),
+                gymapi.Vec3(bx, by, bz),
             )
 
         if capture_eval:
@@ -3359,10 +3448,12 @@ class LeggedRobot(BaseTask):
 
         if capture_train:
             self.video_frame = self.gym.get_camera_image(
-                self.sim, self.envs[0], self.rendering_camera, gymapi.IMAGE_COLOR
+                self.sim, self.envs[render_env], self.rendering_camera, gymapi.IMAGE_COLOR
             )
             self.video_frame = self.video_frame.reshape((self.camera_props.height, self.camera_props.width, 4))
-            self._arm_render_overlay_hook(self.video_frame, 0, self.envs[0], self.rendering_camera)
+            self._arm_render_overlay_hook(
+                self.video_frame, render_env, self.envs[render_env], self.rendering_camera
+            )
             self.video_frames.append(self.video_frame)
 
         if capture_eval:

@@ -195,10 +195,10 @@ class DogInitCmd:
     body_pitch: float = 0.0
     body_roll: float = 0.0
     body_height_delta: float = 0.0
-    gait_freq: float = 4.0
+    gait_freq: float = 3.0
     footswing_height: float = 0.06
     stance_width: float = 0.30
-    stance_length: float = 0.4
+    stance_length: float = 0.45
     gait_duration: float = 0.49
 
 

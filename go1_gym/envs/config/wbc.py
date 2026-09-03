@@ -244,9 +244,9 @@ COMMON_OVERRIDES = {
     # -0.75 is the value the R5/R6 runs actually trained under, reaching roll
     # RMS 0.124 by 40k iterations. Split across the two axes it keeps the same
     # total attitude penalty as before this change.
-    "reward_scales.orientation_control": -0.75,
-    "reward_scales.pitch_control": -0.75,
-    "reward_scales.jump": 1.5,
+    "reward_scales.orientation_control": -5.0,
+    "reward_scales.pitch_control": -5.0,
+    "reward_scales.jump": 10.0,
     # ---- R4.1/4.2/4.3 -------------------------------------------------------
     # ref_tracking is the task term (positive -> multiplies); the other two are
     # aux factors (negative -> attenuate). Weights are set from measured term
@@ -560,10 +560,10 @@ GOAL_REACHING_OVERRIDES = {
     # mode) so a saved trajectory-run config round-trips through load_env's
     # snapshot restore without the subtree being dropped. enable_traj_tracking
     # only flips target_mode to 'trajectory'.
-    "wbc.goal_reaching.trajectory.preview_horizon": 0.5,   # L_h (m)
-    "wbc.goal_reaching.trajectory.preview_points": 9,       # K
-    "wbc.goal_reaching.trajectory.update_s_window": 0.15,   # forward search window (m)
-    "wbc.goal_reaching.trajectory.timing_tau": 0.10,        # timing deadzone (m of arc length)
+    "wbc.goal_reaching.trajectory.preview_horizon": 0.5,  # L_h (m)
+    "wbc.goal_reaching.trajectory.preview_points": 9,  # K
+    "wbc.goal_reaching.trajectory.update_s_window": 0.15,  # forward search window (m)
+    "wbc.goal_reaching.trajectory.timing_tau": 0.10,  # timing deadzone (m of arc length)
     # body-frame point the origin-centered path is translated to at reset (a
     # comfortable reachable spot in front of the shoulder): rho_star*reach in
     # front, slightly up.
@@ -582,9 +582,9 @@ GOAL_REACHING_OVERRIDES = {
     "wbc.goal_reaching.trajectory.curriculum_fail_threshold": 0.30,
     # episode-success criteria (per design doc M10)
     "wbc.goal_reaching.trajectory.success_progress": 0.80,  # traversed fraction of L
-    "wbc.goal_reaching.trajectory.success_dlat": 0.08,      # mean lateral err (m)
-    "wbc.goal_reaching.trajectory.success_timing": 0.15,    # mean |timing_err| (m)
-    "wbc.goal_reaching.trajectory.ik_jump_threshold": 0.50, # max ||delta_q_ik|| (rad)
+    "wbc.goal_reaching.trajectory.success_dlat": 0.08,  # mean lateral err (m)
+    "wbc.goal_reaching.trajectory.success_timing": 0.15,  # mean |timing_err| (m)
+    "wbc.goal_reaching.trajectory.ik_jump_threshold": 0.50,  # max ||delta_q_ik|| (rad)
     # early-termination thresholds (design doc §8.4). Set an entry to 0 to
     # disable that one condition. These are NOT a performance bar -- they
     # declare an episode unrecoverable, so that samples whose s projection
@@ -602,7 +602,7 @@ GOAL_REACHING_OVERRIDES = {
     #
     # d_lat is absolute because it is a spatial error: 1.00 m ~ 1.67 *
     # reach_radius, which means the same thing in every curriculum cell.
-    "wbc.goal_reaching.trajectory.terminate_d_lat": 1.00,        # lateral err (m)
+    "wbc.goal_reaching.trajectory.terminate_d_lat": 1.00,  # lateral err (m)
     # timing is a FRACTION of the path length, not metres. |s - s_ref| is an
     # arc length bounded by L, and L spans 2.0 m (easiest cell) to 9.0 m
     # (hardest) -- a fixed metre threshold would mean 75% of the path on the
@@ -712,16 +712,28 @@ RESPONSE_MODEL_OVERRIDES = {
     # the reference by 45% of the largest achievable integrated-reward gap.
     # Re-run it whenever omega_n, rate_limit or the command ranges change.
     "response.reward.sigma": {
-        "vx": 0.1546, "vy": 0.0870, "wyaw": 0.2883, "height": 0.0921, "pitch": 0.1152,
+        "vx": 0.1546,
+        "vy": 0.0870,
+        "wyaw": 0.2883,
+        "height": 0.0921,
+        "pitch": 0.1152,
     },
     "response.reward.channel_weights": {
-        "vx": 1.0, "vy": 1.0, "wyaw": 1.0, "height": 1.0, "pitch": 1.0,
+        "vx": 1.0,
+        "vy": 1.0,
+        "wyaw": 1.0,
+        "height": 1.0,
+        "pitch": 1.0,
     },
     # Step size each channel is calibrated at: the half-width of its sampling
     # range. Kept in config so the calibration script and the training run
     # cannot disagree about what "a representative step" means.
     "response.reward.calibration_amplitudes": {
-        "vx": 0.5, "vy": 0.3, "wyaw": 1.0, "height": 0.25, "pitch": 0.4,
+        "vx": 0.5,
+        "vy": 0.3,
+        "wyaw": 1.0,
+        "height": 0.25,
+        "pitch": 0.4,
     },
     # R4.2 is not counted for 2/omega_n after a command step, R4.3 not for
     # 3/omega_n. Per channel, because omega_n differs -- pitch is deliberately
@@ -796,7 +808,11 @@ RESPONSE_EXCITATION_OVERRIDES = {
     # body height or pitch at all, so they are the channels whose reference
     # model is least supported by data.
     "response.excitation.channel_weights": {
-        "vx": 0.15, "vy": 0.15, "wyaw": 0.15, "height": 0.275, "pitch": 0.275,
+        "vx": 0.15,
+        "vy": 0.15,
+        "wyaw": 0.15,
+        "height": 0.275,
+        "pitch": 0.275,
     },
     # Straight from the requirements table.  Note the arithmetic: a hold drawn
     # from U(0.5, 3.0) s averages 1.75 s, so a 20 s episode gets ~11 PRBS
@@ -958,10 +974,7 @@ ROBODUET_OVERRIDES = {
     # Last, so it wins over the stage-1 table's history length of 30.
     **RESPONSE_OBS_OVERRIDES,
     **RESPONSE_CURRICULUM_OVERRIDES,
-    **{
-        f"wbc.reward_scales.{name}": 0.0
-        for name in {*GOAL_REACHING_REWARD_SCALES, *TRAJ_TRACKING_REWARD_SCALES}
-    },
+    **{f"wbc.reward_scales.{name}": 0.0 for name in {*GOAL_REACHING_REWARD_SCALES, *TRAJ_TRACKING_REWARD_SCALES}},
 }
 
 
@@ -1010,6 +1023,29 @@ RESPONSE_COMMAND_OVERRIDES = {
     # curriculum dimensions instead of the single all-covering bin they had.
     "commands.num_bins_body_pitch": 5,
     "commands.num_bins_body_height": 5,
+    # body height: narrowed to the band the robot can actually hold.
+    #
+    # The command is a delta on rewards.base_height_target (0.30), so wtw.py's
+    # [-0.2, 0.3] asks for body heights of [0.10, 0.60] m.  Measured against
+    # that: 36.7% of samples ask for more than 0.40 m, and nothing above ~0.32 m
+    # is reachable -- a trained policy saturates at 0.319 m however hard it is
+    # commanded.  At the other end 14.3% ask for less than terminal_body_height
+    # (0.17), so obeying them ends the episode; the policy correctly refuses and
+    # floors at ~0.226 m.  About 70% of the commanded range is therefore
+    # unusable, and the measured DC gain on this channel is 0.11-0.19.
+    #
+    # That is fatal specifically for R4.3, whose whole job is to pin the DC gain
+    # to 1, and for R4.1, which rewards tracking a reference model that faithfully
+    # follows a physically impossible command.  The band below is the one a
+    # trained policy demonstrably covers (0.226-0.319 m), with the low end lifted
+    # to keep 0.03 m of margin over the termination height.
+    #
+    # Overridden here rather than in wtw.py so stage 2 keeps the wider range.
+    # Widen again once a policy actually tracks this channel -- the ceiling is a
+    # property of the learned gait, not a measured kinematic limit (a fixed-PD
+    # sweep does not settle well enough to give one).
+    "commands.body_height_cmd": [-0.10, 0.03],
+    "commands.limit_body_height": [-0.10, 0.03],
 }
 
 # Only meaningful with --dyna_gait (dog_num_commands == 11); without it these
