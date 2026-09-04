@@ -1,10 +1,10 @@
 """How often is R5's consistency term actually available?
 
-R5's penalty is masked off for any group whose phase and command timing have
-drifted apart, which happens as soon as one member falls and resets.  With a
-group of four that is a much stronger condition than it looks: if each
-environment has probability ``p`` of resetting somewhere inside the group's
-shared resample window, the group is usable only ``(1 - p)^4`` of the time.
+R5's penalty is masked off for any group inside the settling window that any
+member's reset starts.  With a group of four that is a stronger condition than
+it looks: if each environment has probability ``p`` of resetting somewhere
+inside a window of ``settle_steps``, the group is usable only ``(1 - p)^4`` of
+the time.
 
 This script measures that directly by *forcing* falls at a chosen rate, rather
 than waiting for a policy to produce them -- so the availability curve can be
@@ -14,13 +14,27 @@ that policy happens to be.
     python scripts/check_group_availability.py --fall_rate 0.002
     python scripts/check_group_availability.py --fall_rate 0.09 --steps 600
 
-Why it exists: ``perf_group_desync_fraction`` in a training run is NOT monotone
-and is easy to misread.  It sits near zero early on -- not because groups are
+Why it exists: ``perf_group_desync_fraction`` in a training run is a sawtooth
+over the settling window and is easy to misread from a single sample.  It also
+sits near zero for the first few tens of iterations -- not because groups are
 synchronised, but because most environments are still inside their first
-episode and have never reset -- then jumps to 1.0 at the first timeout wave,
-then decays as the policy stops falling.  Reading the early part as "the term is
-available" is wrong, and it was: an earlier version of the config comment
-claimed 0.36 early in training when the true value there is ~1.0.
+episode and have never reset.  Reading either as "the term is available" is
+wrong, and it was, twice: an earlier config comment claimed 0.36 early in
+training when the true value there is ~1.0, and the 20k run was read as 0.94
+at the end when its stage-3 average was 0.82.  ``perf_group_availability_ema``
+is the number to plot; this script is how you predict it before running.
+
+What this script is measuring is also what motivated the settling window.  The
+mask used to latch until the group's next shared resample, which made
+availability a function of the resample period and the episode length rather
+than of the reset rate:
+
+    masked fraction = 1 - (L / ((G+1) W)) * (1 - (1 - W/L)^(G+1))
+
+At W = 500, L = 1000, G = 4 that is 0.61 **for a policy that never falls** --
+the mask was driven by episode timeouts, not by falls.  With the settling window
+the same expression holds with W replaced by ``settle_steps``, which is 50, so
+the fall-free floor is ~0.09.
 """
 
 import argparse
@@ -90,14 +104,21 @@ def main():
     grouping.mark_desync, grouping.resync = spy_mark, spy_resync
 
     interval = int(cfg.commands.resampling_time / base.dt)
-    window_p = 1.0 - (1.0 - args.fall_rate) ** interval
+    settle = grouping.settle_steps
+    episode = int(cfg.env.episode_length_s / base.dt)
+    # Timeouts count too, and used to dominate: every env resets once per
+    # episode whether or not it ever falls.
+    hazard = args.fall_rate + 1.0 / max(episode, 1)
+    window_p = 1.0 - (1.0 - hazard) ** settle
     print(f"  {args.num_envs} envs -> {grouping.num_groups} groups of "
-          f"{grouping.group_size}; shared resample interval {interval} steps")
+          f"{grouping.group_size}; settling window {settle} steps, "
+          f"shared resample interval {interval} steps")
     print(f"  forcing {args.fall_rate:.2%} of envs to fall per step "
-          f"(mean episode ~{1 / max(args.fall_rate, 1e-9):.0f} steps)")
+          f"(mean episode ~{1 / max(hazard, 1e-9):.0f} steps, cap {episode})")
     print(f"  predicted: p(reset inside a window) = {window_p:.3f} -> "
           f"group usable {(1 - window_p) ** grouping.group_size:.1%} of the time")
-    print(f"\n  {'step':>6}{'resets':>9}{'marks':>8}{'resyncs':>9}{'desync':>9}")
+    print(f"\n  {'step':>6}{'resets':>9}{'marks':>8}{'resyncs':>9}{'desync':>9}"
+          f"{'avail_ema':>10}{'gain':>7}")
 
     for step in range(1, args.steps + 1):
         doomed = (
@@ -112,7 +133,10 @@ def main():
         resets += int(base.reset_buf.sum())
         if step % args.report_every == 0:
             desync = 1.0 - float(grouping.valid[scoreable].mean())
-            print(f"  {step:>6}{resets:>9}{marks:>8}{resyncs:>9}{desync:>9.3f}")
+            ema = float(base.response_consistency_availability)
+            gain = float(base.response_consistency_gain)
+            print(f"  {step:>6}{resets:>9}{marks:>8}{resyncs:>9}{desync:>9.3f}"
+                  f"{ema:>10.3f}{gain:>7.2f}")
             marks = resyncs = resets = 0
     return 0
 

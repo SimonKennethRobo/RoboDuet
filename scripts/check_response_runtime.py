@@ -515,11 +515,24 @@ def check_r5(env, cfg, steps=1200):
         failures.append(f"twin mount TF bucket is not 0: max {int(twin_bucket.max())}")
 
     # -- 2. shared command vector and gait phase ----------------------------
+    #
+    # The twin-nominality table above is also re-checked here, on every step,
+    # for a reason worth stating: it used to be sampled once, before anything
+    # had been stepped.  _post_physics_step_callback re-draws motor strength,
+    # motor offset and the Kp/Kd factors MID-EPISODE every rand_interval steps,
+    # and that site had no _nominalize_twins() call -- so the twins started at
+    # exactly nominal, passed the table, and drifted off it a few seconds in.
+    # A gate that only visits the parameters at t=0 is not a gate.
+    drifted = set()
     command_mismatch = 0
     phase_mismatch = 0
     synced_samples = 0
     for _ in range(steps):
         env.step(dog_a, arm_a)
+        for name, buffer, want in nominal:
+            values = buffer[twins]
+            if values.numel() and float((values - want).abs().max()) > 1e-5:
+                drifted.add(name)
         healthy = grouping.valid > 0
         if not healthy.any():
             continue
@@ -534,6 +547,14 @@ def check_r5(env, cfg, steps=1200):
         )
     print(f"  over {synced_samples} steps with a synchronised group: "
           f"{command_mismatch} command mismatches, {phase_mismatch} phase mismatches")
+    print(f"  twin parameters stayed nominal over {steps} stepped steps: "
+          f"{'no -- ' + ', '.join(sorted(drifted)) if drifted else 'yes'}")
+    if drifted:
+        failures.append(
+            "twin " + ", ".join(sorted(drifted)) + " left nominal DURING the "
+            "rollout -- a mid-episode randomisation site is not followed by "
+            "_nominalize_twins()"
+        )
     if synced_samples == 0:
         failures.append("no group was ever synchronised -- the check is vacuous")
     if command_mismatch:
@@ -547,11 +568,11 @@ def check_r5(env, cfg, steps=1200):
             "differed from its twin's"
         )
 
-    # -- 3. a fall switches the group off until the next shared resample ----
+    # -- 3. a fall switches the group off for exactly the settling window ---
     victim = int((grouping.is_grouped & ~grouping.is_twin).nonzero().flatten()[0])
     group = int(grouping.group_of[victim])
     # Wait for the group to be freshly synchronised so the observation is clean.
-    interval = int(cfg.commands.resampling_time / base.dt)
+    settle = grouping.settle_steps
     while bool(grouping.group_desync[group]):
         env.step(dog_a, arm_a)
     before = float(grouping.valid[victim])
@@ -568,16 +589,30 @@ def check_r5(env, cfg, steps=1200):
             f"(valid {before} -> {after})"
         )
 
+    # The window is a fixed countdown, so this is an equality check, not a
+    # bound.  Recovering early would mean a resample cut the window short (the
+    # bug the countdown replaced); recovering late would mean advance() is not
+    # running every step.  A member other than the victim resetting during the
+    # wait would restart the countdown and make the observation meaningless, so
+    # allow one extra step of slack and no more.
     recovered_at = None
-    for step in range(1, interval + 2):
+    for step in range(1, settle + 3):
         env.step(dog_a, arm_a)
         if grouping.valid[victim] > 0:
             recovered_at = step
             break
     print(f"  group {group} recovered after {recovered_at} steps "
-          f"(shared resample interval is {interval})")
+          f"(settling window is {settle})")
     if recovered_at is None:
-        failures.append(f"group {group} never recovered within one resample interval")
+        failures.append(
+            f"group {group} never recovered within its {settle}-step settling window"
+        )
+    elif recovered_at < settle:
+        failures.append(
+            f"group {group} recovered after {recovered_at} steps, before its "
+            f"{settle}-step settling window elapsed -- something is clearing "
+            "the countdown early"
+        )
 
     failures += _check_twin_arm_is_held_still(env, cfg)
     return failures

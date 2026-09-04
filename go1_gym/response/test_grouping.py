@@ -4,8 +4,8 @@ The env-level assertions (same command vector per group, synchronised
 ``gait_indices``, nominal twin domain parameters) need IsaacGym and live in
 ``scripts/check_response_runtime.py --check r5``.  What is testable here is the
 bookkeeping those assertions rely on: who is whose twin, when a group is due,
-and -- the part R5 calls an invariant -- that a fall invalidates the group
-until the next shared resample.
+and -- the part R5 calls an invariant -- that a reset invalidates the group for
+a settling window afterwards.
 """
 
 import pytest
@@ -14,8 +14,10 @@ import torch
 from go1_gym.response import EnvGrouping
 
 
-def make(num_envs=64, group_size=4, pool_envs=None):
-    return EnvGrouping(num_envs, group_size=group_size, pool_envs=pool_envs)
+def make(num_envs=64, group_size=4, pool_envs=None, settle_steps=50):
+    return EnvGrouping(
+        num_envs, group_size=group_size, pool_envs=pool_envs, settle_steps=settle_steps
+    )
 
 
 # --- layout ----------------------------------------------------------------
@@ -59,6 +61,8 @@ def test_bad_group_size_rejected():
         make(8, group_size=0)
     with pytest.raises(ValueError, match="pool_envs"):
         make(8, pool_envs=9)
+    with pytest.raises(ValueError, match="settle_steps"):
+        make(8, settle_steps=0)
 
 
 # --- clock -----------------------------------------------------------------
@@ -105,16 +109,66 @@ def test_envs_of_groups_expands_and_sorts():
 # --- the R5 invariant: termination asymmetry -------------------------------
 
 
-def test_a_fall_invalidates_the_whole_group_until_the_next_resample():
-    g = make(16)
+def test_a_fall_invalidates_the_whole_group_for_the_settling_window():
+    g = make(16, settle_steps=5)
     assert g.valid[1:4].tolist() == [1.0, 1.0, 1.0]
 
     g.mark_desync(torch.tensor([2]))          # one member falls
     assert g.valid[0:4].tolist() == [0.0, 0.0, 0.0, 0.0]
     assert g.valid[4:8].tolist() == [0.0, 1.0, 1.0, 1.0]   # neighbours unaffected
 
-    g.resync(torch.tensor([0]))
+    for _ in range(4):
+        g.advance()
+        assert g.valid[1:4].tolist() == [0.0, 0.0, 0.0]
+    g.advance()
     assert g.valid[1:4].tolist() == [1.0, 1.0, 1.0]
+
+
+def test_a_resample_does_not_cut_the_settling_window_short():
+    """The command is re-adopted at the reset instant; what the window waits out
+    is the robot's own start-up transient, which a resample does nothing about.
+    """
+    g = make(16, settle_steps=5)
+    g.mark_desync(torch.tensor([2]))
+    g.advance()
+    g.resync(torch.tensor([0]))               # shared resample lands mid-window
+    assert g.valid[1:4].tolist() == [0.0, 0.0, 0.0]
+    assert g.group_clock[0] == 0              # ...but the clock did restart
+    for _ in range(4):
+        g.advance()
+    assert g.valid[1:4].tolist() == [1.0, 1.0, 1.0]
+
+
+def test_a_second_reset_restarts_the_window_rather_than_accumulating():
+    g = make(16, settle_steps=5)
+    g.mark_desync(torch.tensor([1]))
+    for _ in range(3):
+        g.advance()
+    g.mark_desync(torch.tensor([3]))          # a second member falls
+    for _ in range(4):
+        g.advance()
+        assert g.valid[1:4].tolist() == [0.0, 0.0, 0.0]
+    g.advance()
+    assert g.valid[1:4].tolist() == [1.0, 1.0, 1.0]
+
+
+def test_availability_does_not_depend_on_the_resample_period():
+    """The point of the change: the mask's duty cycle is set by settle_steps and
+    the reset rate, not by how often the group happens to resample."""
+    opened = []
+    for interval in (20, 500):
+        g = make(16, settle_steps=5)
+        open_steps = 0
+        for step in range(1, 401):
+            due = g.groups_due(interval)
+            if due.numel():
+                g.resync(due)
+            if step % 50 == 0:                # one env in the group resets
+                g.mark_desync(torch.tensor([2]))
+            open_steps += int(g.valid[1:4].sum().item() > 0)
+            g.advance()
+        opened.append(open_steps)
+    assert opened[0] == opened[1]
 
 
 def test_the_twin_falling_invalidates_its_group():

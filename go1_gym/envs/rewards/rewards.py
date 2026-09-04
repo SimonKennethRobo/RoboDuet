@@ -131,15 +131,22 @@ class Rewards:
 
     def _reward_domain_consistency(self):
         # R5. The same command in a harder domain must produce the twin's
-        # response.  Masked off for the twin itself and for any group whose
-        # phase drifted after a fall -- see EnvGrouping.valid.
+        # response.  Masked off for the twin itself and for any group inside its
+        # post-reset settling window -- see EnvGrouping.valid.
+        #
+        # The gain divides out how often that mask is open, so the configured
+        # scale means "the weight if the term were always on" and does not have
+        # to be re-derived every time settle_s, group_size or episode_length_s
+        # moves.  See _update_consistency_availability for why it is clamped.
+        # The raw diagnostic in _update_performance_metrics is deliberately NOT
+        # multiplied by it: that metric has to stay comparable across runs.
         env = self.env
         return domain_consistency(
             env.response_detrended,
             env.response_twin_detrended,
             env.response_channel_weights,
             env.grouping.valid,
-        )
+        ) * env.response_consistency_gain
 
     def _reward_lin_vel_z(self):
         # Penalize z axis base linear velocity

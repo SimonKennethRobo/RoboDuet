@@ -305,7 +305,17 @@ COMMON_OVERRIDES = {
     # and desynchronised groups are masked out -- measured, that is 31.5% of
     # samples even for a policy that walks -- and averaging over everything
     # would understate the term by about a third and bake that into the weight.
-    "reward_scales.domain_consistency": -3.0,
+    # -0.5, not -3.0.  The term is now divided by its own availability (see
+    # response.grouping.availability_tau_s), so this number means "the weight if
+    # the mask were always open" and the fix becomes a change to WHEN the term
+    # is applied rather than to how hard it bites.
+    #
+    # Derivation: the 20k run scored -3.0 against a stage-3 mask that was open
+    # 0.178 of the time, i.e. an always-on equivalent of -0.53.  Rounded down
+    # rather than up because that run says the term was, if anything, already
+    # too hard -- the stage-3 ramp took early termination from 0.05 to 0.67 and
+    # halved episode length before stage 4 recovered it.
+    "reward_scales.domain_consistency": -0.5,
     "reward_scales.loco_energy": -0.00004,
     # domain randomization: base & mount
     "domain_rand.dog_obs_frame_drop_prob": 0.0,
@@ -857,6 +867,31 @@ RESPONSE_GROUPING_OVERRIDES = {
     # nominal env; larger groups amortise the twin better but cut the number of
     # distinct command sequences the curriculum sees by the same factor.
     "response.grouping.group_size": 4,
+    # How long a group stays uncomparable after any member resets.
+    #
+    # This replaces "latched off until the next shared resample", which was
+    # correct but cost 0.61 availability for a policy that never falls -- the
+    # mask was driven by episode timeouts (episode_length_s = 20 against
+    # resampling_time = 10) rather than by falls, so it could not come down with
+    # training.  Measured over the 20k run it sat at 0.71-0.82; the settling
+    # window puts it near 0.85 open.  EnvGrouping's docstring has the
+    # arithmetic.
+    #
+    # 1.0 s, not 0.5: the command and gait phase are re-adopted from the twin at
+    # the reset instant, so what is being waited out is only the robot's own
+    # start-up transient -- but the slowest decision channel is pitch at
+    # omega_n = 5.0, i.e. 4/omega_n = 0.8 s to settle, and a window shorter than
+    # that feeds the transient into the cross-domain comparison as if it were a
+    # domain difference.
+    "response.grouping.settle_s": 1.0,
+    # Availability normalisation for R5's reward. tau is deliberately much
+    # longer than the settling window so the gain is a slow schedule rather than
+    # a second source of reward noise.
+    "response.grouping.availability_tau_s": 20.0,
+    # Ceiling on 1/availability. The loop is adverse -- falling lowers
+    # availability, which would raise the penalty -- so the gain is allowed to
+    # compensate down to 33% availability and no further.
+    "response.grouping.availability_gain_max": 3.0,
 }
 
 

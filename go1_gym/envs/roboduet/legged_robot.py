@@ -649,6 +649,18 @@ class LeggedRobot(BaseTask):
             metric_sum[env_ids] = 0.0
 
         self.gait_indices[env_ids] = 0
+        # R5: a grouped env adopts its twin's gait phase, not zero.  This has to
+        # come after the line above, which is the reset's own phase clear, and
+        # it is what turns the desync mask from "until the next shared resample"
+        # into a short settling window: the command was already re-adopted in
+        # _adopt_group_commands, so once the phase matches too, the only thing
+        # left that is not comparable with the twin is the start-up transient.
+        # A twin that reset in the same batch has just been zeroed, so its
+        # members correctly copy zero.
+        if self._grouping_active():
+            grouped = env_ids[self.grouping.is_grouped[env_ids]]
+            if grouped.numel() > 0:
+                self.gait_indices[grouped] = self.gait_indices[self.grouping.twin_of[grouped]]
 
     def compute_observations(self):
 
@@ -1120,9 +1132,16 @@ class LeggedRobot(BaseTask):
             return self.grouping
         cfg = self.cfg.response.grouping
         enabled = bool(cfg.enabled)
+        # dt is read from the config rather than self.dt: _ensure_grouping runs
+        # inside _create_envs, and self.dt is only assigned in _parse_cfg.
+        control_dt = self.cfg.control.decimation * self.cfg.sim.dt
         self.grouping = EnvGrouping(
             num_envs=self.num_envs,
             group_size=int(cfg.group_size),
+            # R5's mask is a settling window after a reset, not a latch held
+            # until the next resample -- see EnvGrouping's docstring for the
+            # arithmetic that killed the latch.
+            settle_steps=max(1, int(round(float(cfg.settle_s) / control_dt))),
             # pool 0 disables grouping outright: is_grouped is all False and
             # every env keeps the original per-env resample clock, so turning
             # this off restores the pre-R5 behaviour exactly rather than
@@ -1826,6 +1845,14 @@ class LeggedRobot(BaseTask):
                 if bool(scoreable.any())
                 else torch.zeros((), device=self.device)
             )
+            # ...and the two numbers to read it WITH.  The instantaneous
+            # fraction above is a sawtooth over the settling window and a single
+            # sample of it means very little; the EMA is the one to plot, and
+            # the gain says what the reward actually did about it.
+            extras["perf_group_availability_ema"] = (
+                self.response_consistency_availability.clone()
+            )
+            extras["perf_consistency_gain"] = self.response_consistency_gain.clone()
             # Guarded, like the R6 metrics above and for the same reason: twins
             # are one env in four, so most reset batches contain none and an
             # unguarded write puts a 0 into the average.  Measured, that made
@@ -2103,6 +2130,30 @@ class LeggedRobot(BaseTask):
         self.gait_indices[env_ids] = self.gait_indices[self.grouping.twin_of[env_ids]]
         self.grouping.resync(group_ids)
 
+    def _update_consistency_availability(self):
+        """Track how often R5's mask is open, and set the reward's gain from it.
+
+        Called right after ``grouping.advance()`` and therefore before
+        ``compute_reward()``, so the gain a step is scored with is the one
+        measured on that step's mask.
+        """
+        if not self._grouping_active():
+            return
+        scoreable = self.grouping.is_grouped & ~self.is_nominal_twin
+        if not bool(scoreable.any()):
+            return
+        available = self.grouping.valid[scoreable].mean()
+        self.response_consistency_availability.mul_(1.0 - self.consistency_availability_alpha)
+        self.response_consistency_availability.add_(
+            self.consistency_availability_alpha * available
+        )
+        torch.clamp(
+            1.0 / self.response_consistency_availability.clamp(min=1e-3),
+            min=1.0,
+            max=self.consistency_gain_max,
+            out=self.response_consistency_gain,
+        )
+
     def _adopt_group_commands(self, env_ids):
         """Reset path for a grouped env: take the group's command, don't draw one.
 
@@ -2196,6 +2247,7 @@ class LeggedRobot(BaseTask):
         # rather than beside episode_length_buf is what makes every group due on
         # its first step instead of holding zeros for a full interval.
         self.grouping.advance()
+        self._update_consistency_availability()
 
         self._step_contact_targets()
 
@@ -2215,6 +2267,20 @@ class LeggedRobot(BaseTask):
         )
         self._randomize_dof_props(env_ids, self.cfg)
         self._arm_post_dof_randomization_hook(env_ids)
+        # R5: and hold the twins nominal afterwards, exactly as reset_idx does.
+        # This site re-draws motor strength, motor offset and the Kp/Kd factors
+        # MID-EPISODE, every rand_interval steps, so without this the twin's
+        # actuators drift off nominal a few seconds into every episode and the
+        # "harder domain vs nominal domain" comparison quietly becomes "harder
+        # domain vs slightly different domain".
+        #
+        # Missed until now because --check r5 dumps the twin's parameters right
+        # after construction, before this line has ever run -- the same "a gate
+        # that only visits the code path a short rollout happens to reach is not
+        # a gate" lesson the arm-curriculum crash already taught.  Found in an
+        # identification export: the twins started at motor_strength 1.000 and
+        # ended spread over 0.906-1.084.
+        self._nominalize_twins(env_ids)
 
         if self.common_step_counter % int(self.cfg.domain_rand.gravity_rand_interval) == 0:
             self._randomize_gravity()
@@ -2777,6 +2843,31 @@ class LeggedRobot(BaseTask):
                 twins[self.is_identification_env[twins]]
             ]
             self.group_resample_interval[identification_groups] = identification_interval
+
+        # R5 availability normalisation.
+        #
+        # domain_consistency() multiplies by the mask and does nothing else, so
+        # an episode's accumulated penalty is proportional to how often the mask
+        # is open.  Measured on the 20k run that was 0.20-0.30, and the shipped
+        # weight was (accidentally) calibrated against it; opening the mask to
+        # ~0.85 would have quadrupled the term overnight.  Dividing by the
+        # availability makes cfg.reward_scales.domain_consistency mean "the
+        # weight if the term were always on", which is a number that survives
+        # changes to settle_s, group_size and episode_length_s.
+        #
+        # The EMA is slow (tau ~ 20 s) because the raw fraction is a sawtooth,
+        # and the gain is CLAMPED because the loop is adverse: availability
+        # falls when the policy starts falling, so an unclamped 1/x would raise
+        # the consistency penalty hardest exactly when the policy is already in
+        # trouble.  Starting the EMA at 1.0 means the gain starts at its floor
+        # and creeps up, never the other way round.
+        grouping_cfg = self.cfg.response.grouping
+        self.consistency_availability_alpha = float(
+            self.dt / max(float(grouping_cfg.availability_tau_s), self.dt)
+        )
+        self.consistency_gain_max = float(grouping_cfg.availability_gain_max)
+        self.response_consistency_availability = torch.ones((), device=self.device)
+        self.response_consistency_gain = torch.ones((), device=self.device)
         self.rew_buf_dog = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
         self.rew_buf_pos_dog = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
         self.rew_buf_neg_dog = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
