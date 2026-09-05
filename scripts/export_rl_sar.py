@@ -26,6 +26,7 @@ checkout directly instead.
 import argparse
 import importlib.util
 import pickle as pkl
+import re
 import sys
 from pathlib import Path
 
@@ -370,9 +371,29 @@ HEADER = (
 )
 
 
-def write_base_yaml(path, robot, cfg, ctx):
+def active_config_name(path, config_name):
+    """Which policy directory rl_sar loads for this robot.
+
+    base.yaml owns the selection so switching policies costs a yaml edit rather
+    than a rebuild -- which means a re-export must not silently hijack a choice
+    someone made by hand. An entry already in base.yaml wins; the run being
+    exported only fills in the blank.
+    """
+    if path.exists():
+        match = re.search(r'^\s*config_name:\s*"([^"]+)"', path.read_text(), re.M)
+        if match:
+            return match.group(1)
+    return config_name
+
+
+def write_base_yaml(path, robot, config_name, cfg, ctx):
     controllers = [name.replace("_joint", "_controller") for name in ctx["hardware_joints"]]
     body = f"""{robot}:
+  # Policy directory under policy/{robot}/ that the RL states load (its
+  # config.yaml + policy.pt). Change this line to switch policies -- it is read
+  # at state entry, so no rebuild is needed. Re-exporting keeps whatever is set
+  # here; it only fills in a name when base.yaml has none.
+  config_name: "{active_config_name(path, config_name)}"
   dt: {float(cfg.sim.dt):g}
   decimation: {int(cfg.control.decimation)}
   num_of_dofs: {ctx['num_dofs']}
@@ -443,8 +464,12 @@ def write_config_yaml(path, robot, config_name, cfg, ctx):
 {float_entry('dog_commands_extra', ctx['dog_commands_extra'], 5)}
   gait_frequency: {ctx['gait_frequency']:g}
   gait_duration: {ctx['gait_duration']:g}
-  # trotting: [phases, offsets, bounds]
-  gait_phases: [0.5, 0.0, 0.0]
+  # Stage 1 always trains trotting (see LeggedRobot._step_contact_targets()'s
+  # gaits["trotting"]) -- these are that gait's relative foot-phase offsets.
+  gait_phases:
+    phases: 0.5
+    offsets: 0.0
+    bounds: 0.0
   base_height_target: {float(cfg.rewards.base_height_target):g}
   # These mirror the dog.observe_* switches. When false the slot stays at its
   # trained width but is zero-filled, exactly as in WBCEnv.
@@ -565,7 +590,8 @@ def export(logdir, rl_sar_root=None, ckpt_id="last", robot=None,
     }
 
     base_yaml = Path(rl_sar_root) / "policy" / robot / "base.yaml"
-    write_base_yaml(base_yaml, robot, cfg, ctx)
+    active = active_config_name(base_yaml, config_name)
+    write_base_yaml(base_yaml, robot, config_name, cfg, ctx)
     write_config_yaml(out_dir / "config.yaml", robot, config_name, cfg, ctx)
 
     log(f"[export_rl_sar] robot        : {robot}  (ckpt {ckpt_path.name})")
@@ -573,6 +599,8 @@ def export(logdir, rl_sar_root=None, ckpt_id="last", robot=None,
     log(f"[export_rl_sar] obs history  : {int(cfg.dog.dog_num_observation_history)}"
         f" x {width} = {int(cfg.dog.dog_num_obs_history)}")
     log(f"[export_rl_sar] actions      : {num_actions} over {num_dofs} DoFs")
+    log(f"[export_rl_sar] active policy: {active}"
+        + ("" if active == config_name else f"  (this export is {config_name}; edit {base_yaml} to switch)"))
     log(f"[export_rl_sar] wrote {base_yaml}")
     log(f"[export_rl_sar] wrote {out_dir / 'config.yaml'}")
     log(f"[export_rl_sar] wrote {out_dir / 'policy.pt'}")
