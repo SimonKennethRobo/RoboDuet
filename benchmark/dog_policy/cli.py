@@ -5,6 +5,12 @@ simulation and own contiguous environment slices. Policies with incompatible
 layouts are partitioned into separate groups, evaluated sequentially, and
 merged into the same report.
 
+Each policy's slice is subdivided again, one cell of ``--num_envs_per_policy``
+envs per scenario point, so a whole command grid is measured in a single
+rollout instead of one rollout per point. ``--max_num_envs`` caps the pool and
+therefore how many points run at once; grids larger than that are split across
+successive rollouts.
+
 Scenarios
 ---------
 A  Velocity command grid
@@ -31,7 +37,8 @@ Usage::
     python -m benchmark.dog_policy.cli \\
         --logdirs runs/run_A runs/run_B runs/run_C \\
         --names v1 v2 v3 --ckptids last last 040000 \\
-        --headless --num_envs_per_policy 32 --num_eval_steps 2000
+        --headless --num_envs_per_policy 32 --max_num_envs 4096 \\
+        --num_eval_steps 2000
 
 Stage-2 hook: ``--stage2`` is reserved (not yet implemented).
 """
@@ -64,7 +71,9 @@ from benchmark.dog_policy.evaluation import (
     group_shared_env_compatible_runs,
     load_dog_policy_for_benchmark,
     load_env_benchmark,
+    preview_command_layout,
     print_comparison_table,
+    record_command_writes,
     save_metadata,
     save_results,
     set_gait_cmd,
@@ -223,6 +232,78 @@ def _fmt_metric(results: List[ScenarioResult], metrics: List[tuple]) -> str:
     return "  ".join(parts)
 
 
+def _plan_point_batches(
+    points: List[Point],
+    default_arm_intensity: Optional[float],
+    cap: int,
+    scenario: str,
+) -> List[tuple]:
+    """Split points into groups that can share one rollout.
+
+    Arm intensity is a process-global stage-1 setting rather than a per-env one,
+    so points stop batching wherever it changes -- which keeps scenario B's
+    intensity sweep sequential without special-casing it.
+    """
+    batches: List[tuple] = []
+    current: List[Point] = []
+    current_intensity: Optional[float] = None
+    for point in points:
+        label, _, extra_kw = point
+        intensity = extra_kw.get("arm_intensity", default_arm_intensity)
+        if intensity is None:
+            raise ValueError(f"{scenario}/{label}: arm_intensity was not provided")
+        if current and (intensity != current_intensity or len(current) >= cap):
+            batches.append((current, current_intensity))
+            current = []
+        current_intensity = intensity
+        current.append(point)
+    if current:
+        batches.append((current, current_intensity))
+    return batches
+
+
+def _batched_cmd_fn(
+    env: HistoryWrapper,
+    handles: List[PolicyHandle],
+    batch: List[Point],
+) -> tuple:
+    """Lay one command per scenario point across every policy's env cells.
+
+    Scenario command functions write uniformly to all envs, so running one and
+    reading a single row back yields that point's command vector; the rows are
+    then scattered to their cells. Only the columns a scenario actually wrote
+    are replayed, leaving env-owned command dims untouched.
+
+    Returns the per-step command function and the metric groups it commands,
+    ordered handle-major then point-minor.
+    """
+    commands = env.env.commands_dog
+    rows = []
+    columns: set = set()
+    for _, cmd_fn, _ in batch:
+        with record_command_writes() as written:
+            cmd_fn(env)
+        columns |= written
+        rows.append(commands[0].clone())
+
+    per_env = commands.clone()
+    cells: List[tuple] = []
+    for h in handles:
+        for point_index in range(h.points_per_batch):
+            start, end = h.cell(point_index)
+            # Cells past the batch's last point are unmeasured; hold them at the
+            # final point's command rather than whatever the env last resampled.
+            per_env[start:end] = rows[min(point_index, len(rows) - 1)]
+            if point_index < len(batch):
+                cells.append((start, end))
+    cols = torch.tensor(sorted(columns), device=commands.device, dtype=torch.long)
+
+    def apply_commands(target_env: HistoryWrapper):
+        target_env.env.commands_dog[:, cols] = per_env[:, cols]
+
+    return apply_commands, cells
+
+
 def _run_points(
     env: HistoryWrapper,
     handles: List[PolicyHandle],
@@ -241,21 +322,30 @@ def _run_points(
     out = _empty_results(handles)
     print(header)
     total = len(points)
-    for i, (label, cmd_fn, extra_kw) in enumerate(points):
-        arm_intensity = extra_kw.get("arm_intensity", default_arm_intensity)
-        if arm_intensity is None:
-            raise ValueError(f"{scenario}/{label}: arm_intensity was not provided")
-        print(f"{indent}[{i + 1:2d}/{total}] {label}", end="  ", flush=True)
+    done = 0
+    batches = _plan_point_batches(points, default_arm_intensity, handles[0].points_per_batch, scenario)
+    for batch, arm_intensity in batches:
+        cmd_fn, cells = _batched_cmd_fn(env, handles, batch)
+        if len(batch) > 1:
+            print(
+                f"{indent}[{done + 1:2d}-{done + len(batch):2d}/{total}] "
+                f"{len(batch)} points x {len(handles)} policies in one rollout",
+                flush=True,
+            )
         accs = _eval_loop_parallel(
             env, handles, layout, n_steps, arm_intensity, device, cmd_fn,
             settle_steps=settle_steps, settle_cmd_fn=settle_cmd_fn,
+            metric_groups=cells,
         )
-        point_results = []
-        for h, acc in zip(handles, accs):
-            result = _acc_to_result(acc, layout, h.name, scenario, label, n_steps, **extra_kw)
-            out[h.name].append(result)
-            point_results.append(result)
-        print(fmt_fn(point_results))
+        for point_index, (label, _, extra_kw) in enumerate(batch):
+            point_results = []
+            for handle_index, h in enumerate(handles):
+                acc = accs[handle_index * len(batch) + point_index]
+                result = _acc_to_result(acc, layout, h.name, scenario, label, n_steps, **extra_kw)
+                out[h.name].append(result)
+                point_results.append(result)
+            done += 1
+            print(f"{indent}[{done:2d}/{total}] {label}  {fmt_fn(point_results)}")
     return out
 
 
@@ -745,6 +835,7 @@ def _apply_profile(args):
         "sim_device",
         "robot",
         "num_envs_per_policy",
+        "max_num_envs",
         "num_eval_steps",
         "seed",
         "arm_intensity",
@@ -838,7 +929,16 @@ def parse_args(argv: Optional[List[str]] = None):
         "--num_envs_per_policy",
         type=int,
         default=32,
-        help="Envs per policy. Total envs = num_envs_per_policy × N_policies.",
+        help="Envs averaged for one policy at one scenario point.",
+    )
+    p.add_argument(
+        "--max_num_envs",
+        type=int,
+        default=4096,
+        help=(
+            "Env pool ceiling. Scenario points are spread across the pool and "
+            "evaluated in one rollout, as many at a time as this allows."
+        ),
     )
     p.add_argument("--num_eval_steps", type=int, default=100, help="Sim steps per scenario point (per env)")
     p.add_argument("--seed", type=int, default=1, help="Benchmark RNG seed, independent from training seed")
@@ -857,6 +957,39 @@ def parse_args(argv: Optional[List[str]] = None):
     _apply_profile(args)
     _apply_candidate_dir(args)
     return args
+
+
+def _max_points_per_rollout(args, layout: CommandLayout) -> int:
+    """Most points any enabled scenario can put into a single rollout.
+
+    Env slots beyond this would simply idle. Under-estimating is safe --
+    _run_points just splits a grid across more batches -- so scenarios whose
+    points cannot share a rollout (B, whose arm intensity is global) count as 1.
+    """
+    counts = [1]
+    if not args.skip_a:
+        cfg = _scenario_cfg(args.scenario_config, "vel_grid")
+        vx = _list_cfg(cfg, "vx", sorted({v for v, _, _ in VEL_GRID}))
+        vy = _list_cfg(cfg, "vy", sorted({v for _, v, _ in VEL_GRID}))
+        yaw = _list_cfg(cfg, "yaw", sorted({v for _, _, v in VEL_GRID}))
+        counts.append(len(vx) * len(vy) * len(yaw))
+    if not args.skip_c and layout.has_body_pitch:
+        cfg = _scenario_cfg(args.scenario_config, "body_pose")
+        counts.append(len(_list_cfg(cfg, "pitch", PITCH_CMDS)))
+        if layout.has_body_roll:
+            counts.append(len(_list_cfg(cfg, "roll", ROLL_CMDS)))
+        if layout.has_body_height:
+            counts.append(len(_list_cfg(cfg, "height_delta", HEIGHT_DELTA_CMDS)))
+    if not args.skip_d and layout.has_dynamic_gait:
+        cfg = _scenario_cfg(args.scenario_config, "gait")
+        counts.append(len(_list_cfg(cfg, "gait_freq", GAIT_FREQ_CMDS)))
+        counts.append(len(_list_cfg(cfg, "stance_width", STANCE_WIDTH_CMDS)))
+        if layout.has_stance_length:
+            counts.append(len(_list_cfg(cfg, "stance_length", STANCE_LENGTH_CMDS)))
+    if not args.skip_e:
+        cfg = _scenario_cfg(args.scenario_config, "vel_step")
+        counts.append(len(cfg.get("targets") or STEP_TARGETS))
+    return max(counts)
 
 
 def set_benchmark_seed(seed: int, device: str):
@@ -947,12 +1080,32 @@ def main(argv: Optional[List[str]] = None):
     num_envs_per_policy = args.num_envs_per_policy
     total_envs = num_envs_per_policy * n_runs
     env_groups = group_shared_env_compatible_runs(args.logdirs)
-    peak_sim_envs = num_envs_per_policy * max(len(group) for group in env_groups)
 
-    print(f"[Benchmark] {n_runs} policies × {num_envs_per_policy} envs = {total_envs} evaluated envs")
+    # Compatible policies share one sim; incompatible ones need their own, so
+    # each group spends the env budget on its own policy count and layout.
+    group_points_per_batch: List[int] = []
+    for run_indices in env_groups:
+        group_layout = preview_command_layout(args.logdirs[run_indices[0]], robot=args.robot)
+        floor = num_envs_per_policy * len(run_indices)
+        if floor > args.max_num_envs:
+            print(
+                f"[Benchmark] WARNING: {len(run_indices)} policies × {num_envs_per_policy} envs "
+                f"= {floor} exceeds --max_num_envs {args.max_num_envs}; using {floor}."
+            )
+        group_points_per_batch.append(
+            min(max(1, args.max_num_envs // floor), _max_points_per_rollout(args, group_layout))
+        )
+    group_env_counts = [
+        num_envs_per_policy * len(group) * points_per_batch
+        for group, points_per_batch in zip(env_groups, group_points_per_batch)
+    ]
+    peak_sim_envs = max(group_env_counts)
+
+    print(f"[Benchmark] {n_runs} policies × {num_envs_per_policy} envs = {total_envs} envs averaged per point")
     print(
         f"[Benchmark] {len(env_groups)} layout group(s); "
-        f"peak simultaneous envs = {peak_sim_envs}"
+        f"points per rollout = {group_points_per_batch}; "
+        f"peak simultaneous envs = {peak_sim_envs} (max {args.max_num_envs})"
     )
     print(f"[Benchmark] Seed = {args.seed}")
     all_results: Dict[str, Dict[str, List[ScenarioResult]]] = {name: {} for name in names}
@@ -961,7 +1114,9 @@ def main(argv: Optional[List[str]] = None):
     control_dts: List[object] = []
 
     for group_number, run_indices in enumerate(env_groups, start=1):
-        group_total_envs = num_envs_per_policy * len(run_indices)
+        points_per_batch = group_points_per_batch[group_number - 1]
+        envs_per_policy_slice = num_envs_per_policy * points_per_batch
+        group_total_envs = group_env_counts[group_number - 1]
         base_index = run_indices[0]
         group_names = [names[i] for i in run_indices]
         print(
@@ -1000,17 +1155,19 @@ def main(argv: Optional[List[str]] = None):
             handles: List[PolicyHandle] = []
             print("[Benchmark] Loading policies...")
             for local_index, run_index in enumerate(run_indices):
-                s = local_index * num_envs_per_policy
-                e = s + num_envs_per_policy
+                s = local_index * envs_per_policy_slice
+                e = s + envs_per_policy_slice
                 print(
                     f"  [{local_index + 1}/{len(run_indices)}] "
-                    f"{names[run_index]:24s}  envs [{s}:{e})  ckpt={ckptids[run_index]}"
+                    f"{names[run_index]:24s}  envs [{s}:{e})  "
+                    f"{points_per_batch} x {num_envs_per_policy}  ckpt={ckptids[run_index]}"
                 )
                 policy = load_dog_policy_for_benchmark(
                     args.logdirs[run_index],
                     ckptids[run_index],
                     cfg,
                     expected_dims=env.benchmark_dog_dims,
+                    device=args.sim_device,
                 )
                 handles.append(
                     PolicyHandle(
@@ -1018,6 +1175,7 @@ def main(argv: Optional[List[str]] = None):
                         policy=policy,
                         env_start=s,
                         env_end=e,
+                        envs_per_point=num_envs_per_policy,
                     )
                 )
 
@@ -1033,6 +1191,7 @@ def main(argv: Optional[List[str]] = None):
                     "runs": group_names,
                     "num_policies": len(run_indices),
                     "total_envs": group_total_envs,
+                    "points_per_rollout": points_per_batch,
                     "observation_adapter": env.benchmark_observation_mode,
                     "layout": describe_shared_env_group(args.logdirs[base_index]),
                 }

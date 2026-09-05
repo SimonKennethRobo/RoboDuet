@@ -113,6 +113,7 @@ def build_benchmark_metadata(
         "logdirs": logdirs,
         "ckptids": ckptids,
         "num_envs_per_policy": args.num_envs_per_policy,
+        "max_num_envs": getattr(args, "max_num_envs", None),
         "total_envs": total_envs,
         "num_eval_steps": args.num_eval_steps,
         "seed": args.seed,
