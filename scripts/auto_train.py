@@ -10,7 +10,7 @@ from datetime import datetime
 
 import wandb
 from go1_gym import MINI_GYM_ROOT_DIR
-from go1_gym.envs.config import ARM_ACTION_MODES, build_roboduet_config, cfg_to_dict
+from go1_gym.envs.config import ARM_ACTION_MODES, build_roboduet_config, cfg_to_dict, restore_dog_observation_layout
 from go1_gym.envs.roboduet.utils import StageSchedule, apply_wbc_reward_settings
 from go1_gym.envs.roboduet.wbc_env import WBCEnv
 from go1_gym.envs.roboduet.wbc_env_wrapper import HistoryWrapper
@@ -69,6 +69,10 @@ def apply_dog_checkpoint_command_limits(cfg, ckpt_path):
     if dog_commands is None:
         print(f"[warn] dog parameters.pkl has no Cfg.commands; using current command limits.", flush=True)
         return
+    if isinstance(dog_cfg, dict):
+        restore_dog_observation_layout(cfg, dog_cfg)
+        print(f"Dog checkpoint observations: {cfg.dog.dog_num_observations}D, "
+              f"layout v{cfg.dog.observation_layout_version}", flush=True)
     copied = []
     print(f"Loaded dog policy parameters from {params_path}", flush=True)
     print("Dog command limits applied to stage2:", flush=True)

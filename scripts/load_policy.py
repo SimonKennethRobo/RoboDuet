@@ -13,7 +13,7 @@ from go1_gym.envs.config import (
     RoboDuetRuntimeOptions,
     apply_config_snapshot,
     build_roboduet_config,
-    recompute_observation_dims,
+    restore_dog_observation_layout,
 )
 from go1_gym.envs.config.wbc import ROBOT_ASSET_FILES
 
@@ -295,7 +295,7 @@ def load_env(logdir, wrapper, headless=False, device='cuda:0', robot=None):
     apply_config_snapshot(cfg, snapshot, drop_unknown=True)
 
     _ensure_asset_file(cfg, robot=robot, checkpoint_asset_file=checkpoint_asset_file)
-    recompute_observation_dims(cfg)
+    restore_dog_observation_layout(cfg, snapshot)
     recorded_arm_obs = snapshot.get("arm", {}).get("arm_num_observations")
     current_arm_obs = int(cfg.arm.arm_num_observations)
     if (

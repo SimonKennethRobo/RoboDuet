@@ -22,3 +22,4 @@
 **runs
 **.pytest_cache
 **wandb
+tmp/*.err

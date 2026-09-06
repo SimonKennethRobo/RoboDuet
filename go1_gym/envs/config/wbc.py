@@ -159,6 +159,8 @@ COMMON_OVERRIDES = {
     "dog.dog_num_commands": 6,
     "dog.use_adaptation_module": False,
     "dog.add_obs_noise": False,
+    "dog.observation_layout_version": 2, # Version 2 removes disabled observation terms; version 1 only set to zero.
+    "dog.observe_clock_inputs": True,
     "dog.observe_lin_vel": True,
     "dog.observe_pose_actual": True,
     "dog.observe_track_error": True,
@@ -331,7 +333,7 @@ STAGE2_OVERRIDES = {
     "wbc.reward_scales.arm_contact": -1.0,
     "wbc.reward_scales.jump": 5.0,
     "wbc.reward_scales.hip_action_l2": -0.05,
-    "wbc.reward_scales.raibert_heuristic": -0.0,
+    "wbc.reward_scales.raibert_heuristic": -1.0,
     "wbc.rewards.terminal_body_height": 0.17,
     "wbc.rewards.use_terminal_body_height": True,
     "wbc.rewards.use_terminal_roll": False,

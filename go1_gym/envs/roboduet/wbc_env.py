@@ -10,7 +10,7 @@ import torch
 from isaacgym import gymapi, gymtorch, gymutil
 from isaacgym.torch_utils import quat_apply, quat_from_euler_xyz, quat_mul, quat_rotate, to_torch, torch_rand_float
 
-from go1_gym.envs.config import ARM_ACTION_MODES, ConfigNode
+from go1_gym.envs.config import ARM_ACTION_MODES, ConfigNode, dog_obs_term_present
 from go1_gym.utils.global_switch import global_switch
 from go1_gym.utils.math_utils import (
     ee_twist_body_6d,
@@ -2592,10 +2592,10 @@ class WBCEnv(LeggedRobot):
                 ("arm_commands", cfg.arm.arm_num_commands, 0.0, False),
             ]
         if cfg.env.observe_two_prev_actions:
-            layout.append(("two_prev_actions", self.num_actions_loco, 0.0, False))
+            layout.append(("two_prev_actions", cfg.env.num_actions, 0.0, False))
         if cfg.env.observe_timing_parameter:
             layout.append(("timing_parameter", 1, 0.0, False))
-        if cfg.env.observe_clock_inputs:
+        if cfg.dog.observe_clock_inputs:
             layout.append(("clock_inputs", 4, 0.0, False))
 
         # Velocity and pose measurements are noised explicitly in
@@ -2603,13 +2603,13 @@ class WBCEnv(LeggedRobot):
         # same noisy actual values. Keep their independent noise scales zero
         # here to avoid adding a second noise sample after concatenation.
         layout.append(("base_ang_vel", 3, 0.0, True))
-        layout.append(("base_lin_vel", 3, 0.0, True))
-        # Fixed tracking slot. Pose actual and tracking errors are independently
-        # zero-filled by their dog-policy switches. Only the measured actual
-        # pose gets sensor noise; errors receive no independent noise.
-        layout.append(("body_pose_actual", 3, 0.0, False))
-        layout.append(("body_pose_error", 3, 0.0, False))
-        layout.append(("velocity_error", 3, 0.0, False))
+        if dog_obs_term_present(cfg, "observe_lin_vel"):
+            layout.append(("base_lin_vel", 3, 0.0, True))
+        if dog_obs_term_present(cfg, "observe_pose_actual"):
+            layout.append(("body_pose_actual", 3, 0.0, False))
+        if dog_obs_term_present(cfg, "observe_track_error"):
+            layout.append(("body_pose_error", 3, 0.0, False))
+            layout.append(("velocity_error", 3, 0.0, False))
 
         if cfg.env.observe_yaw:
             layout.append(("heading", 1, 0.0, False))
@@ -2667,7 +2667,7 @@ class WBCEnv(LeggedRobot):
         if self.cfg.env.observe_timing_parameter:
             obs_buf = torch.cat((obs_buf, self.gait_indices.unsqueeze(1)), dim=-1)
 
-        if self.cfg.env.observe_clock_inputs:
+        if self.cfg.dog.observe_clock_inputs:
             obs_buf = torch.cat((obs_buf, self.clock_inputs), dim=-1)
 
         # Generate each measured actual once, then reuse it in the associated
@@ -2713,21 +2713,14 @@ class WBCEnv(LeggedRobot):
             tracking_lin_vel_measured = tracking_lin_vel_measured + lin_vel_noise
             pose_measured = pose_measured + torch.randn_like(pose_measured) * pose_noise_scale
 
-        # Fixed width regardless of dog.observe_lin_vel: ang_vel is always
-        # real; lin_vel's slot always exists but is zeros when the switch is
-        # off, so toggling it never changes dog_num_observations.
-        if self.cfg.dog.observe_lin_vel:
-            lin_vel_term = lin_vel_measured
-        else:
-            lin_vel_term = torch.zeros(self.num_envs, 3, device=self.device)
-        obs_buf = torch.cat((obs_buf, ang_vel_measured, lin_vel_term), dim=-1)
+        obs_buf = torch.cat((obs_buf, ang_vel_measured), dim=-1)
+        if dog_obs_term_present(self.cfg, "observe_lin_vel"):
+            lin_vel_term = lin_vel_measured if self.cfg.dog.observe_lin_vel else torch.zeros_like(lin_vel_measured)
+            obs_buf = torch.cat((obs_buf, lin_vel_term), dim=-1)
+        if dog_obs_term_present(self.cfg, "observe_pose_actual"):
+            pose_actual = pose_measured if self.cfg.dog.observe_pose_actual else torch.zeros_like(pose_measured)
+            obs_buf = torch.cat((obs_buf, pose_actual), dim=-1)
 
-        # Fixed 9-wide tracking slot: pose actual is controlled independently
-        # from pose/velocity errors. Errors are command - actual.
-        if self.cfg.dog.observe_pose_actual:
-            pose_actual = pose_measured
-        else:
-            pose_actual = torch.zeros(self.num_envs, 3, device=self.device)
         if self.cfg.dog.observe_track_error:
             height_target = float(self.cfg.rewards.base_height_target) + self.commands_dog[:, dog_cmd_idx["body_height"]]
             pose_target = torch.stack(
@@ -2749,8 +2742,8 @@ class WBCEnv(LeggedRobot):
         else:
             pose_error = torch.zeros(self.num_envs, 3, device=self.device)
             velocity_error = torch.zeros(self.num_envs, 3, device=self.device)
-        track_obs = torch.cat((pose_actual, pose_error, velocity_error), dim=-1)
-        obs_buf = torch.cat((obs_buf, track_obs), dim=-1)
+        if dog_obs_term_present(self.cfg, "observe_track_error"):
+            obs_buf = torch.cat((obs_buf, pose_error, velocity_error), dim=-1)
 
         if self.cfg.env.observe_yaw:
             forward = quat_apply(self.base_quat, self.forward_vec)

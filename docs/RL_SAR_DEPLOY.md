@@ -198,9 +198,33 @@ go2 是恒等映射（IsaacLab 里就按 `FR,FL,RR,RL` 定义 `joint_names`）�
 > **总宽度不是常数**，取决于训练时开了哪些 flag：
 > `arm_num_commands` 在 `--rot6d` 下是 9、否则 6；
 > `dog_num_commands` 在 `--dyna_gait` 下是 11、否则 6。
-> 当前默认 build 出来是 **85**；本仓库 `runs/2026-08-01/...` 那次
+> 旧版三项观测全开、时钟开启时，默认 build 是 **85**；本仓库 `runs/2026-08-01/...` 那次
 > （dyna_gait + traj_track）是 **90**。
 > **所以导出脚本必须从 checkpoint 的 `parameters.pkl` 现场推导，不能写死。**
+新增的 dog 观测布局版本 2（`dog.observation_layout_version=2`）按以下开关
+直接移除关闭的项，不保留零占位：
+
+| 配置（`go1_gym/envs/config/wbc.py`） | 关闭时减少的单帧维度 |
+| --- | ---: |
+| `dog.observe_clock_inputs` | 4 |
+| `dog.observe_lin_vel` | 3 |
+| `dog.observe_pose_actual` | 3 |
+| `dog.observe_track_error` | 6（姿态误差 3 + 速度误差 3） |
+
+Dog 时钟由 `dog.observe_clock_inputs` 独立控制；`env.observe_clock_inputs`
+仍控制通用环境观测。关闭 dog 时钟观测不停止内部步态相位和接触目标的更新。
+动态步态 + rot6d 下，四项全开为 90 维；后三项关闭为 78 维；四项全关为
+74 维，对应 30 帧历史输入 2220 维。缩放、噪声和丢帧分段随布局更新。
+
+Play、rl_sar 导出以及 stage-2 加载 dog checkpoint 时均恢复 checkpoint 的
+观测开关和历史长度。没有版本字段的旧 `parameters.pkl` 按版本 1 恢复：
+线速度、实际姿态和误差仍保留旧的零占位，时钟开关从旧 `env` 配置读取。
+因此修改当前源码开关不会改变旧模型的输入布局；使用缩短输入需要训练新策略。
+导出的 YAML `observations` 列表决定实际拼接内容，`num_observations` 和
+TorchScript 输入宽度同步校验；不要只修改 YAML 开关而保留旧模型。
+
+以下表格记录四项全开的历史布局，关闭项目后后续偏移会前移。
+
 > 下表的偏移按 90 维那次列出（括号内为维度的配置来源）。
 
 | #  | 偏移  | 维      | 内容                                       | 缩放                          | rl_sar 现成？              |

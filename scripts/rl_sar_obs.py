@@ -46,6 +46,23 @@ class RlSarObservation:
         self.num_leg = int(params["num_leg_dofs"])
         self.num_arm = int(params["num_arm_dofs"])
         self.default_dof_pos = np.array(params["default_dof_pos"], dtype=np.float64)
+        # Compact bundles omit disabled terms entirely. Legacy bundles keep
+        # their trained zero slots and are handled by term() below.
+        if int(params.get("dog_observation_layout_version", 1)) == 2:
+            switches = {
+                "observe_clock_inputs": ("roboduet/clock_inputs",),
+                "observe_lin_vel": ("roboduet/base_lin_vel",),
+                "observe_pose_actual": ("roboduet/body_pose_actual",),
+                "observe_track_error": ("roboduet/body_pose_error", "roboduet/velocity_error"),
+            }
+            for switch, terms in switches.items():
+                for term in terms:
+                    if (term in params["observations"]) != bool(params[switch]):
+                        raise ValueError(f"{switch} disagrees with observations term {term}")
+        width = sum(self.widths()[name] for name in params["observations"])
+        if width != int(params["num_observations"]):
+            raise ValueError(f"Observation terms have width {width}, expected {params['num_observations']}")
+
 
     def widths(self):
         p = self.p
@@ -97,7 +114,11 @@ class RlSarObservation:
         if name == "roboduet/arm_commands":
             return np.zeros(int(p["arm_num_commands"]))
         if name == "roboduet/clock_inputs":
-            phases, offsets, bounds = p["gait_phases"]
+            gait_phases = p["gait_phases"]
+            phases, offsets, bounds = (
+                [gait_phases[key] for key in ("phases", "offsets", "bounds")]
+                if isinstance(gait_phases, dict) else gait_phases
+            )
             duration = float(p["gait_duration"])
             gait = s["gait_indices"]
             foot = [gait + phases + offsets + bounds, gait + offsets, gait + bounds, gait + phases]

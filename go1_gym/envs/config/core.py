@@ -308,6 +308,58 @@ def arm_obs_dim_parts(cfg):
     return parts
 
 
+def dog_obs_term_present(cfg, switch):
+    """Old checkpoints retain zero slots; new policies omit disabled terms."""
+    version = cfg.dog.observation_layout_version
+    if version not in (1, 2):
+        raise ValueError(f"Unsupported dog observation layout version: {version}")
+    return version == 1 or bool(getattr(cfg.dog, switch))
+
+
+def restore_dog_observation_layout(cfg, snapshot):
+    """Restore actor input semantics, including pre-versioned checkpoints.
+
+    Also used when loading a stage-1 dog into stage-2 training. Do not inherit
+    today's observation switches for a saved actor, even if widths coincide.
+    Call before creating the environment/history buffers.
+    """
+    dog = snapshot.get("dog", {})
+    # Width equality alone cannot prove command/rotation semantics agree.
+    for section, names in (
+        ("dog", ("dog_num_commands", "num_actions_loco")),
+        ("arm", ("arm_num_commands", "num_actions_arm")),
+        ("env", ("observe_two_prev_actions", "observe_timing_parameter",
+                 "observe_yaw", "observe_contact_states")),
+        ("wbc", ("use_vision",)),
+    ):
+        saved = snapshot.get(section, {})
+        for name in names:
+            if name in saved and saved[name] != getattr(getattr(cfg, section), name):
+                raise ValueError(f"Dog checkpoint requires {section}.{name}={saved[name]}; "
+                                 "the runtime observation layout differs")
+    if "use_rot6d" in snapshot and snapshot["use_rot6d"] != cfg.use_rot6d:
+        raise ValueError("Dog checkpoint and runtime use different rot6d representations")
+    cfg.dog.observation_layout_version = dog.get("observation_layout_version", 1)
+    cfg.dog.observe_clock_inputs = dog.get(
+        "observe_clock_inputs", snapshot.get("env", {}).get("observe_clock_inputs", True)
+    )
+    for name in ("observe_lin_vel", "observe_pose_actual", "observe_track_error"):
+        setattr(cfg.dog, name, dog.get(name, True))
+    if "dog_num_observation_history" in dog:
+        cfg.dog.dog_num_observation_history = dog["dog_num_observation_history"]
+    recompute_observation_dims(cfg)
+    recorded = dog.get("dog_num_observations")
+    if recorded is not None and int(recorded) != cfg.dog.dog_num_observations:
+        raise ValueError(
+            f"Dog checkpoint observation layout mismatch: saved={recorded}, "
+            f"reconstructed={cfg.dog.dog_num_observations}. Check command widths, "
+            "rot6d and observation switches against parameters.pkl."
+        )
+    recorded_history = dog.get("dog_num_obs_history")
+    if recorded_history is not None and int(recorded_history) != cfg.dog.dog_num_obs_history:
+        raise ValueError("Dog checkpoint history width disagrees with frame width and history length")
+
+
 def dog_obs_dim_parts(cfg):
     parts = {
         "projected_gravity": 3,
@@ -323,19 +375,16 @@ def dog_obs_dim_parts(cfg):
         parts["two_prev_actions"] = cfg.env.num_actions
     if cfg.env.observe_timing_parameter:
         parts["timing_parameter"] = 1
-    if cfg.env.observe_clock_inputs:
+    if cfg.dog.observe_clock_inputs:
         parts["clock_inputs"] = 4
-    # Fixed width regardless of dog.observe_lin_vel: ang_vel is always real;
-    # lin_vel's slot always exists but is zero-filled when the switch is
-    # off (see WBCEnv._dog_obs_layout / get_dog_observations), so toggling
-    # it never changes dog_num_observations.
     parts["base_ang_vel"] = 3
-    parts["base_lin_vel"] = 3
-    # Fixed width regardless of dog.observe_pose_actual/observe_track_error:
-    # [height, pitch, roll]_actual and the pose/velocity error slots are
-    # independently zero-filled when their switch is off, so toggling either
-    # never changes dog_num_observations.
-    parts["tracking"] = 9
+    if dog_obs_term_present(cfg, "observe_lin_vel"):
+        parts["base_lin_vel"] = 3
+    if dog_obs_term_present(cfg, "observe_pose_actual"):
+        parts["body_pose_actual"] = 3
+    if dog_obs_term_present(cfg, "observe_track_error"):
+        parts["body_pose_error"] = 3
+        parts["velocity_error"] = 3
     if cfg.env.observe_yaw:
         parts["heading"] = 1
     if cfg.env.observe_contact_states:

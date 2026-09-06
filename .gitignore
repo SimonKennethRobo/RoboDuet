@@ -82,3 +82,7 @@ benchmark/candidates
 benchmark/results
 
 tests
+
+.stfolder
+.claude
+.codex

@@ -40,7 +40,8 @@ from go1_gym.envs.config import (  # noqa: E402
     RoboDuetRuntimeOptions,
     apply_config_snapshot,
     build_roboduet_config,
-    recompute_observation_dims,
+    dog_obs_term_present,
+    restore_dog_observation_layout,
 )
 
 
@@ -119,7 +120,7 @@ def load_runtime_cfg(logdir, robot):
         run_parameters = pkl.load(handle)
     cfg = build_roboduet_config(options=RoboDuetRuntimeOptions(num_envs=1, robot=robot))
     apply_config_snapshot(cfg, run_parameters["Cfg"], drop_unknown=True)
-    recompute_observation_dims(cfg)
+    restore_dog_observation_layout(cfg, run_parameters["Cfg"])
     return cfg, run_parameters
 
 
@@ -236,15 +237,15 @@ def observation_terms(cfg):
         raise NotImplementedError("env.observe_two_prev_actions has no rl_sar term")
     if bool(cfg.env.observe_timing_parameter):
         raise NotImplementedError("env.observe_timing_parameter has no rl_sar term")
-    if bool(cfg.env.observe_clock_inputs):
+    if bool(cfg.dog.observe_clock_inputs):
         terms.append("roboduet/clock_inputs")                     # 4
-    terms += [
-        "ang_vel",                    # base_ang_vel * scale         3
-        "roboduet/base_lin_vel",      # base_lin_vel * scale         3
-        "roboduet/body_pose_actual",  # [height, pitch, roll]        3
-        "roboduet/body_pose_error",   # target - actual              3
-        "roboduet/velocity_error",    # command - actual             3
-    ]
+    terms.append("ang_vel")
+    if dog_obs_term_present(cfg, "observe_lin_vel"):
+        terms.append("roboduet/base_lin_vel")
+    if dog_obs_term_present(cfg, "observe_pose_actual"):
+        terms.append("roboduet/body_pose_actual")
+    if dog_obs_term_present(cfg, "observe_track_error"):
+        terms += ["roboduet/body_pose_error", "roboduet/velocity_error"]
     if bool(cfg.env.observe_yaw):
         raise NotImplementedError("env.observe_yaw has no rl_sar term")
     if bool(cfg.env.observe_contact_states):
@@ -471,8 +472,10 @@ def write_config_yaml(path, robot, config_name, cfg, ctx):
     offsets: 0.0
     bounds: 0.0
   base_height_target: {float(cfg.rewards.base_height_target):g}
-  # These mirror the dog.observe_* switches. When false the slot stays at its
-  # trained width but is zero-filled, exactly as in WBCEnv.
+  # Version 2 omits disabled terms from observations; version 1 retains
+  # legacy zero slots. The observations list determines concatenation order.
+  dog_observation_layout_version: {int(cfg.dog.observation_layout_version)}
+  observe_clock_inputs: {str(bool(cfg.dog.observe_clock_inputs)).lower()}
   observe_lin_vel: {str(bool(cfg.dog.observe_lin_vel)).lower()}
   observe_pose_actual: {str(bool(cfg.dog.observe_pose_actual)).lower()}
   observe_track_error: {str(bool(cfg.dog.observe_track_error)).lower()}
@@ -604,7 +607,7 @@ def export(logdir, rl_sar_root=None, ckpt_id="last", robot=None,
     log(f"[export_rl_sar] wrote {base_yaml}")
     log(f"[export_rl_sar] wrote {out_dir / 'config.yaml'}")
     log(f"[export_rl_sar] wrote {out_dir / 'policy.pt'}")
-    if bool(cfg.dog.observe_lin_vel) or bool(cfg.dog.observe_pose_actual):
+    if any((cfg.dog.observe_lin_vel, cfg.dog.observe_pose_actual, cfg.dog.observe_track_error)):
         log("[export_rl_sar] NOTE: this policy observes base linear velocity "
             "and/or base height. rl_sar must be fed a state estimate "
             "(RobotState::base.lin_vel in BODY frame, base.position in WORLD frame).")
