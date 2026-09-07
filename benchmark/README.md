@@ -94,10 +94,44 @@ conda run -n roboduet python -m benchmark.cli \
 ```bash
 conda run -n roboduet python -m benchmark.cli --wbc \
   --logdirs runs/run_A runs/run_B --names A B --headless \
-  --num_envs_per_policy 16 --bank_seed 12345 --bank_per_cell 8
+  --total_envs 4096 --bank_seed 12345 --bank_per_cell 8
 ```
 
-WBC benchmark 会按完整 dog+arm/trajectory layout 自动拆组，使用确定的 held-out bank rows，按 wave 并行执行，并输出 `trajectory_suite.json`、cell/wave aggregate 与逐轨迹结果。`--suite_rows_per_cell 0` 表示评估 bank 中每个 cell 的所有轨迹。`--arm_only` 仍是预留模式。
+`--total_envs` 是同一个 layout group 的总环境预算。benchmark 会把 `难度 cell × bank row` 展平成逻辑任务，并在兼容方法之间自动平均分配容量；一个物理 env 只跑一条具体轨迹。默认完整 suite 是 `6 × 6 × 8 = 288` 个任务，所以单方法只创建 288 env、两个兼容方法创建 576 env，并在一个 wave 内完成；预算不足时才拆成多个 wave。旧的 `--num_envs_per_policy` 仍可作为兼容覆盖参数，但新实验建议统一使用 `--total_envs`。
+
+同时录制 6 条代表性轨迹：
+
+```bash
+conda run -n roboduet python -m benchmark.cli --wbc \
+  --logdirs runs/run_A runs/run_B --names A B --headless \
+  --total_envs 4096 --record_representative_videos \
+  --num_representative_videos 6
+```
+
+代表轨迹默认从 `(A,B)=(0,0)...(5,5)` 的难度对角线中各选一条接近该 cell 特征中位数的轨迹，选择过程与 policy 指标无关。也可以用 `--video_bank_rows 3 51 99 147 195 243` 固定指定。录像使用单环境回放，橙色线是 reference trajectory，绿色线是实际 EE trajectory；HTML 按“行=难度轨迹、列=方法”展示。
+
+WBC benchmark 会输出 `results.json`、`metadata.json`、`trajectory_suite.json`；开启录像后还会输出 `representative_videos.json`、`videos/<method>/*.mp4`、poster 图片，并把视频矩阵加入 HTML。`metadata.json` 中的 `layout_groups[*].schedule` 记录逻辑任务数、每 wave 数量、实际容量和 wave 数。录像是在定量测评结束后用单环境逐条回放，不会给 288/4096 个测评环境同时创建相机。`--suite_rows_per_cell 0` 表示评估 bank 中每个 cell 的所有轨迹。`--arm_only` 仍是预留模式。
+
+### WBC GPU 测试顺序
+
+先运行小规模 smoke（只测 `(0,0)` cell 的 8 条轨迹，并录 1 条代表视频）：
+
+```bash
+conda run -n roboduet python -m benchmark.cli --wbc \
+  --logdirs runs/<date>/<run> --names main_policy --headless \
+  --total_envs 4096 --smoke --num_eval_steps 500 --settle_steps 10 \
+  --record_representative_videos
+```
+
+确认结果目录中有 `results.json`、`trajectory_suite.json`、`index.html` 和可播放的 `videos/main_policy/*.mp4` 后，再跑完整 288 条：
+
+```bash
+conda run -n roboduet python -m benchmark.cli --wbc \
+  --logdirs runs/<date>/<run> --names main_policy --headless \
+  --total_envs 4096 --bank_seed 12345 --bank_per_cell 8 \
+  --num_eval_steps 500 --settle_steps 20 \
+  --record_representative_videos --num_representative_videos 6
+```
 
 ## Compatibility
 

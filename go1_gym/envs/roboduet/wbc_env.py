@@ -2016,7 +2016,26 @@ class WBCEnv(LeggedRobot):
             return
         for i in range(len(px) - 1):
             if valid[i] and valid[i + 1]:
-                cv2.line(frame, tuple(px[i]), tuple(px[i + 1]), (60, 180, 255, 255), 1, cv2.LINE_AA)
+                cv2.line(frame, tuple(px[i]), tuple(px[i + 1]), (255, 150, 40, 255), 1, cv2.LINE_AA)
+
+        trace = getattr(self, "_recording_ee_trace", None)
+        if trace is not None:
+            trace.append(
+                self.end_effector_state[env_id, :3].detach().cpu().numpy().astype(np.float32)
+            )
+            if len(trace) > 1200:
+                del trace[:-1200]
+            if len(trace) >= 2:
+                trace_np = np.asarray(trace, dtype=np.float32)
+                pxe, ve = self._project_world_points_to_camera(
+                    trace_np, env_handle, camera_handle
+                )
+                for i in range(len(pxe) - 1):
+                    if ve[i] and ve[i + 1]:
+                        cv2.line(
+                            frame, tuple(pxe[i]), tuple(pxe[i + 1]),
+                            (30, 255, 80, 255), 2, cv2.LINE_AA,
+                        )
 
         tcfg = self.cfg.wbc.goal_reaching.trajectory
         _, p_k, _, _ = tb.sample_preview(self.traj_s, float(tcfg.preview_horizon), int(tcfg.preview_points))
@@ -2024,14 +2043,17 @@ class WBCEnv(LeggedRobot):
         pxk, vk = self._project_world_points_to_camera(pk_np, env_handle, camera_handle)
         for i in range(len(pxk)):
             if vk[i]:
-                cv2.circle(frame, tuple(pxk[i]), 3, (0, 200, 255, 255), -1, cv2.LINE_AA)
+                cv2.circle(frame, tuple(pxk[i]), 3, (255, 190, 0, 255), -1, cv2.LINE_AA)
 
     def _arm_render_overlay_hook(self, frame, env_id, env_handle, camera_handle):
         self._overlay_trajectory_video(frame, env_id, env_handle, camera_handle)
         self._overlay_policy_trajectory(frame, env_id, env_handle, camera_handle)
         if self.cfg.env.recording_overlay_text:
             self._overlay_policy_text(frame, env_id)
-
+            cv2.putText(
+                frame, "reference: orange   actual EE: green", (12, frame.shape[0] - 12),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 255, 255, 255), 1, cv2.LINE_AA,
+            )
 
     def _arm_jacobian(self):
         """(num_envs, 6, num_actions_arm) world-frame Jacobian of the EE body

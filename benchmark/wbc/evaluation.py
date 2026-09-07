@@ -70,14 +70,16 @@ WBC_COMPAT_PATHS = [
 ]
 
 
-WBC_SHARED_ENV_COMPAT_PATHS = tuple(dict.fromkeys(
-    list(CRITICAL_COMPAT_CFG_PATHS) + WBC_COMPAT_PATHS
-))
+WBC_SHARED_ENV_COMPAT_PATHS = tuple(
+    dict.fromkeys(list(CRITICAL_COMPAT_CFG_PATHS) + WBC_COMPAT_PATHS)
+)
 
 
 def _freeze_compat_value(value):
     if isinstance(value, dict):
-        return tuple(sorted((key, _freeze_compat_value(item)) for key, item in value.items()))
+        return tuple(
+            sorted((key, _freeze_compat_value(item)) for key, item in value.items())
+        )
     if isinstance(value, (list, tuple)):
         return tuple(_freeze_compat_value(item) for item in value)
     return value
@@ -119,6 +121,7 @@ def load_wbc_env_benchmark(
     robot: Optional[str] = None,
     bank_seed: int = 12345,
     bank_per_cell: Optional[int] = None,
+    record_video: bool = False,
 ):
     """Build the checkpoint's env at ``total_envs`` with evaluation overrides.
 
@@ -128,11 +131,21 @@ def load_wbc_env_benchmark(
     """
     cfg = _load_cfg_from_pkl(logdir, robot=robot)
     _apply_benchmark_env_overrides(cfg, total_envs, envs_per_policy)
+    cfg.env.record_video = bool(record_video)
+    if record_video:
+        cfg.env.recording_overlay_trajectory = True
+        cfg.env.recording_overlay_text = True
 
     # Candidate slices start from identical nominal reset states. Per-env asset
     # buckets still repeat with envs_per_policy, preserving paired mount props.
-    for attr in ("x_init_range", "y_init_range", "z_init_range",
-                 "yaw_init_range", "roll_init_range", "pitch_init_range"):
+    for attr in (
+        "x_init_range",
+        "y_init_range",
+        "z_init_range",
+        "yaw_init_range",
+        "roll_init_range",
+        "pitch_init_range",
+    ):
         if hasattr(cfg.terrain, attr):
             setattr(cfg.terrain, attr, 0.0)
     cfg.terrain.reset_curriculum = False
@@ -140,9 +153,13 @@ def load_wbc_env_benchmark(
     for stage_name in ("stage1_arm", "stage2_arm"):
         stage = getattr(cfg.domain_rand, stage_name, None)
         if stage is not None:
-            for attr in ("randomize_Kp_factor", "randomize_Kd_factor",
-                         "randomize_motor_strength", "randomize_motor_offset",
-                         "randomize_ee_payload"):
+            for attr in (
+                "randomize_Kp_factor",
+                "randomize_Kd_factor",
+                "randomize_motor_strength",
+                "randomize_motor_offset",
+                "randomize_ee_payload",
+            ):
                 if hasattr(stage, attr):
                     setattr(stage, attr, False)
 
@@ -162,9 +179,7 @@ def load_wbc_env_benchmark(
     return HistoryWrapper(env), cfg
 
 
-def load_wbc_policies(
-    logdir: str, ckpt_id: str, cfg, device: str = "cuda:0"
-):
+def load_wbc_policies(logdir: str, ckpt_id: str, cfg, device: str = "cuda:0"):
     """(dog_policy, arm_policy), both resident on ``device``."""
     from scripts.load_policy import load_arm_policy, load_dog_policy
 
@@ -227,10 +242,16 @@ class WBCAccumulator(Accumulator):
         candidate = torch.where(mask, value, torch.full_like(value, -torch.inf))
         torch.maximum(self._stats[stat_key], candidate, out=self._stats[stat_key])
 
-    def _maximum(self, key: str) -> float:
+    def _indices(self, indices=None):
+        if indices is None:
+            return torch.arange(self.n, device=self.dev, dtype=torch.long)
+        return torch.as_tensor(indices, device=self.dev, dtype=torch.long)
+
+    def _maximum(self, key: str, indices=None) -> float:
         values = self._stats.get(f"{key}_max")
         if values is None:
             return 0.0
+        values = values[self._indices(indices)]
         finite = values[torch.isfinite(values)]
         return float(finite.max().cpu()) if finite.numel() else 0.0
 
@@ -258,9 +279,9 @@ class WBCAccumulator(Accumulator):
         measure = active & ~done
         self.exposure_steps.add_(active.float())
 
-        ee = env.end_effector_state[s:e]            # (n, 13)
-        goal_p = env.arm_goal_pos_world[s:e]         # (n, 3)
-        goal_q = env.arm_goal_quat_world[s:e]        # (n, 4)
+        ee = env.end_effector_state[s:e]  # (n, 13)
+        goal_p = env.arm_goal_pos_world[s:e]  # (n, 3)
+        goal_q = env.arm_goal_quat_world[s:e]  # (n, 4)
 
         # EE position / orientation error
         pos_err2 = (goal_p - ee[:, :3]).pow(2).sum(dim=-1)
@@ -277,10 +298,14 @@ class WBCAccumulator(Accumulator):
         self._add_val("d_lat", env.traj_d_lat[s:e], measure)
         self._add_val("timing_err_abs", env.traj_timing_err[s:e].abs(), measure)
         self._add_val("sdot_meas", env.traj_sdot_meas[s:e], measure)
-        progress = (env.traj_s[s:e] / env.traj_batch.L[s:e].clamp_min(1e-6)).clamp(max=1.0)
+        progress = (env.traj_s[s:e] / env.traj_batch.L[s:e].clamp_min(1e-6)).clamp(
+            max=1.0
+        )
         self._add_val("progress", progress, measure)
         self.final_progress[:] = torch.where(measure, progress, self.final_progress)
-        self.success_progress = float(env.cfg.wbc.goal_reaching.trajectory.success_progress)
+        self.success_progress = float(
+            env.cfg.wbc.goal_reaching.trajectory.success_progress
+        )
 
         # Reach utilisation
         rho_g = env.goal_rho[s:e]
@@ -303,14 +328,18 @@ class WBCAccumulator(Accumulator):
         self._add_val("util_ratio", ratio, measure & base_active)
 
         # Motor power
-        arm_slice = slice(env.num_actions_loco, env.num_actions_loco + env.num_actions_arm)
-        power = (env.torques[s:e, arm_slice] * env.dof_vel[s:e, arm_slice]).abs().sum(dim=-1)
+        arm_slice = slice(
+            env.num_actions_loco, env.num_actions_loco + env.num_actions_arm
+        )
+        power = (
+            (env.torques[s:e, arm_slice] * env.dof_vel[s:e, arm_slice])
+            .abs()
+            .sum(dim=-1)
+        )
         self._add_val("motor_power", power, measure)
 
         # Full vectors for physically meaningful finite differences.
-        ee_offset_world = quat_apply(
-            ee[:, 3:7], env.ee_local_offset.expand(e - s, -1)
-        )
+        ee_offset_world = quat_apply(ee[:, 3:7], env.ee_local_offset.expand(e - s, -1))
         ee_velocity = ee[:, 7:10] + torch.cross(ee[:, 10:13], ee_offset_world, dim=-1)
         self._ee_velocities.append(ee_velocity.clone())
         self._base_velocities.append(base_velocity.clone())
@@ -330,7 +359,9 @@ class WBCAccumulator(Accumulator):
 
     # -- smoothness summary (offline, called once per scenario point) -------
 
-    def _fd_norm_stats(self, signal_list: List[torch.Tensor], dt: float, order: int):
+    def _fd_norm_stats(
+        self, signal_list: List[torch.Tensor], dt: float, order: int, indices=None
+    ):
         """Differentiate vectors, then summarize their Euclidean norms.
 
         The validity mask is differentiated alongside the signal so no sample
@@ -340,6 +371,9 @@ class WBCAccumulator(Accumulator):
             return None
         sig = torch.stack(signal_list, dim=0)  # (T, N, D)
         valid = torch.stack(self._smoothness_valid, dim=0)  # (T, N)
+        selected = self._indices(indices)
+        sig = sig[:, selected]
+        valid = valid[:, selected]
         for _ in range(order):
             sig = (sig[1:] - sig[:-1]) / dt
             valid = valid[1:] & valid[:-1]
@@ -354,14 +388,18 @@ class WBCAccumulator(Accumulator):
             p99=float(values.float().quantile(0.99).cpu()),
         )
 
-    def smoothness_summary(self, dt: float) -> dict:
+    def smoothness_summary(self, dt: float, indices=None) -> dict:
         return dict(
-            ee_accel=self._fd_norm_stats(self._ee_velocities, dt, 1),
-            ee_jerk=self._fd_norm_stats(self._ee_velocities, dt, 2),
-            base_accel=self._fd_norm_stats(self._base_velocities, dt, 1),
-            base_jerk=self._fd_norm_stats(self._base_velocities, dt, 2),
-            arm_joint_accel=self._fd_norm_stats(self._arm_dof_velocities, dt, 1),
-            arm_joint_jerk=self._fd_norm_stats(self._arm_dof_velocities, dt, 2),
+            ee_accel=self._fd_norm_stats(self._ee_velocities, dt, 1, indices),
+            ee_jerk=self._fd_norm_stats(self._ee_velocities, dt, 2, indices),
+            base_accel=self._fd_norm_stats(self._base_velocities, dt, 1, indices),
+            base_jerk=self._fd_norm_stats(self._base_velocities, dt, 2, indices),
+            arm_joint_accel=self._fd_norm_stats(
+                self._arm_dof_velocities, dt, 1, indices
+            ),
+            arm_joint_jerk=self._fd_norm_stats(
+                self._arm_dof_velocities, dt, 2, indices
+            ),
         )
 
     def _sample_mean(self, key: str) -> float:
@@ -376,21 +414,31 @@ class WBCAccumulator(Accumulator):
 
     def per_env_summary(self, index: int, dt: float) -> dict:
         def mean(key):
-            total = self._stats.get(f"{key}_sum", torch.zeros(self.n, device=self.dev))[index]
-            count = self._stats.get(f"{key}_samples", torch.zeros(self.n, device=self.dev))[index]
+            total = self._stats.get(f"{key}_sum", torch.zeros(self.n, device=self.dev))[
+                index
+            ]
+            count = self._stats.get(
+                f"{key}_samples", torch.zeros(self.n, device=self.dev)
+            )[index]
             return float((total / count.clamp_min(1.0)).cpu())
 
         def rmse(key):
-            total = self._stats.get(f"{key}_sq", torch.zeros(self.n, device=self.dev))[index]
-            count = self._stats.get(f"{key}_samples", torch.zeros(self.n, device=self.dev))[index]
+            total = self._stats.get(f"{key}_sq", torch.zeros(self.n, device=self.dev))[
+                index
+            ]
+            count = self._stats.get(
+                f"{key}_samples", torch.zeros(self.n, device=self.dev)
+            )[index]
             return float(torch.sqrt(total / count.clamp_min(1.0)).cpu())
 
         def count(key):
-            return int(self._stats.get(key, torch.zeros(self.n, device=self.dev))[index].item())
+            return int(
+                self._stats.get(key, torch.zeros(self.n, device=self.dev))[index].item()
+            )
 
-        completed = bool(self.final_progress[index].item() >= self.success_progress) and not bool(
-            count("fall") + count("traj_early_term")
-        )
+        completed = bool(
+            self.final_progress[index].item() >= self.success_progress
+        ) and not bool(count("fall") + count("traj_early_term"))
         return dict(
             ee_pos_rmse_m=rmse("ee_pos_err"),
             ee_pos_mae_m=mean("ee_pos_err_l1"),
@@ -412,36 +460,61 @@ class WBCAccumulator(Accumulator):
 
     def wbc_summary(self, dt: float) -> dict:
         """All WBC metrics for this scenario point, as a plain dict."""
-        episodes = max(float(self.episode_count.sum().item()), 1.0)
-        completed = float((self.final_progress >= self.success_progress).float().mul(
-            1.0 - self._stats.get("fall", torch.zeros(self.n, device=self.dev)).clamp(max=1.0)
-        ).mul(
-            1.0 - self._stats.get("traj_early_term", torch.zeros(self.n, device=self.dev)).clamp(max=1.0)
-        ).sum().item())
+        return self.wbc_summary_for_indices(None, dt)
+
+    def wbc_summary_for_indices(self, indices, dt: float) -> dict:
+        """Pooled summary for an arbitrary subset of this wave env slots."""
+        selected = self._indices(indices)
+
+        def stat_sum(key):
+            values = self._stats.get(key, torch.zeros(self.n, device=self.dev))
+            return float(values[selected].sum().item())
+
+        def sample_mean(key):
+            return stat_sum(f"{key}_sum") / max(stat_sum(f"{key}_samples"), 1.0)
+
+        def sample_rmse(key):
+            return (stat_sum(f"{key}_sq") / max(stat_sum(f"{key}_samples"), 1.0)) ** 0.5
+
+        episodes = max(float(self.episode_count[selected].sum().item()), 1.0)
+        fall = self._stats.get("fall", torch.zeros(self.n, device=self.dev))[selected]
+        early = self._stats.get(
+            "traj_early_term", torch.zeros(self.n, device=self.dev)
+        )[selected]
+        completed = float(
+            (self.final_progress[selected] >= self.success_progress)
+            .float()
+            .mul(1.0 - fall.clamp(max=1.0))
+            .mul(1.0 - early.clamp(max=1.0))
+            .sum()
+            .item()
+        )
         return dict(
-            ee_pos_rmse_m=self._sample_rmse("ee_pos_err"),
-            ee_pos_mae_m=self._sample_mean("ee_pos_err_l1"),
-            ee_rot_rmse_rad=self._sample_rmse("ee_rot_err"),
-            ee_rot_mae_rad=self._sample_mean("ee_rot_err"),
-            d_lat_mean_m=self._sample_mean("d_lat"),
-            timing_err_mean_m=self._sample_mean("timing_err_abs"),
-            progress_mean=self._sample_mean("progress"),
-            rho_mean=self._sample_mean("rho"),
-            rho_max=self._maximum("rho"),
-            rho_above_hi_rate=(self.total_count("rho_above_hi") / max(self.total_count("rho_valid"), 1)),
-            base_util_mean=self._sample_mean("util_ratio"),
-            v_ff_xy_mean=self._sample_mean("v_ff_xy"),
-            v_base_xy_mean=self._sample_mean("v_base_xy"),
-            motor_power_mean_w=self._sample_mean("motor_power"),
-            manipulability_mean=self._sample_mean("manipulability"),
-            fall_rate=(self.total_count("fall") / episodes),
-            timeout_rate=(self.total_count("timed_out") / episodes),
-            traj_early_term_rate=(self.total_count("traj_early_term") / episodes),
+            ee_pos_rmse_m=sample_rmse("ee_pos_err"),
+            ee_pos_mae_m=sample_mean("ee_pos_err_l1"),
+            ee_rot_rmse_rad=sample_rmse("ee_rot_err"),
+            ee_rot_mae_rad=sample_mean("ee_rot_err"),
+            d_lat_mean_m=sample_mean("d_lat"),
+            timing_err_mean_m=sample_mean("timing_err_abs"),
+            progress_mean=sample_mean("progress"),
+            rho_mean=sample_mean("rho"),
+            rho_max=self._maximum("rho", selected),
+            rho_above_hi_rate=(
+                stat_sum("rho_above_hi") / max(stat_sum("rho_valid"), 1.0)
+            ),
+            base_util_mean=sample_mean("util_ratio"),
+            v_ff_xy_mean=sample_mean("v_ff_xy"),
+            v_base_xy_mean=sample_mean("v_base_xy"),
+            motor_power_mean_w=sample_mean("motor_power"),
+            manipulability_mean=sample_mean("manipulability"),
+            fall_rate=(stat_sum("fall") / episodes),
+            timeout_rate=(stat_sum("timed_out") / episodes),
+            traj_early_term_rate=(stat_sum("traj_early_term") / episodes),
             completion_rate=(completed / episodes),
             incomplete_rate=(max(episodes - completed, 0.0) / episodes),
             n_episodes=int(episodes),
-            smoothness=self.smoothness_summary(dt),
-            n_env_steps=int(self.exposure_steps.sum().item()),
+            smoothness=self.smoothness_summary(dt, selected),
+            n_env_steps=int(self.exposure_steps[selected].sum().item()),
         )
 
 
@@ -453,6 +526,7 @@ class WBCAccumulator(Accumulator):
 @dataclass
 class WBCPolicyHandle:
     """One policy pair + its env slice."""
+
     name: str
     dog_policy: Callable
     arm_policy: Callable
@@ -481,7 +555,11 @@ def _wbc_step_all(
     n_dog = base.num_actions_loco
     N = base.num_envs
     full_arm_actions = torch.zeros(N, n_arm, device=gpu)
-    plan_actions = torch.zeros(N, env.num_plan_actions, device=gpu) if env.num_plan_actions > 0 else None
+    plan_actions = (
+        torch.zeros(N, env.num_plan_actions, device=gpu)
+        if env.num_plan_actions > 0
+        else None
+    )
     full_dog_actions = torch.zeros(N, n_dog, device=gpu)
 
     with torch.no_grad():
