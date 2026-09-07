@@ -340,6 +340,13 @@ if __name__ == "__main__":
         "the M2 direction-dependent reachability table.",
     )
 
+    parser.add_argument(
+        "--clock_free_gait",
+        action="store_true",
+        default=False,
+        help="Train the locomotion gait with the clock-free reward table (rewards.gait_reward_mode='clock_free'): contact-stopwatch trot sync, leg-symmetry and foot-geometry terms ported from robot_lab replace tracking_contacts_shaped_*, feet_clearance_cmd_linear and raibert_heuristic, none of which the actor can satisfy once dog.observe_clock_inputs is off. Omit to keep the clock-based table.",
+    )
+
     args = parser.parse_args()
 
     main(args)

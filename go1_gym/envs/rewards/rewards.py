@@ -366,3 +366,191 @@ class Rewards:
         reward = torch.sum(torch.square(err_raibert_heuristic), dim=(1, 2))
 
         return reward
+
+    # ------------------------------------------------------------------
+    # Clock-free gait rewards (ported from robot_lab's
+    # tasks/manager_based/locomotion/velocity/mdp/rewards.py).
+    #
+    # The stock gait terms -- tracking_contacts_shaped_force/vel,
+    # feet_clearance_cmd_linear, raibert_heuristic -- all score the robot
+    # against desired_contact_states / foot_indices, i.e. the absolute phase
+    # of _step_contact_targets' clock. That phase resets to 0 on episode
+    # reset and is then integrated from the gait_frequency command, so with
+    # dog.observe_clock_inputs off the actor is being graded against a target
+    # it cannot see. These terms replace that with quantities the robot
+    # measures for itself: contact stopwatches, foot positions/velocities and
+    # joint angles. Selected by rewards.gait_reward_mode -- see
+    # config/core.set_gait_reward_mode.
+    #
+    # Every term carries robot_lab's upright gate: a tumbling robot has feet
+    # nowhere near any sane target, and an ungated gait cost then explodes
+    # exactly when the policy most needs the rest of its reward signal. That
+    # is the failure mode the stage1_sim2real_abl_4/7/9 runs died of, where
+    # raibert's per-step cost reached -0.21 and the ji22 shaping's
+    # exp(rew_neg / 0.02) factor collapsed the total reward to ~0.
+    # ------------------------------------------------------------------
+
+    def _gait_upright_gate(self):
+        """1 while level, fading to 0 as the base tips past ~45 deg."""
+        return torch.clamp(-self.env.projected_gravity[:, 2], 0.0, 0.7) / 0.7
+
+    def _gait_moving_gate(self):
+        """1 where a nonzero velocity command is being given, else 0.
+
+        Gait shaping must not fight the stand-still behaviour: at zero command
+        _step_contact_targets pins every foot to the stance phase, and these
+        terms would otherwise keep demanding a trot.
+        """
+        cmd = torch.norm(self.env.commands_dog[:, :3], dim=1)
+        return (cmd > 0.1).float()
+
+    def _gait_diagonal_pairs(self):
+        """Foot index pairs that swing together in a trot.
+
+        feet_indices follows the URDF body order FL, FR, RL, RR (the same
+        order desired_contact_states is written in), so the diagonals are
+        (FL, RR) = (0, 3) and (FR, RL) = (1, 2).
+        """
+        return (0, 3), (1, 2)
+
+    def _reward_gait_sync(self):
+        """Trot timing from contact stopwatches alone -- no clock.
+
+        Positive, in [0, 1]: 1 when both diagonals are perfectly in phase with
+        each other and perfectly out of phase with the other diagonal. Being
+        bounded and positive matters under rewards.only_positive_rewards_ji22
+        _style, where it lands in rew_buf_pos and multiplies the total instead
+        of entering the exp(rew_neg / sigma_rew_neg) factor the way an
+        unbounded cost like raibert_heuristic does.
+
+        Replaces tracking_contacts_shaped_force + tracking_contacts_shaped_vel.
+        """
+        cfg = self.env.cfg.rewards
+        std = cfg.gait_sync_sigma
+        max_err_sq = cfg.gait_sync_max_err ** 2
+        air = self.env.feet_air_time
+        contact = self.env.feet_contact_time
+
+        def sync(a, b):
+            # Two feet that swing together: their air times should match, and
+            # so should their contact times.
+            se_air = torch.clip(torch.square(air[:, a] - air[:, b]), max=max_err_sq)
+            se_con = torch.clip(torch.square(contact[:, a] - contact[:, b]), max=max_err_sq)
+            return torch.exp(-(se_air + se_con) / std)
+
+        def async_(a, b):
+            # Two feet on opposite diagonals: one's air time should match the
+            # other's contact time, in both directions.
+            se_0 = torch.clip(torch.square(air[:, a] - contact[:, b]), max=max_err_sq)
+            se_1 = torch.clip(torch.square(contact[:, a] - air[:, b]), max=max_err_sq)
+            return torch.exp(-(se_0 + se_1) / std)
+
+        (p0_a, p0_b), (p1_a, p1_b) = self._gait_diagonal_pairs()
+        in_sync = sync(p0_a, p0_b) * sync(p1_a, p1_b)
+        out_of_sync = (
+            async_(p0_a, p1_a) * async_(p0_b, p1_b) * async_(p0_a, p1_b) * async_(p1_a, p0_b)
+        )
+        return in_sync * out_of_sync * self._gait_moving_gate() * self._gait_upright_gate()
+
+    def _reward_feet_air_time_variance(self):
+        """Cost: spread of the four legs' completed swing/stance durations.
+
+        This is the direct measure of "one leg is not doing what the other
+        three do" -- the asymmetric-gait symptom -- and it needs neither the
+        clock nor any velocity estimate. Clipped at 0.5 s so a foot parked in
+        stance (e.g. during a stumble) cannot dominate the variance.
+        """
+        clip_s = self.env.cfg.rewards.gait_air_time_clip
+        var = torch.var(torch.clip(self.env.last_air_time, max=clip_s), dim=1) + torch.var(
+            torch.clip(self.env.last_contact_time, max=clip_s), dim=1
+        )
+        return var * self._gait_upright_gate()
+
+    def _reward_joint_mirror(self):
+        """Cost: the two trot diagonals should be mirror images of each other.
+
+        robot_lab compares raw joint angles, which only works when every leg
+        shares one default pose. Here they do not -- init_state.default_joint
+        _angles mirrors the hips (FL/RL +0.1, FR/RR -0.1) and gives the rear
+        thighs a different nominal (1.0) from the front (0.8) -- so the
+        comparison is made on deviations from each joint's own default, and
+        the hip term is a *sum* rather than a difference because a mirrored
+        pose has hip deviations of opposite sign on opposite sides.
+
+        Needs no clock, no contact sensor and no velocity estimate: it is a
+        pure symmetry prior on the joint angles.
+        """
+        n = self.env.num_actions_loco
+        dev = self.env.dof_pos[:, :n] - self.env.default_dof_pos[:, :n]
+        # dof order is FL, FR, RL, RR with (hip, thigh, calf) per leg.
+        leg = dev.view(self.env.num_envs, 4, 3)
+        (p0_a, p0_b), (p1_a, p1_b) = self._gait_diagonal_pairs()
+        reward = 0.0
+        for a, b in ((p0_a, p0_b), (p1_a, p1_b)):
+            hip = torch.square(leg[:, a, 0] + leg[:, b, 0])
+            thigh_calf = torch.sum(torch.square(leg[:, a, 1:] - leg[:, b, 1:]), dim=1)
+            reward = reward + hip + thigh_calf
+        return reward / 2.0 * self._gait_upright_gate()
+
+    def _reward_feet_stance_width(self):
+        """Positive, in [0, 1]: keep the feet at the commanded lateral stance.
+
+        This is raibert_heuristic's lateral half rewritten as a bounded
+        exponential. raibert_heuristic is an unbounded sum of squared errors
+        that, at scale -10, reached -0.05/step in healthy runs and -0.21/step
+        in falling ones -- enough on its own to drive the ji22 shaping's
+        multiplicative factor to 1e-5. This form cannot do that: it is
+        positive and saturates at 1.
+
+        Uses only the commanded stance width and the feet's own body-frame
+        positions, so it is independent of both the clock and the base
+        velocity estimate.
+        """
+        feet_body = self._feet_positions_body_frame()
+        if self.env.cfg.commands.use_dynamic_gait:
+            stance_width = self.env.commands_dog[:, 8]
+        else:
+            stance_width = torch.full((self.env.num_envs,), 0.3, device=self.env.device)
+        # Body +y is left; feet_indices order FL, FR, RL, RR alternates sides.
+        side_sign = torch.tensor([1.0, -1.0, 1.0, -1.0], device=self.env.device)
+        desired_ys = (stance_width.unsqueeze(1) / 2.0) * side_sign.unsqueeze(0)
+        err = torch.sum(torch.square(desired_ys - feet_body[:, :, 1]), dim=1)
+        reward = torch.exp(-err / self.env.cfg.rewards.gait_stance_width_sigma)
+        return reward * self._gait_upright_gate()
+
+    def _reward_feet_swing_height(self):
+        """Cost: swing-foot clearance, without asking the clock who is swinging.
+
+        feet_clearance_cmd_linear weights the height error by
+        (1 - desired_contact_states), i.e. by the clock's opinion of which feet
+        are in swing. Here the weight is tanh(k * |foot horizontal velocity|),
+        which identifies swing feet from their own motion instead. The height
+        target is body-relative so it does not need an estimated base height.
+        """
+        cfg = self.env.cfg.rewards
+        feet_body = self._feet_positions_body_frame()
+        foot_vel_body = self._feet_velocities_body_frame()
+        z_err = torch.square(feet_body[:, :, 2] - cfg.gait_swing_height_target)
+        swinging = torch.tanh(cfg.gait_swing_tanh_mult * torch.norm(foot_vel_body[:, :, :2], dim=2))
+        reward = torch.sum(z_err * swinging, dim=1)
+        return reward * self._gait_moving_gate() * self._gait_upright_gate()
+
+    def _feet_positions_body_frame(self):
+        """Foot positions relative to the base, in the base frame."""
+        translated = self.env.foot_positions - self.env.base_pos.unsqueeze(1)
+        out = torch.zeros_like(translated)
+        base_conj = quat_conjugate(self.env.base_quat)
+        for i in range(4):
+            out[:, i, :] = quat_apply(base_conj, translated[:, i, :])
+        return out
+
+    def _feet_velocities_body_frame(self):
+        """Foot velocities relative to the base, in the base frame."""
+        # foot_velocities is world-frame; subtract the base's own world
+        # velocity so a fast-moving robot does not read as four swinging feet.
+        translated = self.env.foot_velocities - self.env.root_states[: self.env.num_envs, 7:10].unsqueeze(1)
+        out = torch.zeros_like(translated)
+        base_conj = quat_conjugate(self.env.base_quat)
+        for i in range(4):
+            out[:, i, :] = quat_apply(base_conj, translated[:, i, :])
+        return out

@@ -370,6 +370,8 @@ class LeggedRobot(BaseTask):
         ]
         self.foot_positions = self.rigid_body_state.view(self.num_envs, self.num_bodies, 13)[:, self.feet_indices, 0:3]
 
+        self._update_foot_contact_times()
+
         self._arm_post_physics_hook()
 
         self._post_physics_step_callback()
@@ -398,6 +400,40 @@ class LeggedRobot(BaseTask):
             self._draw_debug_vis()
 
         self._render_headless()
+
+    def _update_foot_contact_times(self):
+        """Per-foot air/contact stopwatches, the clock-free gait rewards' only
+        source of timing (see Rewards._reward_gait_sync / _reward_feet_air_time
+        _variance). Mirrors IsaacLab's ContactSensor bookkeeping:
+
+          feet_air_time / feet_contact_time -- time elapsed in the phase the
+              foot is in *right now*, zero while it is in the other phase.
+          last_air_time / last_contact_time -- duration of the most recently
+              *completed* phase of each kind, held until the next one ends.
+
+        A dedicated _gait_last_contacts is kept instead of reusing
+        last_contacts: _reward_feet_slip overwrites that one as a side effect
+        during compute_reward(), i.e. after this runs, so sharing it would make
+        the debounce depend on reward-registration order.
+        """
+        contact = self.contact_forces[:, self.feet_indices, 2] > 1.0
+        # Same one-step debounce _reward_feet_slip uses: PhysX reports the
+        # occasional zero-force frame mid-stance, which would otherwise split
+        # one stance into two and halve the measured contact time.
+        contact_filt = torch.logical_or(contact, self._gait_last_contacts)
+        self._gait_last_contacts[:] = contact
+
+        touchdown = contact_filt & (self.feet_air_time > 0.0)
+        liftoff = (~contact_filt) & (self.feet_contact_time > 0.0)
+        self.last_air_time = torch.where(touchdown, self.feet_air_time, self.last_air_time)
+        self.last_contact_time = torch.where(liftoff, self.feet_contact_time, self.last_contact_time)
+
+        self.feet_air_time = torch.where(
+            contact_filt, torch.zeros_like(self.feet_air_time), self.feet_air_time + self.dt
+        )
+        self.feet_contact_time = torch.where(
+            contact_filt, self.feet_contact_time + self.dt, torch.zeros_like(self.feet_contact_time)
+        )
 
     def check_termination(self):
         """Check if environments need to be reset"""
@@ -444,6 +480,10 @@ class LeggedRobot(BaseTask):
         self.last_dof_vel[env_ids] = 0.0
         self.dog_vel_ref[env_ids] = 0.0
         self.feet_air_time[env_ids] = 0.0
+        self.feet_contact_time[env_ids] = 0.0
+        self.last_air_time[env_ids] = 0.0
+        self.last_contact_time[env_ids] = 0.0
+        self._gait_last_contacts[env_ids] = False
         self.episode_length_buf[env_ids] = 0
         self.reset_buf[env_ids] = 1
         # fill extras
@@ -1836,8 +1876,15 @@ class LeggedRobot(BaseTask):
             requires_grad=False,
         )
 
+        # Foot air/contact stopwatches -- see _update_foot_contact_times.
         self.feet_air_time = torch.zeros(
             self.num_envs, self.feet_indices.shape[0], dtype=torch.float, device=self.device, requires_grad=False
+        )
+        self.feet_contact_time = torch.zeros_like(self.feet_air_time)
+        self.last_air_time = torch.zeros_like(self.feet_air_time)
+        self.last_contact_time = torch.zeros_like(self.feet_air_time)
+        self._gait_last_contacts = torch.zeros(
+            self.num_envs, len(self.feet_indices), dtype=torch.bool, device=self.device, requires_grad=False
         )
         self.last_contacts = torch.zeros(
             self.num_envs, len(self.feet_indices), dtype=torch.bool, device=self.device, requires_grad=False

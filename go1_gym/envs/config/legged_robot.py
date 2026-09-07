@@ -306,6 +306,29 @@ class LeggedRobotDefaults:
         # Time constant (s) of the first-order low-pass reference model that
         # response_consistency tracks: v_ref += (v_cmd - v_ref) * dt / T.
         response_consistency_T = 0.4
+        # Which gait shaping is active. 'clock' = the stock terms scored
+        # against _step_contact_targets' phase (tracking_contacts_shaped_
+        # force/vel, feet_clearance_cmd_linear, raibert_heuristic).
+        # 'clock_free' = the contact-stopwatch/symmetry terms ported from
+        # robot_lab, for training with dog.observe_clock_inputs off. Set via
+        # config.core.set_gait_reward_mode, which rewrites the reward scales;
+        # writing this field alone changes nothing.
+        gait_reward_mode = "clock"
+        # _reward_gait_sync: exp(-squared timing error / sigma), with each
+        # squared term clipped at max_err^2 so one badly out-of-phase foot
+        # saturates instead of zeroing the whole product.
+        gait_sync_sigma = 0.5
+        gait_sync_max_err = 0.2
+        # _reward_feet_air_time_variance: cap (s) on each measured phase
+        # duration before the variance is taken.
+        gait_air_time_clip = 0.5
+        # _reward_feet_stance_width: exp(-lateral error^2 / sigma).
+        gait_stance_width_sigma = 0.25
+        # _reward_feet_swing_height: body-frame target foot height (m, negative
+        # = below the base) and the gain of the tanh(|v_xy|) swing detector
+        # that replaces the clock's (1 - desired_contact_states) weight.
+        gait_swing_height_target = -0.25
+        gait_swing_tanh_mult = 2.0
 
     class reward_scales:
         termination = -0.0
@@ -333,6 +356,13 @@ class LeggedRobotDefaults:
         action_smoothness_2 = 0.
         feet_impact_vel = 0.0
         raibert_heuristic = 0.0
+        # Clock-free gait shaping (rewards.gait_reward_mode == 'clock_free').
+        # Zero here; set_gait_reward_mode fills in the live values.
+        gait_sync = 0.0
+        feet_air_time_variance = 0.0
+        joint_mirror = 0.0
+        feet_stance_width = 0.0
+        feet_swing_height = 0.0
 
     class normalization:
         clip_observations = 100.

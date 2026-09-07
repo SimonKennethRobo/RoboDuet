@@ -185,6 +185,10 @@ class RoboDuetRuntimeOptions:
     # of the M2 direction-dependent table -- the ablation the design doc's
     # A.3 calls for (2D table vs sphere approximation).
     reach_table: bool = True
+    # 'clock' | 'clock_free' | None. None keeps whatever the wbc.py override
+    # tables set (currently 'clock'); a value swaps the gait reward table via
+    # set_gait_reward_mode. Pair 'clock_free' with --no_clock_inputs.
+    gait_reward_mode: str = None
 
     @classmethod
     def from_args(cls, args):
@@ -199,6 +203,10 @@ class RoboDuetRuntimeOptions:
             traj_tracking=getattr(args, "traj_tracking", False),
             arm_action_mode=getattr(args, "arm_action_mode", None),
             reach_table=not getattr(args, "no_reach_table", False),
+            gait_reward_mode=(
+                "clock_free" if getattr(args, "clock_free_gait", False)
+                else getattr(args, "gait_reward_mode", None)
+            ),
         )
 
 
@@ -626,6 +634,104 @@ def validate_arm_action_mode(cfg):
         )
 
 
+# Gait shaping, selected by rewards.gait_reward_mode. The tables write
+# cfg.reward_scales.* -- _prepare_reward_function copies any name absent from
+# cfg.wbc.reward_scales into the stage-2 table at the same value, so one entry
+# drives both stages. A nonzero entry is deliberately *not* mirrored into
+# cfg.wbc.reward_scales: that table carries stage-2-specific tuning (e.g.
+# raibert_heuristic at -1.0 rather than stage 1's -10.0) which must survive a
+# mode switch. Zero entries are mirrored, because a name left nonzero there
+# would keep a clock-based term alive in stage 2 after clock_free turned it
+# off in stage 1 -- see set_gait_reward_mode.
+GAIT_REWARD_MODES = {
+    # Scored against _step_contact_targets' absolute phase. Requires
+    # dog.observe_clock_inputs, or the actor is graded on a target it cannot
+    # observe. These are the stock wtw.py values.
+    "clock": {
+        "tracking_contacts_shaped_force": 4.0,
+        "tracking_contacts_shaped_vel": 4.0,
+        "feet_clearance_cmd_linear": -30.0,
+        "raibert_heuristic": -10.0,
+        "gait_sync": 0.0,
+        "feet_air_time_variance": 0.0,
+        "joint_mirror": 0.0,
+        "feet_stance_width": 0.0,
+        "feet_swing_height": 0.0,
+    },
+    # Contact stopwatches, foot geometry and joint symmetry only -- nothing
+    # reads foot_indices or desired_contact_states. Scales are chosen against
+    # the ji22 shaping in use here (only_positive_rewards_ji22_style with
+    # sigma_rew_neg=0.02), where the total is rew_pos * exp(rew_neg / 0.02):
+    # a negative term costs a factor exp(scale * dt * value / 0.02), so at
+    # dt=0.02 a per-step product of -0.02 already costs 37% of the reward.
+    # gait_sync and feet_stance_width are bounded positives and land in
+    # rew_pos, so they cannot close that gate at all; the three costs below
+    # are sized to stay well inside it. Raise joint_mirror toward -1.0/-2.0
+    # if the symmetry effect is too weak, and watch rew_total for the
+    # collapse signature.
+    "clock_free": {
+        "tracking_contacts_shaped_force": 0.0,
+        "tracking_contacts_shaped_vel": 0.0,
+        "feet_clearance_cmd_linear": 0.0,
+        "raibert_heuristic": 0.0,
+        "gait_sync": 2.0,
+        "feet_air_time_variance": -2.0,
+        "joint_mirror": -0.5,
+        "feet_stance_width": 1.0,
+        "feet_swing_height": -20.0,
+    },
+}
+
+
+def set_gait_reward_mode(cfg, mode):
+    """Swap the gait shaping between the clock-based and clock-free tables.
+
+    ``mode=None`` leaves cfg alone, so the override tables in wbc.py stay the
+    source of truth and the CLI flag is a genuine override (same convention as
+    set_arm_action_mode).
+
+    Changes no observation or action dimension, so it is safe to flip on a
+    resume -- but the two tables optimise different objectives, and a policy
+    trained under one is not comparable to one trained under the other.
+    """
+    if mode is None:
+        return
+    if mode not in GAIT_REWARD_MODES:
+        raise ValueError(
+            f"Unknown rewards.gait_reward_mode {mode!r}; expected one of {sorted(GAIT_REWARD_MODES)}"
+        )
+    cfg.rewards.gait_reward_mode = mode
+    for name, scale in GAIT_REWARD_MODES[mode].items():
+        setattr(cfg.reward_scales, name, scale)
+        # Disabling has to reach stage 2 as well: wbc.reward_scales overrides
+        # the stage-1 value, so leaving it nonzero would keep a clock-based
+        # term scoring the WBC policy against a phase the actor cannot see.
+        # Enabling deliberately does not, so stage-2-specific tuning survives.
+        if scale == 0.0 and hasattr(cfg.wbc.reward_scales, name):
+            setattr(cfg.wbc.reward_scales, name, 0.0)
+
+
+def validate_gait_reward_mode(cfg):
+    """Warn when the gait shaping and the clock observation disagree.
+
+    Not an error: 'clock' shaping without clock_inputs is exactly the ablation
+    stage1_sim2real_abl_2/8/9/10 ran, and 'clock_free' shaping with the clock
+    still observed is a harmless superset. But the first combination grades the
+    actor against a phase it cannot see, which is easy to do by accident and
+    hard to spot in the logs, so say so out loud.
+    """
+    mode = getattr(cfg.rewards, "gait_reward_mode", "clock")
+    observes_clock = bool(getattr(cfg.dog, "observe_clock_inputs", True))
+    if mode == "clock" and not observes_clock:
+        print(
+            "[config] WARNING: rewards.gait_reward_mode='clock' but "
+            "dog.observe_clock_inputs is off -- tracking_contacts_shaped_*, "
+            "feet_clearance_cmd_linear and raibert_heuristic all score against "
+            "the gait phase, which the actor cannot observe. Use "
+            "--clock_free_gait, or turn the clock observation back on."
+        )
+
+
 def set_arm_action_mode(cfg, mode):
     """Override how the actor's 6 arm action dims become joint position targets.
 
@@ -714,6 +820,8 @@ def build_roboduet_config(args=None, *, options=None, debug=False):
     if options.traj_tracking:
         enable_traj_tracking(cfg, layout)
     set_arm_action_mode(cfg, options.arm_action_mode)
+    set_gait_reward_mode(cfg, options.gait_reward_mode)
+    validate_gait_reward_mode(cfg)
     if not options.reach_table:
         cfg.wbc.goal_reaching.reach_table_path = ""
 
