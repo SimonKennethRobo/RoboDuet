@@ -329,8 +329,34 @@ class LeggedRobotDefaults:
         # that replaces the clock's (1 - desired_contact_states) weight.
         gait_swing_height_target = -0.25
         gait_swing_tanh_mult = 2.0
+        # How _reward_raibert_heuristic scores placement error.
+        # 'quadratic' = the legacy unbounded cost (needs a NEGATIVE
+        # reward_scales.raibert_heuristic); it enters rew_buf_neg and, under
+        # only_positive_rewards_ji22_style, gates the whole reward.
+        # 'exp' = exp(-err / raibert_sigma), bounded in [0, 1] (needs a
+        # POSITIVE scale); it enters rew_buf_pos and is purely additive.
+        # validate_raibert_form rejects a form/sign mismatch.
+        raibert_form = 'quadratic'
+        # Error (m^2, summed over 4 feet x 2 axes) at which the 'exp' form
+        # decays to 1/e. Calibrated against real stage1_sim2real_abl_{4,5,13,
+        # 14,15} placement errors (raibert_heuristic's episode sum / episode
+        # length / -10, the scale actually in effect for every one of those
+        # runs -- see resolve_reward_scales for why the wbc.py value some of
+        # them appeared to use was never read): ~0.15-0.34 for runs that
+        # trained, ~0.59-0.66 for the ones that stumbled/collapsed early.
+        # 0.35 keeps both ends off the exp() saturation shelf (good=0.20 ->
+        # 0.57, bad=0.65 -> 0.16, a 3.6x spread); an earlier 0.05 guess,
+        # calibrated from an arithmetic error, saturated the entire observed
+        # range to ~0 and would have carried no gradient at all.
+        raibert_sigma = 0.35
 
     class reward_scales:
+        # This is the "stage 1" / "pretrained" reward table -- its sibling is
+        # cfg.wbc.reward_scales ("stage 2" / "wbc"), NOT a value this one
+        # feeds into. Setting a name here does nothing for stage 2, and does
+        # nothing for stage 1 EITHER if that same name sits in cfg.wbc.
+        # reward_scales at exactly 0.0. See config.core.resolve_reward_scales
+        # and the comment above GAIT_REWARD_MODES in config/core.py.
         termination = -0.0
         tracking_lin_vel = 1.0
         tracking_ang_vel = 0.5

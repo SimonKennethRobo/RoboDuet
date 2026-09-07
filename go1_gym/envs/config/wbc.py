@@ -223,6 +223,18 @@ COMMON_OVERRIDES = {
     "rewards.terminal_body_height": 0.17,
     "reward_scales.loco_energy": -0.00004,
     "reward_scales.response_consistency": -0.05,
+
+    "rewards.raibert_form": "quad",
+    "reward_scales.raibert_heuristic": -2,
+    "reward_scales.raibert_sigma": 0.35,
+
+    "rewards.gait_reward_mode": "clock",
+    # "reward_scales.gait_sync": 2.0,
+    # "reward_scales.feet_air_time_variance": -2.0,
+    # "reward_scales.joint_mirror": -2,
+    # "reward_scales.feet_stance_width": 1.0,
+    # "reward_scales.feet_swing_height": -20.0,
+
     # domain randomization: base & mount
     "domain_rand.dog_obs_frame_drop_prob": 0.0,
     "domain_rand.added_mass_range": [-2.0, 2.0],
@@ -333,6 +345,11 @@ STAGE2_OVERRIDES = {
     "wbc.reward_scales.arm_contact": -1.0,
     "wbc.reward_scales.jump": 5.0,
     "wbc.reward_scales.hip_action_l2": -0.05,
+    # Stage 2's OWN value for this name -- it does not derive from, and does
+    # not gate, reward_scales.raibert_heuristic in wtw.py (stage 1's value).
+    # The two are co-equal sibling tables; see the comment above
+    # config.core.resolve_reward_scales for how registration and value
+    # selection actually work.
     "wbc.reward_scales.raibert_heuristic": -1.0,
     "wbc.rewards.terminal_body_height": 0.17,
     "wbc.rewards.use_terminal_body_height": True,

@@ -187,6 +187,8 @@ if __name__ == '__main__':
     parser.add_argument('--dyna_gait', action='store_true', default=False)
     parser.add_argument('--clock_free_gait', action='store_true', default=False,
                         help="Train the locomotion gait with the clock-free reward table (rewards.gait_reward_mode='clock_free'): contact-stopwatch trot sync, leg-symmetry and foot-geometry terms ported from robot_lab replace tracking_contacts_shaped_*, feet_clearance_cmd_linear and raibert_heuristic, none of which the actor can satisfy once dog.observe_clock_inputs is off. Omit to keep the clock-based table.")
+    parser.add_argument('--raibert_exp', action='store_true', default=False,
+                        help="Score raibert_heuristic as exp(-err/raibert_sigma), a bounded reward in [0,1] with a positive scale, instead of the legacy unbounded squared-error cost. Removes its multiplicative effect: under rewards.only_positive_rewards_ji22_style the cost form gates the whole reward by exp(scale*err), which is what collapsed stage1_sim2real_abl_4/7/9/11.")
 
     args = parser.parse_args()
 

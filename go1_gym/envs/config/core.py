@@ -189,6 +189,10 @@ class RoboDuetRuntimeOptions:
     # tables set (currently 'clock'); a value swaps the gait reward table via
     # set_gait_reward_mode. Pair 'clock_free' with --no_clock_inputs.
     gait_reward_mode: str = None
+    # 'quadratic' | 'exp' | None. None keeps the config default (currently
+    # 'quadratic', the legacy multiplicative cost). 'exp' makes
+    # raibert_heuristic a bounded additive reward -- see set_raibert_form.
+    raibert_form: str = None
 
     @classmethod
     def from_args(cls, args):
@@ -206,6 +210,10 @@ class RoboDuetRuntimeOptions:
             gait_reward_mode=(
                 "clock_free" if getattr(args, "clock_free_gait", False)
                 else getattr(args, "gait_reward_mode", None)
+            ),
+            raibert_form=(
+                "exp" if getattr(args, "raibert_exp", False)
+                else getattr(args, "raibert_form", None)
             ),
         )
 
@@ -634,6 +642,69 @@ def validate_arm_action_mode(cfg):
         )
 
 
+# ============================================================
+# cfg.reward_scales and cfg.wbc.reward_scales are two CO-EQUAL SIBLING
+# tables, not a namespace/override pair -- despite "wbc." reading like a
+# sub-namespace the way every other wbc.* field is. They are read by
+# global_switch.get_reward_scales(): "stage 1" (a.k.a. "pretrained") reads
+# cfg.reward_scales; "stage 2" (a.k.a. "wbc") reads cfg.wbc.reward_scales;
+# a --train_stage two_stage run interpolates between them; a --train_stage
+# stage1 run pins the switch threshold past the end of training, so it ALWAYS
+# reads cfg.reward_scales and cfg.wbc.reward_scales is never consulted for
+# its VALUES at all.
+#
+# But both tables still matter for stage-1-only training, for a second and
+# entirely different reason: LeggedRobot._prepare_reward_function's merge
+# step decides, ONCE, which reward names get computed *at all* (a single
+# reward_names list shared by every stage -- get_reward_scales only ever
+# picks which VALUES those names use). A name absent from cfg.wbc.reward_
+# scales inherits cfg.reward_scales' value into the registration check; a
+# name PRESENT there at exactly 0.0 does not, and is dropped for every
+# stage regardless of cfg.reward_scales. Before the fix below, that dropped
+# raibert_heuristic silently for six weeks (2026-07-26 to 2026-09-05, commit
+# 15a4581) purely because wbc.py had it at -0.0 to mean "off for stage 2" --
+# a --train_stage stage1 run was affected exactly as much as a two_stage one,
+# and nothing in the log said so.
+#
+# Use resolve_reward_scales(cfg) to answer "is X actually computed, and with
+# what value in each stage" from a plain cfg object -- no simulator, no env,
+# no live run needed. Every ad-hoc reimplementation of this merge (there have
+# been several, each risking drifting from the real algorithm) should go
+# through this function instead.
+def resolve_reward_scales(cfg):
+    """Non-mutating preview of _prepare_reward_function's registration logic.
+
+    Returns {name: {"stage1": float, "stage2": float | None, "active": bool}}
+    for every key appearing in either cfg.reward_scales or cfg.wbc.reward_
+    scales. "stage2" is None when the name is absent from cfg.wbc.reward_
+    scales (i.e. it would inherit "stage1" into the registration check, per
+    the comment above). "active" is a single flag, not one per stage: exactly
+    one reward_names list is built and walked in every stage, so a name is
+    either computed everywhere or nowhere.
+
+    dt does not affect any of this (scaling by a positive dt never changes
+    whether a value is zero), so this reports the raw config scales, not the
+    dt-scaled values LeggedRobot._parse_cfg/_prepare_reward_function compute
+    at env creation.
+    """
+    stage1 = {k: v for k, v in vars(cfg.reward_scales).items() if not k.startswith("_")}
+    stage2 = {k: v for k, v in vars(cfg.wbc.reward_scales).items() if not k.startswith("_")}
+
+    # Matches _prepare_reward_function's fixed pop condition directly, rather
+    # than replaying its dict-mutation sequence (an earlier version of this
+    # function did that and reproduced the *pre-fix* bug: dict-mutation order
+    # matters and is easy to get subtly wrong, so state the invariant instead
+    # of re-deriving it procedurally).
+    return {
+        name: {
+            "stage1": stage1.get(name, 0.0),
+            "stage2": stage2.get(name),
+            "active": stage1.get(name, 0.0) != 0 or stage2.get(name, 0.0) != 0,
+        }
+        for name in set(stage1) | set(stage2)
+    }
+
+
 # Gait shaping, selected by rewards.gait_reward_mode. The tables write
 # cfg.reward_scales.* -- _prepare_reward_function copies any name absent from
 # cfg.wbc.reward_scales into the stage-2 table at the same value, so one entry
@@ -709,6 +780,74 @@ def set_gait_reward_mode(cfg, mode):
         # Enabling deliberately does not, so stage-2-specific tuning survives.
         if scale == 0.0 and hasattr(cfg.wbc.reward_scales, name):
             setattr(cfg.wbc.reward_scales, name, 0.0)
+
+
+# Paired (form, stage-1 scale, stage-2 scale) presets for
+# _reward_raibert_heuristic. The sign is part of the form, not a free
+# parameter: 'quadratic' returns a cost and 'exp' returns a bounded reward.
+RAIBERT_FORMS = {
+    "quadratic": {"reward_scales": -10.0, "wbc": -1.0},
+    # exp lands in rew_buf_pos and adds rather than gates. Calibrated (with
+    # rewards.raibert_sigma=0.35) against the real rew_pos budget of a healthy
+    # run -- tracking_lin_vel + tracking_ang_vel summed to ~18.4 over an
+    # episode in stage1_sim2real_abl_14 -- so that a mostly-well-placed foot
+    # (reward around 0.5-0.6/step, see raibert_sigma's comment) contributes
+    # roughly 20% of that, not enough to dominate velocity tracking, still
+    # enough to matter. Stage 2 gets half: it has EE tracking to leave room
+    # for. Both numbers are a calibration by formula, not yet confirmed by an
+    # actual 'exp'-form training run -- no run in stage1_sim2real_abl_1..15
+    # used this form, they were all 'quadratic' regardless of what the table
+    # said (see resolve_reward_scales).
+    "exp": {"reward_scales": 0.4, "wbc": 0.2},
+}
+
+
+def set_raibert_form(cfg, form):
+    """Switch _reward_raibert_heuristic between the cost and bounded forms.
+
+    ``form=None`` leaves cfg alone. Anything else rewrites both the form and
+    the matching scales together -- flipping the form without flipping the
+    sign would reward bad foot placement, and nothing downstream would catch
+    it, so the two are never settable independently through this path.
+    """
+    if form is None:
+        return
+    if form not in RAIBERT_FORMS:
+        raise ValueError(f"Unknown rewards.raibert_form {form!r}; expected one of {sorted(RAIBERT_FORMS)}")
+    cfg.rewards.raibert_form = form
+    scales = RAIBERT_FORMS[form]
+    # Only rescale a term that is actually live: gait_reward_mode='clock_free'
+    # zeroes raibert on purpose, and that must not be undone here.
+    if cfg.reward_scales.raibert_heuristic != 0.0:
+        cfg.reward_scales.raibert_heuristic = scales["reward_scales"]
+    if getattr(cfg.wbc.reward_scales, "raibert_heuristic", 0.0) != 0.0:
+        cfg.wbc.reward_scales.raibert_heuristic = scales["wbc"]
+
+
+def validate_raibert_form(cfg):
+    """Reject a raibert form whose scale has the wrong sign.
+
+    'quadratic' returns a cost and 'exp' returns a bounded reward, so a scale
+    carried over from the other form flips the objective: the policy would be
+    paid to put its feet in the wrong place. That trains quietly to a
+    plausible-looking reward curve, so it is an error, not a warning.
+    """
+    form = getattr(cfg.rewards, "raibert_form", "quadratic")
+    if form not in RAIBERT_FORMS:
+        raise ValueError(f"Unknown rewards.raibert_form {form!r}; expected one of {sorted(RAIBERT_FORMS)}")
+    wanted = "positive" if form == "exp" else "negative"
+    for label, scale in (
+        ("reward_scales.raibert_heuristic", cfg.reward_scales.raibert_heuristic),
+        ("wbc.reward_scales.raibert_heuristic", getattr(cfg.wbc.reward_scales, "raibert_heuristic", 0.0)),
+    ):
+        if scale == 0.0:
+            continue  # disabled; sign is meaningless
+        if (form == "exp") != (scale > 0):
+            raise ValueError(
+                f"rewards.raibert_form='{form}' needs a {wanted} {label}, got {scale}. "
+                f"The 'exp' form returns a bounded reward in [0, 1] and the 'quadratic' "
+                f"form returns an unbounded cost -- use set_raibert_form so the two stay paired."
+            )
 
 
 def validate_gait_reward_mode(cfg):
@@ -822,6 +961,8 @@ def build_roboduet_config(args=None, *, options=None, debug=False):
     set_arm_action_mode(cfg, options.arm_action_mode)
     set_gait_reward_mode(cfg, options.gait_reward_mode)
     validate_gait_reward_mode(cfg)
+    set_raibert_form(cfg, options.raibert_form)
+    validate_raibert_form(cfg)
     if not options.reach_table:
         cfg.wbc.goal_reaching.reach_table_path = ""
 

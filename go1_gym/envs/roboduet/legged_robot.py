@@ -2064,9 +2064,20 @@ class LeggedRobot(BaseTask):
                 self.wbc_reward_scales[name] = scale
 
         # remove WBC-side zero scales (dt-scaling above turns them into
-        # exactly 0 too, so this also catches those)
+        # exactly 0 too, so this also catches those) -- EXCEPT a name stage 1
+        # still wants nonzero. Registration below walks self.wbc_reward_scales
+        # in *both* stages (compute_reward has one reward_names list, not one
+        # per stage -- see global_switch.get_reward_scales, which only
+        # switches which VALUES are used, not which names are computed), so
+        # dropping a name here means it is never computed in stage 1 either,
+        # however nonzero cfg.reward_scales.<name> is. That silently disabled
+        # raibert_heuristic for six weeks (2026-07-26 to 2026-09-05, commit
+        # 15a4581): wbc.py set it to -0.0 meaning "off for stage 2", and it
+        # went missing from stage-1 runs too, with no error and no changed log
+        # key. See config.core.resolve_reward_scales to check which rewards
+        # are actually registered without needing a live run to find out.
         for key in list(self.wbc_reward_scales.keys()):
-            if self.wbc_reward_scales[key] == 0:
+            if self.wbc_reward_scales[key] == 0 and key not in self.pretrained_reward_scales:
                 self.wbc_reward_scales.pop(key)
 
         # prepare list of functions
