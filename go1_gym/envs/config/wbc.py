@@ -224,7 +224,7 @@ COMMON_OVERRIDES = {
     "reward_scales.loco_energy": -0.00004,
     "reward_scales.response_consistency": -0.05,
 
-    "rewards.raibert_form": "quad",
+    "rewards.raibert_form": "quadratic",
     "reward_scales.raibert_heuristic": -2,
     "reward_scales.raibert_sigma": 0.35,
 

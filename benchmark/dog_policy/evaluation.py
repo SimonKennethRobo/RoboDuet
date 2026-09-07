@@ -18,6 +18,7 @@ from go1_gym.envs.config import (
     build_roboduet_config,
     configure_privileged_obs_dims,
     recompute_observation_dims,
+    restore_dog_observation_layout,
 )
 from go1_gym.envs.config.wbc import ROBODUET_OVERRIDES
 from go1_gym.utils.global_switch import global_switch
@@ -190,7 +191,7 @@ def load_dog_policy_for_benchmark(
     mismatches = [
         f"{key}: checkpoint={dims[key]} env={expected}"
         for key, expected in expected_dims.items()
-        if dims[key] != expected
+        if key != "use_adaptation_module" and dims[key] != expected
     ]
     if mismatches:
         raise ValueError(
@@ -290,6 +291,14 @@ class BenchmarkHistoryWrapper(HistoryWrapper):
 
     def _detect_dog_obs_mode(self) -> str:
         saved = int(self.benchmark_dog_dims["dog_num_observations"])
+        legacy_env = self._checkpoint_cfg.get("env", {})
+        if (
+            "observation_layout_version" not in self._checkpoint_cfg.get("dog", {})
+            and not legacy_env.get("ext_est_obs", True)
+        ):
+            dropped = bool(legacy_env.get("del_ext_obs_dim", False))
+            if saved == self._runtime_dog_obs_dim - (7 if dropped else 0):
+                return "legacy_no_estimator_dropped" if dropped else "legacy_no_estimator_zeroed"
         if saved == self._runtime_dog_obs_dim:
             return "native"
 
@@ -385,9 +394,34 @@ class BenchmarkHistoryWrapper(HistoryWrapper):
         arm_vel = b.dof_vel[:, arm_slice] * b.obs_scales.dof_vel
         return torch.cat((obs, arm_pos, arm_vel), dim=-1)
 
+    def _adapt_estimator_observation(self, obs: torch.Tensor) -> torch.Tensor:
+        # Match the historical ext_est_obs split using runtime segment names.
+        excluded = {
+            "base_lin_vel": (0, 1, 2),
+            "body_pose_actual": (0,),
+            "body_pose_error": (0,),
+            "velocity_error": (0, 1),
+        }
+        indices = []
+        offset = 0
+        for name, width, *_ in self.env._dog_obs_layout():
+            indices.extend(offset + i for i in excluded.get(name, ()))
+            offset += width
+        if offset != obs.shape[1] or len(indices) != 7:
+            raise AssertionError("Runtime dog layout cannot reconstruct legacy estimator channels")
+        if self._dog_obs_mode == "legacy_no_estimator_dropped":
+            keep = [i for i in range(offset) if i not in indices]
+            return obs[:, keep]
+        obs = obs.clone()
+        obs[:, indices] = 0.0
+        return obs
+
     def get_dog_observations(self):
         if self._dog_obs_mode == "native":
             obs, privileged_obs = self.env.get_dog_observations()
+        elif self._dog_obs_mode.startswith("legacy_no_estimator_"):
+            obs, privileged_obs = self.env.get_dog_observations()
+            obs = self._adapt_estimator_observation(obs)
         elif self._dog_obs_mode == "native_plus_ee_pose":
             obs, privileged_obs = self.env.get_dog_observations()
             arm_state_width = 2 * self.env.num_actions_arm
@@ -610,6 +644,13 @@ CRITICAL_COMPAT_CFG_PATHS = [
     "env.observe_only_lin_vel",
     "env.observe_yaw",
     "env.observe_contact_states",
+    "env.ext_est_obs",
+    "env.del_ext_obs_dim",
+    "dog.observation_layout_version",
+    "dog.observe_clock_inputs",
+    "dog.observe_lin_vel",
+    "dog.observe_pose_actual",
+    "dog.observe_track_error",
     "wbc.use_vision",
     "use_rot6d",
 ]
@@ -720,7 +761,20 @@ def _load_cfg_from_pkl(logdir: str, robot: Optional[str] = None) -> ConfigNode:
         checkpoint_asset_file = cfg_snapshot.get("asset", {}).get("file")
         apply_config_snapshot(cfg, cfg_snapshot, drop_unknown=True)
     _ensure_asset_file(cfg, robot=robot, checkpoint_asset_file=checkpoint_asset_file)
-    recompute_observation_dims(cfg)
+    if "observation_layout_version" in cfg_snapshot.get("dog", {}):
+        # Checkpoint was saved with the switch-aware layout: trust it to
+        # reconcile exactly, and surface a real mismatch instead of masking
+        # it behind the generic legacy-adapter error.
+        restore_dog_observation_layout(cfg, cfg_snapshot)
+    else:
+        # Predates the dog.* observation-switch layout (e.g. arm.trajectory-era
+        # checkpoints); BenchmarkHistoryWrapper's legacy adapters reconstruct
+        # the policy-facing observation for these instead.
+        cfg.dog.observation_layout_version = 1
+        cfg.dog.observe_clock_inputs = cfg_snapshot.get("env", {}).get("observe_clock_inputs", True)
+        for name in ("observe_lin_vel", "observe_pose_actual", "observe_track_error"):
+            setattr(cfg.dog, name, cfg_snapshot.get("dog", {}).get(name, True))
+        recompute_observation_dims(cfg)
     return cfg
 
 
