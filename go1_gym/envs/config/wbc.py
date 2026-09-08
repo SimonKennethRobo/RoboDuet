@@ -227,11 +227,18 @@ COMMON_OVERRIDES = {
     # see ppo.py's time_outs handling) well before it becomes unrecoverable,
     # instead of the episode continuing to simulate an already-toppled robot.
     "rewards.terminal_body_ori": math.radians(60.0),
+    # terrain.{roll,pitch}_init_range (+-pi at full reset-curriculum intensity,
+    # see below) can reset a env past the 60 deg check above on frame zero --
+    # without a grace window every such env terminates on its first
+    # check_termination() call, before gravity/PD control even settles it,
+    # let alone before it gets a real chance to recover. Same pattern as
+    # wbc.goal_reaching.trajectory.terminate_grace_s elsewhere in this file.
+    "rewards.terminal_roll_pitch_grace_s": 1.0,
     "reward_scales.loco_energy": -0.00004,
     "reward_scales.response_consistency": -0.05,
 
     "rewards.raibert_form": "quadratic",
-    "reward_scales.raibert_heuristic": -2,
+    "reward_scales.raibert_heuristic": -1,
     "reward_scales.raibert_sigma": 0.35,
 
     "rewards.gait_reward_mode": "clock",

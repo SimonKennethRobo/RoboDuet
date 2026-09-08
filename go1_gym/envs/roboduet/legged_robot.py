@@ -455,6 +455,9 @@ class LeggedRobot(BaseTask):
             self.roll_pitch_buf = (torch.abs(self.roll) > self.cfg.rewards.terminal_body_ori) | (
                 torch.abs(self.pitch) > self.cfg.rewards.terminal_body_ori
             )
+            grace_steps = int(self.cfg.rewards.terminal_roll_pitch_grace_s / self.dt)
+            if grace_steps > 0:
+                self.roll_pitch_buf &= self.episode_length_buf > grace_steps
             self.reset_buf = torch.logical_or(self.roll_pitch_buf, self.reset_buf)
 
         self._arm_check_termination_hook()

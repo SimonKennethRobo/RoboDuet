@@ -299,6 +299,7 @@ class LeggedRobotDefaults:
         terminal_foot_height = -0.005
         use_terminal_roll_pitch = False
         terminal_body_ori = 0.5
+        terminal_roll_pitch_grace_s = 0.  # skip the roll/pitch terminal check for this long after a reset
         kappa_gait_probs = 0.07
         gait_force_sigma = 50.
         gait_vel_sigma = 0.5
