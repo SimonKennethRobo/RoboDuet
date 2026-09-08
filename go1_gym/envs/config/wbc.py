@@ -237,6 +237,11 @@ COMMON_OVERRIDES = {
     "reward_scales.loco_energy": -0.00004,
     "reward_scales.response_consistency": -0.05,
 
+    "reward_scales.feet_impact_vel": -0.02,
+    "reward_scales.feet_contact_forces": -0.01,
+    # "commands.footswing_height_range": [0.04, 0.041],
+    # "commands.limit_footswing_height": [0.04, 0.041],
+
     "rewards.raibert_form": "quadratic",
     "reward_scales.raibert_heuristic": -1,
     "reward_scales.raibert_sigma": 0.35,
@@ -262,7 +267,7 @@ COMMON_OVERRIDES = {
     # predictable pattern to (over)fit to, not a stand-in for a real
     # disturbance, which never arrives on a metronome.
     "domain_rand.push_robots": True,
-    "domain_rand.max_push_vel_xy": 1.5,
+    "domain_rand.max_push_vel_xy": 0.5,
     "domain_rand.push_interval_s_range": [1.0, 8.0],
     # max_push_vel_xy/max_push_ang_vel above are the CEILING the curriculum
     # ramps up to, not the push strength from iteration 0. Deliberately a
