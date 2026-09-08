@@ -451,6 +451,12 @@ class LeggedRobot(BaseTask):
         rpy = quaternion_to_rpy(self.base_quat)
         self.roll, self.pitch, self.y = rpy[:, 0], rpy[:, 1], rpy[:, 2]
 
+        if self.cfg.rewards.use_terminal_roll_pitch:
+            self.roll_pitch_buf = (torch.abs(self.roll) > self.cfg.rewards.terminal_body_ori) | (
+                torch.abs(self.pitch) > self.cfg.rewards.terminal_body_ori
+            )
+            self.reset_buf = torch.logical_or(self.roll_pitch_buf, self.reset_buf)
+
         self._arm_check_termination_hook()
         self.reset_buf |= self.reverse_buf
 

@@ -221,6 +221,12 @@ COMMON_OVERRIDES = {
     # namespace shared by pretrained-dog and WBC reward tables alike (see
     # LeggedRobot._prepare_reward_function's pretrained -> wbc fallback merge)
     "rewards.terminal_body_height": 0.17,
+    # wtw.py's terminal_body_ori (1.6 rad ~= 92 deg) is already past horizontal,
+    # i.e. it only fires once the robot has essentially finished tipping over.
+    # Tightened to 60 deg so a near-tip gets a clean terminal (zero-bootstrap,
+    # see ppo.py's time_outs handling) well before it becomes unrecoverable,
+    # instead of the episode continuing to simulate an already-toppled robot.
+    "rewards.terminal_body_ori": math.radians(60.0),
     "reward_scales.loco_energy": -0.00004,
     "reward_scales.response_consistency": -0.05,
 
@@ -236,6 +242,36 @@ COMMON_OVERRIDES = {
     # "reward_scales.feet_swing_height": -20.0,
 
     # domain randomization: base & mount
+    # go1.py/wtw.py both disable push_robots; re-enabled here so stage1 (and
+    # stage2, which shares this termination/push path) actually experiences
+    # mid-episode disturbances to recover from, not just extreme reset poses.
+    # max_push_vel_xy kept below the legged_robot.py default (1.0) so early
+    # training isn't dominated by pushes that blow straight through the
+    # terminal_body_ori boundary above before any recovery can be learned;
+    # push_interval_s shortened from the base 15s so a 20s episode sees
+    # several pushes instead of at most one.
+    "domain_rand.push_robots": True,
+    "domain_rand.max_push_vel_xy": 0.5,
+    "domain_rand.push_interval_s": 6,
+    # Checked against runs/2026-09-08/stage1_gait_reward_{1,3,4}_* (25000-iter
+    # runs, wtw.py defaults: threshold 0.6, growth 60000): reset_curriculum_
+    # started never fires in any of them. reset_curriculum_tracking_score_ema
+    # rises to ~0.30 by iter ~8000-10000 and then plateaus at ~0.33-0.37 for
+    # the rest of training (run3/run4 are flat from iter 12000 to 24000) --
+    # 0.6 isn't "not reached yet", it's above the ceiling this reward/noise
+    # setup actually reaches, so the gate never opens and intensity sits at
+    # its initial_fraction (0.1) for the entire run. Lowered below that
+    # observed plateau, with margin for push_robots (enabled above) pulling
+    # tracking score down further since none of those 3 runs had it on.
+    "terrain.reset_curriculum_tracking_threshold": 0.25,
+    # 60000 assumed a training run far longer than the ~25000-iteration
+    # budget actually used here; even starting from iteration 0 it only
+    # reaches ~47% intensity by iteration 25000. Shortened so intensity can
+    # reach 1.0 with several thousand iterations left afterward at full
+    # range, instead of asymptoting partway. Combined with the threshold fix
+    # above (start ~iter 8000-10000) this reaches full range by ~iter
+    # 16000-18000, leaving room to consolidate before the 25000 cutoff.
+    "terrain.reset_curriculum_growth_iterations": 8000,
     "domain_rand.dog_obs_frame_drop_prob": 0.0,
     "domain_rand.added_mass_range": [-2.0, 2.0],
     "domain_rand.randomize_lag_timesteps": False,
