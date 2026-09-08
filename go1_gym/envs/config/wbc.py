@@ -255,11 +255,31 @@ COMMON_OVERRIDES = {
     # max_push_vel_xy kept below the legged_robot.py default (1.0) so early
     # training isn't dominated by pushes that blow straight through the
     # terminal_body_ori boundary above before any recovery can be learned;
-    # push_interval_s shortened from the base 15s so a 20s episode sees
-    # several pushes instead of at most one.
+    # push_interval_s_range shortened from the base 15s so a 20s episode sees
+    # several pushes instead of at most one, and randomized per-push (instead
+    # of one fixed period) so every env doesn't get pushed at the exact same
+    # phase of every episode relative to its own reset -- a fixed period is a
+    # predictable pattern to (over)fit to, not a stand-in for a real
+    # disturbance, which never arrives on a metronome.
     "domain_rand.push_robots": True,
-    "domain_rand.max_push_vel_xy": 0.5,
-    "domain_rand.push_interval_s": 6,
+    "domain_rand.max_push_vel_xy": 1.5,
+    "domain_rand.push_interval_s_range": [1.0, 8.0],
+    # max_push_vel_xy/max_push_ang_vel above are the CEILING the curriculum
+    # ramps up to, not the push strength from iteration 0. Deliberately a
+    # plain iteration-linear ramp (no tracking-score gate, unlike
+    # reset_curriculum below) -- that gate turned out to need real training
+    # data to calibrate (see the reset_curriculum_tracking_threshold note
+    # right below) and a wrongly-tuned gate fails silently (stays at its
+    # initial fraction forever, as reset_curriculum did before that fix).
+    # A push at full strength barely matters to a random iteration-0 policy
+    # anyway, so there's little to lose from a fixed, simple linear ramp:
+    # growth_iterations chosen to land in the same iter-8000-ish window
+    # reset_curriculum's own (data-derived) ramp uses, so pushes are near
+    # full strength once locomotion is far enough along for recovery to be a
+    # meaningful skill, not before.
+    "domain_rand.push_curriculum": True,
+    "domain_rand.push_curriculum_initial_fraction": 0.0,
+    "domain_rand.push_curriculum_growth_iterations": 8000,
     # Checked against runs/2026-09-08/stage1_gait_reward_{1,3,4}_* (25000-iter
     # runs, wtw.py defaults: threshold 0.6, growth 60000): reset_curriculum_
     # started never fires in any of them. reset_curriculum_tracking_score_ema
@@ -270,7 +290,7 @@ COMMON_OVERRIDES = {
     # its initial_fraction (0.1) for the entire run. Lowered below that
     # observed plateau, with margin for push_robots (enabled above) pulling
     # tracking score down further since none of those 3 runs had it on.
-    "terrain.reset_curriculum_tracking_threshold": 0.25,
+    "terrain.reset_curriculum_tracking_threshold": 0.4,
     # 60000 assumed a training run far longer than the ~25000-iteration
     # budget actually used here; even starting from iteration 0 it only
     # reaches ~47% intensity by iteration 25000. Shortened so intensity can

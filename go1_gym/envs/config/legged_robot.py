@@ -269,8 +269,20 @@ class LeggedRobotDefaults:
         gravity_range = [-1.0, 1.0]
         push_robots = True
         push_interval_s = 15
+        # [min, max] seconds; each env independently resamples its own next
+        # push time from this range after every push (and on reset), instead
+        # of every env pushing on the same fixed period. None = fall back to
+        # the fixed push_interval_s (every push_interval_s seconds, no jitter).
+        push_interval_s_range = None
         max_push_vel_xy = 1.
         max_push_ang_vel = 0.6
+        # Ramp push magnitude from push_curriculum_initial_fraction * max_push_*
+        # up to the full max_push_* linearly over push_curriculum_growth_iterations
+        # training iterations. Disabled by default (push applies at full strength
+        # from iteration 0), same as push_robots itself defaulting off downstream.
+        push_curriculum = False
+        push_curriculum_initial_fraction = 0.
+        push_curriculum_growth_iterations = 10000
         randomize_action_delay = True
         randomize_lag_timesteps = True
         lag_timesteps = 6

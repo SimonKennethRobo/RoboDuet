@@ -494,6 +494,7 @@ class LeggedRobot(BaseTask):
         self.last_contact_time[env_ids] = 0.0
         self._gait_last_contacts[env_ids] = False
         self.episode_length_buf[env_ids] = 0
+        self._resample_push_interval(env_ids)
         self.reset_buf[env_ids] = 1
         # fill extras
         train_env_ids = env_ids[env_ids < self.num_train_envs]
@@ -1678,15 +1679,34 @@ class LeggedRobot(BaseTask):
                 self.complete_video_frames_eval = self.video_frames_eval[:]
             self.video_frames_eval = []
 
+    def _get_push_curriculum_intensity(self):
+        if not getattr(self.cfg.domain_rand, 'push_curriculum', False):
+            return 1.0
+        growth_iters = max(1, int(getattr(self.cfg.domain_rand, 'push_curriculum_growth_iterations', 1)))
+        initial_fraction = min(
+            1.0, max(0.0, float(getattr(self.cfg.domain_rand, 'push_curriculum_initial_fraction', 0.0)))
+        )
+        progress = min(1.0, max(0.0, int(getattr(global_switch, 'count', 0)) / growth_iters))
+        return initial_fraction + (1.0 - initial_fraction) * progress
+
+    def _resample_push_interval(self, env_ids):
+        if len(env_ids) == 0:
+            return
+        lo, hi = self.cfg.domain_rand.push_interval_range
+        next_in = torch.randint(lo, hi + 1, (len(env_ids),), device=self.device)
+        self.next_push_step[env_ids] = self.episode_length_buf[env_ids] + next_in
+
     def _push_robots(self, env_ids, cfg):
         """Random pushes the robots. Emulates an impulse by setting a randomized base velocity."""
         if cfg.domain_rand.push_robots:
-            push_env_ids = env_ids[self.episode_length_buf[env_ids] % int(cfg.domain_rand.push_interval) == 0]
+            push_env_ids = env_ids[self.episode_length_buf[env_ids] >= self.next_push_step[env_ids]]
             if len(push_env_ids) == 0:
                 return
+            self._resample_push_interval(push_env_ids)
 
-            max_vel = cfg.domain_rand.max_push_vel_xy
-            max_push_ang = cfg.domain_rand.max_push_ang_vel
+            intensity = self._get_push_curriculum_intensity()
+            max_vel = cfg.domain_rand.max_push_vel_xy * intensity
+            max_push_ang = cfg.domain_rand.max_push_ang_vel * intensity
             n = len(push_env_ids)
             self.root_states[push_env_ids, 7:9] = torch_rand_float(-max_vel, max_vel, (n, 2), device=self.device)
             self.root_states[push_env_ids, 10:13] = torch_rand_float(
@@ -1901,6 +1921,9 @@ class LeggedRobot(BaseTask):
         self.last_contact_filt = torch.zeros(
             self.num_envs, len(self.feet_indices), dtype=torch.bool, device=self.device, requires_grad=False
         )
+
+        self.next_push_step = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._resample_push_interval(torch.arange(self.num_envs, device=self.device))
         self.base_lin_vel = quat_rotate_inverse(self.base_quat, self.root_states[: self.num_envs, 7:10])
         self.base_ang_vel = quat_rotate_inverse(self.base_quat, self.root_states[: self.num_envs, 10:13])
         self.projected_gravity = quat_rotate_inverse(self.base_quat, self.gravity_vec)
@@ -2692,7 +2715,14 @@ class LeggedRobot(BaseTask):
         cfg.env.max_episode_length = np.ceil(max_episode_length_s / self.dt)
         self.max_episode_length = cfg.env.max_episode_length
 
-        cfg.domain_rand.push_interval = np.ceil(cfg.domain_rand.push_interval_s / self.dt)
+        push_interval_s_range = getattr(cfg.domain_rand, 'push_interval_s_range', None) or [
+            cfg.domain_rand.push_interval_s,
+            cfg.domain_rand.push_interval_s,
+        ]
+        cfg.domain_rand.push_interval_range = [
+            int(np.ceil(push_interval_s_range[0] / self.dt)),
+            max(int(np.ceil(push_interval_s_range[1] / self.dt)), int(np.ceil(push_interval_s_range[0] / self.dt))),
+        ]
         cfg.domain_rand.rand_interval = np.ceil(cfg.domain_rand.rand_interval_s / self.dt)
         cfg.domain_rand.gravity_rand_interval = np.ceil(cfg.domain_rand.gravity_rand_interval_s / self.dt)
         cfg.domain_rand.gravity_rand_duration = np.ceil(
