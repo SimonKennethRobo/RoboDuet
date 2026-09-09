@@ -130,6 +130,10 @@ def main(args):
     args.tags.append(f"seed{args.seed}")
 
     cfg = build_roboduet_config(args, debug=args.debug)
+    if cfg.terrain.reset_mode == "fixed_mixture":
+        print("[reset mixture] " + str({k: v for k, v in cfg_to_dict(cfg.terrain).items()
+                                       if k.startswith("reset_mix")}), flush=True)
+        print(f"[push] max angular velocity per world axis: {cfg.domain_rand.max_push_ang_vel} rad/s", flush=True)
     cfg.env.arm_policy_enabled = args.train_stage != "stage1"
     cfg.env.record_video = args.video
     if not cfg.env.record_video:

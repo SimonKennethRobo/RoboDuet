@@ -217,38 +217,18 @@ COMMON_OVERRIDES = {
     "arm.arm_num_observation_history": 60,
     "arm.arm_num_commands": 6,
     "arm.use_adaptation_module": False,
-    # rewards: locomotion (dog) -- these are cfg.reward_scales.*, the base
-    # namespace shared by pretrained-dog and WBC reward tables alike (see
-    # LeggedRobot._prepare_reward_function's pretrained -> wbc fallback merge)
+
     "rewards.terminal_body_height": 0.17,
-    # wtw.py's terminal_body_ori (1.6 rad ~= 92 deg) is already past horizontal,
-    # i.e. it only fires once the robot has essentially finished tipping over.
-    # Tightened to 60 deg so a near-tip gets a clean terminal (zero-bootstrap,
-    # see ppo.py's time_outs handling) well before it becomes unrecoverable,
-    # instead of the episode continuing to simulate an already-toppled robot.
     "rewards.terminal_body_ori": math.radians(60.0),
-    # terrain.{roll,pitch}_init_range (+-pi at full reset-curriculum intensity,
-    # see below) can reset a env past the 60 deg check above on frame zero --
-    # without a grace window every such env terminates on its first
-    # check_termination() call, before gravity/PD control even settles it,
-    # let alone before it gets a real chance to recover. Same pattern as
-    # wbc.goal_reaching.trajectory.terminate_grace_s elsewhere in this file.
     "rewards.terminal_roll_pitch_grace_s": 1.0,
     "reward_scales.loco_energy": -0.00004,
     "reward_scales.response_consistency": -0.05,
 
-    # feet_impact_vel is now the bounded exp(-impact^2/sigma) form (see
-    # rewards.py's _reward_feet_impact_vel docstring for why the raw-cost
-    # form's scale sweep -0.02/-0.1/-0.5 in stage1_gait_force_1/3/7 bought no
-    # behavior change) -- POSITIVE scale, lands in rew_buf_pos. 0.4 mirrors
-    # RAIBERT_FORMS['exp']'s calibration (core.py): rew_pos budget from
-    # tracking_lin_vel+tracking_ang_vel was ~18.4/episode in a healthy run,
-    # so a well-placed foot contributes ~20% of that -- same target weight
-    # as raibert_heuristic's exp form, not yet confirmed by a training run.
     "reward_scales.feet_impact_vel": 0.4,
+    "rewards.feet_impact_vel_sigma": 0.8,
     "reward_scales.feet_contact_forces": -0.01,
-    # "commands.footswing_height_range": [0.04, 0.041],
-    # "commands.limit_footswing_height": [0.04, 0.041],
+    "commands.footswing_height_range": [0.04, 0.041],
+    "commands.limit_footswing_height": [0.04, 0.041],
 
     "rewards.raibert_form": "quadratic",
     "reward_scales.raibert_heuristic": -1,
@@ -261,57 +241,35 @@ COMMON_OVERRIDES = {
     # "reward_scales.feet_stance_width": 1.0,
     # "reward_scales.feet_swing_height": -20.0,
 
-    # domain randomization: base & mount
-    # go1.py/wtw.py both disable push_robots; re-enabled here so stage1 (and
-    # stage2, which shares this termination/push path) actually experiences
-    # mid-episode disturbances to recover from, not just extreme reset poses.
-    # max_push_vel_xy kept below the legged_robot.py default (1.0) so early
-    # training isn't dominated by pushes that blow straight through the
-    # terminal_body_ori boundary above before any recovery can be learned;
-    # push_interval_s_range shortened from the base 15s so a 20s episode sees
-    # several pushes instead of at most one, and randomized per-push (instead
-    # of one fixed period) so every env doesn't get pushed at the exact same
-    # phase of every episode relative to its own reset -- a fixed period is a
-    # predictable pattern to (over)fit to, not a stand-in for a real
-    # disturbance, which never arrives on a metronome.
     "domain_rand.push_robots": True,
-    "domain_rand.max_push_vel_xy": 0.5,
+    "domain_rand.max_push_vel_xy": 1.0,
+    "domain_rand.max_push_ang_vel": 0.6,
     "domain_rand.push_interval_s_range": [1.0, 8.0],
-    # max_push_vel_xy/max_push_ang_vel above are the CEILING the curriculum
-    # ramps up to, not the push strength from iteration 0. Deliberately a
-    # plain iteration-linear ramp (no tracking-score gate, unlike
-    # reset_curriculum below) -- that gate turned out to need real training
-    # data to calibrate (see the reset_curriculum_tracking_threshold note
-    # right below) and a wrongly-tuned gate fails silently (stays at its
-    # initial fraction forever, as reset_curriculum did before that fix).
-    # A push at full strength barely matters to a random iteration-0 policy
-    # anyway, so there's little to lose from a fixed, simple linear ramp:
-    # growth_iterations chosen to land in the same iter-8000-ish window
-    # reset_curriculum's own (data-derived) ramp uses, so pushes are near
-    # full strength once locomotion is far enough along for recovery to be a
-    # meaningful skill, not before.
     "domain_rand.push_curriculum": True,
     "domain_rand.push_curriculum_initial_fraction": 0.0,
     "domain_rand.push_curriculum_growth_iterations": 8000,
-    # Checked against runs/2026-09-08/stage1_gait_reward_{1,3,4}_* (25000-iter
-    # runs, wtw.py defaults: threshold 0.6, growth 60000): reset_curriculum_
-    # started never fires in any of them. reset_curriculum_tracking_score_ema
-    # rises to ~0.30 by iter ~8000-10000 and then plateaus at ~0.33-0.37 for
-    # the rest of training (run3/run4 are flat from iter 12000 to 24000) --
-    # 0.6 isn't "not reached yet", it's above the ceiling this reward/noise
-    # setup actually reaches, so the gate never opens and intensity sits at
-    # its initial_fraction (0.1) for the entire run. Lowered below that
-    # observed plateau, with margin for push_robots (enabled above) pulling
-    # tracking score down further since none of those 3 runs had it on.
-    "terrain.reset_curriculum_tracking_threshold": 0.4,
-    # 60000 assumed a training run far longer than the ~25000-iteration
-    # budget actually used here; even starting from iteration 0 it only
-    # reaches ~47% intensity by iteration 25000. Shortened so intensity can
-    # reach 1.0 with several thousand iterations left afterward at full
-    # range, instead of asymptoting partway. Combined with the threshold fix
-    # above (start ~iter 8000-10000) this reaches full range by ~iter
-    # 16000-18000, leaving room to consolidate before the 25000 cutoff.
-    "terrain.reset_curriculum_growth_iterations": 8000,
+    "terrain.reset_curriculum_tracking_threshold": 0.35,
+    "terrain.reset_curriculum_growth_iterations": 15000,
+
+    # Robustness experiments: edit here, start one process, wait for its
+    # [reset mixture] banner, then edit for the next process. No config files.
+    # "legacy" retains the old score-gated reset course; "fixed_mixture"
+    # bypasses it and uses the fixed env groups / iteration schedule below.
+    # A/B/C/D/E/F hard fractions: 0.0 / 1.0 / 0.1 / 0.2 / 0.4 / 0.2.
+    # For the planned comparison, max_push_ang_vel above is 0.6 for A-E,
+    # 1.0 for F. Keep max_push_vel_xy and other settings identical across runs.
+    "terrain.reset_mode": "fixed_mixture",
+    "terrain.reset_mix_hard_fraction": 0,
+    "terrain.reset_mix_seed": 1234,  # partition RNG, independent of training RNG
+    "terrain.reset_mix_easy_tilt_rad": math.radians(18.0),
+    "terrain.reset_mix_hard_tilt_rad": math.radians(45.0),
+    "terrain.reset_mix_yaw_rad": 0.314,
+    "terrain.reset_mix_z_m": 0.05,
+    "terrain.reset_mix_start_iteration": 4000,
+    "terrain.reset_mix_ramp_iterations": 8000,
+    "terrain.robustness_metrics": True,  # raw step sums in robustness.jsonl + wandb
+    "terrain.robustness_early_window_s": 2.0,
+
     "domain_rand.dog_obs_frame_drop_prob": 0.0,
     "domain_rand.added_mass_range": [-2.0, 2.0],
     "domain_rand.randomize_lag_timesteps": False,
