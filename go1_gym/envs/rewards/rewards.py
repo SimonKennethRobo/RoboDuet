@@ -303,12 +303,28 @@ class Rewards:
         return torch.sum(rew_foot_clearance, dim=1)
 
     def _reward_feet_impact_vel(self):
+        """Bounded reward: exp(-impact^2 / sigma), 1 at zero touchdown speed.
+
+        Was a raw squared cost (needing a NEGATIVE scale) landing in
+        rew_buf_neg. Under only_positive_rewards_ji22_style that buffer is
+        summed with loco_energy/tracking_contacts_shaped_force/dof_acc/
+        orientation_control before the exp(rew_neg / sigma_rew_neg) gate --
+        this term's own per-step share of that sum stayed under ~1% even at
+        25x the original scale (stage1_gait_force_1/3/7: -0.02 -> -0.1 -> -0.5
+        moved the episode-sum roughly proportionally, but the raw impact_sq
+        it was computed from stayed ~14.5-16.4 the whole time, i.e. the scale
+        change bought zero behavior change). Bounded and positive moves it to
+        rew_buf_pos, same fix already used for raibert_heuristic's 'exp' form
+        below -- see RAIBERT_FORMS's docstring for why an unbounded neg-scale
+        term can get outvoted by bigger neg terms under this gate.
+        """
         prev_foot_velocities = self.env.prev_foot_velocities[:, :, 2].view(self.env.num_envs, -1)
         contact_states = torch.norm(self.env.contact_forces[:, self.env.feet_indices, :], dim=-1) > 1.0
 
-        rew_foot_impact_vel = contact_states * torch.square(torch.clip(prev_foot_velocities, -100, 0))
-
-        return torch.sum(rew_foot_impact_vel, dim=1)
+        impact_sq = torch.sum(
+            contact_states * torch.square(torch.clip(prev_foot_velocities, -100, 0)), dim=1
+        )
+        return torch.exp(-impact_sq / self.env.cfg.rewards.feet_impact_vel_sigma)
 
     def _reward_orientation_control(self):
         # Penalize non flat base orientation

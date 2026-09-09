@@ -237,7 +237,15 @@ COMMON_OVERRIDES = {
     "reward_scales.loco_energy": -0.00004,
     "reward_scales.response_consistency": -0.05,
 
-    "reward_scales.feet_impact_vel": -0.02,
+    # feet_impact_vel is now the bounded exp(-impact^2/sigma) form (see
+    # rewards.py's _reward_feet_impact_vel docstring for why the raw-cost
+    # form's scale sweep -0.02/-0.1/-0.5 in stage1_gait_force_1/3/7 bought no
+    # behavior change) -- POSITIVE scale, lands in rew_buf_pos. 0.4 mirrors
+    # RAIBERT_FORMS['exp']'s calibration (core.py): rew_pos budget from
+    # tracking_lin_vel+tracking_ang_vel was ~18.4/episode in a healthy run,
+    # so a well-placed foot contributes ~20% of that -- same target weight
+    # as raibert_heuristic's exp form, not yet confirmed by a training run.
+    "reward_scales.feet_impact_vel": 0.4,
     "reward_scales.feet_contact_forces": -0.01,
     # "commands.footswing_height_range": [0.04, 0.041],
     # "commands.limit_footswing_height": [0.04, 0.041],

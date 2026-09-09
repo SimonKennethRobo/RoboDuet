@@ -315,6 +315,13 @@ class LeggedRobotDefaults:
         kappa_gait_probs = 0.07
         gait_force_sigma = 50.
         gait_vel_sigma = 0.5
+        # _reward_feet_impact_vel: exp(-impact^2 / sigma). impact is a sum
+        # over 4 feet of squared touchdown velocity (m/s)^2. Calibrated
+        # against stage1_gait_force_1/3's per-step raw value (~0.015-0.017,
+        # see _reward_feet_impact_vel's docstring) so a typical uncorrected
+        # touchdown lands mid-curve (exp(-0.016/0.02) ~= 0.45) rather than on
+        # either saturation shelf.
+        feet_impact_vel_sigma = 0.02
         footswing_height = 0.09
         # Time constant (s) of the first-order low-pass reference model that
         # response_consistency tracks: v_ref += (v_cmd - v_ref) * dt / T.
