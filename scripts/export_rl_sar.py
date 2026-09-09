@@ -1,6 +1,14 @@
 """Export a RoboDuet stage-1 dog policy into an rl_sar-compatible bundle.
 
-Produces, under ``<rl_sar>/policy/<robot>/``::
+By default (no ``--rl_sar_root``), produces, under ``<logdir>/rl_sar/<config_name>/``
+(no ``policy/<robot>/`` layer, no ``base.yaml`` -- a run directory holds exactly
+one policy)::
+
+    config.yaml                     policy-level, training (policy) joint order
+    policy.pt                       TorchScript actor, forward([1, H]) -> [1, A]
+
+Pass ``--rl_sar_root`` to target an rl_sar checkout directly instead; there the
+bundle is written using rl_sar's own layout, under ``<rl_sar_root>/policy/<robot>/``::
 
     base.yaml                       robot-level, hardware joint order
     <config_name>/config.yaml       policy-level, training (policy) joint order
@@ -56,9 +64,11 @@ RL_SAR_DIR = "rl_sar"
 def default_rl_sar_root(logdir):
     """Where to write the bundle for `logdir`: inside the run itself.
 
-    The directory keeps rl_sar's own policy/<robot>/<config>/ layout, so it can
-    be consumed in place (point rl_sar at this path) or copied wholesale into a
-    checkout -- see docs/RL_SAR_DEPLOY.md §2.8.
+    Written to <this>/<config_name>/ (config.yaml + policy.pt), skipping the
+    policy/<robot>/ layer and base.yaml, since a run directory holds exactly
+    one policy -- see docs/RL_SAR_DEPLOY.md §2.8. To deploy, copy the
+    <config_name>/ directory into <rl_sar checkout>/policy/<robot>/, or, for
+    that layout directly, pass --rl_sar_root at export time.
     """
     return str(Path(logdir) / RL_SAR_DIR)
 
@@ -528,13 +538,19 @@ def export(logdir, rl_sar_root=None, ckpt_id="last", robot=None,
     """Write the rl_sar bundle for one run. Returns the output directory.
 
     ``rl_sar_root`` defaults to ``<logdir>/rl_sar`` -- the bundle lives with the
-    run that produced it. Pass an explicit path only to write somewhere else,
-    e.g. straight into an rl_sar checkout.
+    run that produced it, written to ``<rl_sar_root>/<config_name>/`` directly
+    (``config.yaml`` + ``policy.pt``), skipping the ``policy/<robot>/`` layer
+    and ``base.yaml`` -- a run directory holds exactly one policy and there is
+    no robot-level file to share or policy to switch between. Pass an explicit
+    path to write somewhere else, e.g. straight into an rl_sar checkout --
+    there the real ``policy/<robot>/<config_name>/`` + ``base.yaml`` layout is
+    required, so it is kept.
 
     Importable so callers other than this script's CLI can export -- notably
     scripts/play_by_key_stage1.py, which exports the same policy it is about
     to play so the deployed bundle can never silently lag what was inspected.
     """
+    flat = rl_sar_root is None
     rl_sar_root = rl_sar_root or default_rl_sar_root(logdir)
     robot = robot or robot_from_logdir(logdir)
     log = (lambda *a: None) if quiet else print
@@ -559,7 +575,7 @@ def export(logdir, rl_sar_root=None, ckpt_id="last", robot=None,
             f"observation_terms() have diverged"
         )
 
-    out_dir = Path(rl_sar_root) / "policy" / robot / config_name
+    out_dir = Path(rl_sar_root) / config_name if flat else Path(rl_sar_root) / "policy" / robot / config_name
     out_dir.mkdir(parents=True, exist_ok=True)
     ckpt_path, num_actions = export_policy(logdir, ckpt_id, cfg, out_dir / "policy.pt")
 
@@ -592,9 +608,6 @@ def export(logdir, rl_sar_root=None, ckpt_id="last", robot=None,
         "provenance": {"logdir": str(Path(logdir).resolve()), "ckpt": str(ckpt_path)},
     }
 
-    base_yaml = Path(rl_sar_root) / "policy" / robot / "base.yaml"
-    active = active_config_name(base_yaml, config_name)
-    write_base_yaml(base_yaml, robot, config_name, cfg, ctx)
     write_config_yaml(out_dir / "config.yaml", robot, config_name, cfg, ctx)
 
     log(f"[export_rl_sar] robot        : {robot}  (ckpt {ckpt_path.name})")
@@ -602,11 +615,18 @@ def export(logdir, rl_sar_root=None, ckpt_id="last", robot=None,
     log(f"[export_rl_sar] obs history  : {int(cfg.dog.dog_num_observation_history)}"
         f" x {width} = {int(cfg.dog.dog_num_obs_history)}")
     log(f"[export_rl_sar] actions      : {num_actions} over {num_dofs} DoFs")
-    log(f"[export_rl_sar] active policy: {active}"
-        + ("" if active == config_name else f"  (this export is {config_name}; edit {base_yaml} to switch)"))
-    log(f"[export_rl_sar] wrote {base_yaml}")
-    log(f"[export_rl_sar] wrote {out_dir / 'config.yaml'}")
-    log(f"[export_rl_sar] wrote {out_dir / 'policy.pt'}")
+    if flat:
+        log(f"[export_rl_sar] wrote {out_dir / 'config.yaml'}")
+        log(f"[export_rl_sar] wrote {out_dir / 'policy.pt'}")
+    else:
+        base_yaml = Path(rl_sar_root) / "policy" / robot / "base.yaml"
+        active = active_config_name(base_yaml, config_name)
+        write_base_yaml(base_yaml, robot, config_name, cfg, ctx)
+        log(f"[export_rl_sar] active policy: {active}"
+            + ("" if active == config_name else f"  (this export is {config_name}; edit {base_yaml} to switch)"))
+        log(f"[export_rl_sar] wrote {base_yaml}")
+        log(f"[export_rl_sar] wrote {out_dir / 'config.yaml'}")
+        log(f"[export_rl_sar] wrote {out_dir / 'policy.pt'}")
     if any((cfg.dog.observe_lin_vel, cfg.dog.observe_pose_actual, cfg.dog.observe_track_error)):
         log("[export_rl_sar] NOTE: this policy observes base linear velocity "
             "and/or base height. rl_sar must be fed a state estimate "
@@ -620,11 +640,14 @@ def main():
     parser.add_argument("--logdir", type=str, required=True, help="RoboDuet run directory")
     parser.add_argument("--ckptid", type=str, default="last")
     parser.add_argument("--rl_sar_root", type=str, default=None,
-                        help="Output root (the dir that will contain policy/). "
-                             "Default: <logdir>/rl_sar")
+                        help="Output root. Default: <logdir>/rl_sar/<config_name>/ "
+                             "(config.yaml + policy.pt, no policy/<robot>/ layer). "
+                             "Pass this to target an rl_sar checkout, using its "
+                             "policy/<robot>/<config_name>/ layout instead.")
     parser.add_argument("--robot", type=str, default=None, choices=sorted(ARM_JOINTS),
                         help="default: inferred from the checkpoint's recorded asset")
-    parser.add_argument("--config_name", type=str, default="roboduet_stage1")
+    parser.add_argument("--config_name", type=str, default="roboduet_stage1",
+                        help="Policy subdirectory name, under either layout.")
     args = parser.parse_args()
 
     export(args.logdir, args.rl_sar_root, ckpt_id=args.ckptid, robot=args.robot,

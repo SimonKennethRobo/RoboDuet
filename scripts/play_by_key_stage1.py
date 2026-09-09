@@ -44,15 +44,18 @@ def maybe_export_rl_sar(args, logdir, ckpt_id):
     """
     if getattr(args, "no_rl_sar_export", False):
         return
+    import os
+
     from scripts.export_rl_sar import export
 
+    config_name = args.rl_sar_config_name or os.path.basename(os.path.normpath(logdir))
     try:
         out_dir = export(
             logdir,
             args.rl_sar_root,  # None -> <logdir>/rl_sar
             ckpt_id=ckpt_id,
             robot=args.rl_sar_robot,
-            config_name=args.rl_sar_config_name,
+            config_name=config_name,
         )
         print(f"[rl_sar] exported -> {out_dir}", flush=True)
     except Exception as exc:  # noqa: BLE001 -- never block play on an export problem
@@ -220,8 +223,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--rl_sar_config_name",
         type=str,
-        default="roboduet_stage1",
-        help="Policy subdirectory written under <rl_sar_root>/policy/<robot>/.",
+        default=None,
+        help="Policy subdirectory written under <rl_sar_root>/policy/<robot>/. "
+        "Default: the logdir's basename (e.g. stage1_robust_3_024201).",
     )
     parser.add_argument(
         "--rl_sar_robot",
