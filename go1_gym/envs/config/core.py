@@ -185,6 +185,7 @@ class RoboDuetRuntimeOptions:
     # of the M2 direction-dependent table -- the ablation the design doc's
     # A.3 calls for (2D table vs sphere approximation).
     reach_table: bool = True
+    raibert_form: str = None
 
     @classmethod
     def from_args(cls, args):
@@ -199,6 +200,7 @@ class RoboDuetRuntimeOptions:
             traj_tracking=getattr(args, "traj_tracking", False),
             arm_action_mode=getattr(args, "arm_action_mode", None),
             reach_table=not getattr(args, "no_reach_table", False),
+            raibert_form="exp" if getattr(args, "raibert_exp", False) else getattr(args, "raibert_form", None),
         )
 
 
@@ -526,20 +528,14 @@ def enable_rot6d(cfg, layout):
     layout.arm_cmd += FEATURE_LAYOUT["rot6d_command_dims"]
 
 
-def enable_dyna_gait(cfg, layout, min_frequency=0.0):
-    from .wbc import DYNAMIC_GAIT_BIN_CONFIG, FEATURE_LAYOUT
+def enable_dyna_gait(cfg, layout):
+    from .wbc import FEATURE_LAYOUT
 
+    # Command ranges, limits and bins belong to the profile. Enabling the
+    # layout must not replace values edited in COMMON_OVERRIDES.
     cfg.commands.use_dynamic_gait = True
-    cfg.commands.gait_frequency_cmd_range = [min_frequency, cfg.commands.gait_frequency_cmd_range[1]]
-    cfg.commands.limit_gait_frequency = deepcopy(cfg.commands.gait_frequency_cmd_range)
-    cfg.commands.limit_footswing_height = deepcopy(cfg.commands.footswing_height_range)
-    cfg.commands.limit_gait_duration = deepcopy(cfg.commands.gait_duration_cmd_range)
-    cfg.commands.limit_stance_width = deepcopy(cfg.commands.stance_width_range)
-    cfg.commands.limit_stance_length = deepcopy(cfg.commands.stance_length_range)
-
     layout.dog_cmd += FEATURE_LAYOUT["dynamic_gait_command_dims"]
     cfg.env.observe_gait_commands = True
-    apply_cfg_overrides(cfg, DYNAMIC_GAIT_BIN_CONFIG)
 
 
 def enable_goal_reaching(cfg, layout):
@@ -567,26 +563,6 @@ def enable_traj_tracking(cfg, layout):
     apply_cfg_overrides(cfg, TRAJ_TRACKING_OVERRIDES, allow_new=True)
     for name, scale in TRAJ_TRACKING_REWARD_SCALES.items():
         setattr(cfg.wbc.reward_scales, name, scale)
-
-
-def apply_response_overrides(cfg):
-    """Apply the R1 command-space trimming.
-
-    Runs LAST among the config mutations, after enable_dyna_gait() and the
-    goal-reaching / trajectory switches, because enable_dyna_gait() rewrites
-    ``commands.gait_frequency_cmd_range`` from ``--dyna_gait_min_frequency``
-    and would otherwise overwrite the narrow band R1 asks for.
-
-    The gait half is skipped when dynamic gait is off, where commands_dog is
-    only 6 wide and those columns do not exist.  That keeps a bare
-    ``build_roboduet_config()`` -- which the benchmark package builds at import
-    time -- working instead of raising.
-    """
-    from .wbc import RESPONSE_COMMAND_OVERRIDES, RESPONSE_GAIT_COMMAND_OVERRIDES
-
-    apply_cfg_overrides(cfg, RESPONSE_COMMAND_OVERRIDES)
-    if cfg.commands.use_dynamic_gait:
-        apply_cfg_overrides(cfg, RESPONSE_GAIT_COMMAND_OVERRIDES)
 
 
 def validate_arm_action_mode(cfg):
@@ -662,7 +638,103 @@ def validate_roboduet_cfg(cfg):
     # straight from the pickle, bypassing set_arm_action_mode -- so re-check here,
     # which every build and every load_env path runs through.
     validate_arm_action_mode(cfg)
+    validate_raibert_form(cfg)
 
+
+def resolve_reward_scales(cfg):
+    """Non-mutating preview of _prepare_reward_function's registration logic.
+
+    Returns {name: {"stage1": float, "stage2": float | None, "active": bool}}
+    for every key appearing in either cfg.reward_scales or cfg.wbc.reward_
+    scales. "stage2" is None when the name is absent from cfg.wbc.reward_
+    scales (i.e. it would inherit "stage1" into the registration check, per
+    the comment above). "active" is a single flag, not one per stage: exactly
+    one reward_names list is built and walked in every stage, so a name is
+    either computed everywhere or nowhere.
+
+    dt does not affect any of this (scaling by a positive dt never changes
+    whether a value is zero), so this reports the raw config scales, not the
+    dt-scaled values LeggedRobot._parse_cfg/_prepare_reward_function compute
+    at env creation.
+    """
+    stage1 = {k: v for k, v in vars(cfg.reward_scales).items() if not k.startswith("_")}
+    stage2 = {k: v for k, v in vars(cfg.wbc.reward_scales).items() if not k.startswith("_")}
+
+    # Matches _prepare_reward_function's fixed pop condition directly, rather
+    # than replaying its dict-mutation sequence (an earlier version of this
+    # function did that and reproduced the *pre-fix* bug: dict-mutation order
+    # matters and is easy to get subtly wrong, so state the invariant instead
+    # of re-deriving it procedurally).
+    return {
+        name: {
+            "stage1": stage1.get(name, 0.0),
+            "stage2": stage2.get(name),
+            "active": stage1.get(name, 0.0) != 0 or stage2.get(name, 0.0) != 0,
+        }
+        for name in set(stage1) | set(stage2)
+    }
+
+RAIBERT_FORMS = {
+    "quadratic": {"reward_scales": -10.0, "wbc": -1.0},
+    # exp lands in rew_buf_pos and adds rather than gates. Calibrated (with
+    # rewards.raibert_sigma=0.35) against the real rew_pos budget of a healthy
+    # run -- tracking_lin_vel + tracking_ang_vel summed to ~18.4 over an
+    # episode in stage1_sim2real_abl_14 -- so that a mostly-well-placed foot
+    # (reward around 0.5-0.6/step, see raibert_sigma's comment) contributes
+    # roughly 20% of that, not enough to dominate velocity tracking, still
+    # enough to matter. Stage 2 gets half: it has EE tracking to leave room
+    # for. Both numbers are a calibration by formula, not yet confirmed by an
+    # actual 'exp'-form training run -- no run in stage1_sim2real_abl_1..15
+    # used this form, they were all 'quadratic' regardless of what the table
+    # said (see resolve_reward_scales).
+    "exp": {"reward_scales": 0.4, "wbc": 0.2},
+}
+
+def set_raibert_form(cfg, form):
+    """Switch _reward_raibert_heuristic between the cost and bounded forms.
+
+    ``form=None`` leaves cfg alone. Anything else rewrites both the form and
+    the matching scales together -- flipping the form without flipping the
+    sign would reward bad foot placement, and nothing downstream would catch
+    it, so the two are never settable independently through this path.
+    """
+    if form is None:
+        return
+    if form not in RAIBERT_FORMS:
+        raise ValueError(f"Unknown rewards.raibert_form {form!r}; expected one of {sorted(RAIBERT_FORMS)}")
+    cfg.rewards.raibert_form = form
+    scales = RAIBERT_FORMS[form]
+    # Only rescale a term that is actually live: gait_reward_mode='clock_free'
+    # zeroes raibert on purpose, and that must not be undone here.
+    if cfg.reward_scales.raibert_heuristic != 0.0:
+        cfg.reward_scales.raibert_heuristic = scales["reward_scales"]
+    if getattr(cfg.wbc.reward_scales, "raibert_heuristic", 0.0) != 0.0:
+        cfg.wbc.reward_scales.raibert_heuristic = scales["wbc"]
+
+def validate_raibert_form(cfg):
+    """Reject a raibert form whose scale has the wrong sign.
+
+    'quadratic' returns a cost and 'exp' returns a bounded reward, so a scale
+    carried over from the other form flips the objective: the policy would be
+    paid to put its feet in the wrong place. That trains quietly to a
+    plausible-looking reward curve, so it is an error, not a warning.
+    """
+    form = getattr(cfg.rewards, "raibert_form", "quadratic")
+    if form not in RAIBERT_FORMS:
+        raise ValueError(f"Unknown rewards.raibert_form {form!r}; expected one of {sorted(RAIBERT_FORMS)}")
+    wanted = "positive" if form == "exp" else "negative"
+    for label, scale in (
+        ("reward_scales.raibert_heuristic", cfg.reward_scales.raibert_heuristic),
+        ("wbc.reward_scales.raibert_heuristic", getattr(cfg.wbc.reward_scales, "raibert_heuristic", 0.0)),
+    ):
+        if scale == 0.0:
+            continue  # disabled; sign is meaningless
+        if (form == "exp") != (scale > 0):
+            raise ValueError(
+                f"rewards.raibert_form='{form}' needs a {wanted} {label}, got {scale}. "
+                f"The 'exp' form returns a bounded reward in [0, 1] and the 'quadratic' "
+                f"form returns an unbounded cost -- use set_raibert_form so the two stay paired."
+            )
 
 def build_roboduet_config(args=None, *, options=None, debug=False):
     """Build one finalized RoboDuet config without mutating another build."""
@@ -687,18 +759,15 @@ def build_roboduet_config(args=None, *, options=None, debug=False):
 
     goal_reaching = options.goal_reaching or options.traj_tracking
     if options.dyna_gait or goal_reaching:
-        enable_dyna_gait(cfg, layout, min_frequency=options.dyna_gait_min_frequency)
+        enable_dyna_gait(cfg, layout)
     if goal_reaching:
         enable_goal_reaching(cfg, layout)
     if options.traj_tracking:
         enable_traj_tracking(cfg, layout)
     set_arm_action_mode(cfg, options.arm_action_mode)
+    set_raibert_form(cfg, options.raibert_form)
     if not options.reach_table:
         cfg.wbc.goal_reaching.reach_table_path = ""
-
-    # MUST stay after every enable_*(): R1 narrows ranges that enable_dyna_gait
-    # writes, so applying it earlier would be silently undone.
-    apply_response_overrides(cfg)
 
     layout.finalize(cfg)
     configure_privileged_obs_dims(cfg)

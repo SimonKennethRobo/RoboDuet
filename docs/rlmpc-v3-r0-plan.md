@@ -137,12 +137,8 @@ commands.num_bins_body_roll     = 1
 网格从 1,964,655 降到 **21×3×21×5×1×5 = 33,075** bin，
 相对 4096 环境是合理量级（[facts §3](rlmpc-v3-r0-facts.md)）。
 
-⚠️ `enable_dyna_gait` 会用 `--dyna_gait_min_frequency` 覆盖
-`gait_frequency_cmd_range[0]`（[core.py:525](../go1_gym/envs/config/core.py#L525)）。
-必须让 `RESPONSE_COMMAND_OVERRIDES` 在 `enable_dyna_gait` **之后**应用，
-或改用 `--dyna_gait_min_frequency 2.5` 并单独收紧上界。
-方案：在 `build_roboduet_config` 的 feature-enable 段之后加一个
-`apply_response_overrides(cfg)` 钩子，明确排在最后。
+命令范围、limit 和分桶数直接配置在 `COMMON_OVERRIDES`。
+`enable_dyna_gait` 只启用布局与观测，不改写这些参数；无需额外的后置覆盖钩子。
 
 **`legged_robot.py::_resample_commands`**：
 
@@ -164,10 +160,8 @@ commands.num_bins_body_roll     = 1
 所以「窄化 limit + bins=1」既冻结了通道、又把它排除出自适应课程，
 同时保留其在命令向量中的位置。
 
-落地的两张表在 [config/wbc.py](../go1_gym/envs/config/wbc.py)：
-`RESPONSE_COMMAND_OVERRIDES`（总是适用）与
-`RESPONSE_GAIT_COMMAND_OVERRIDES`（仅 `use_dynamic_gait`），
-由 `core.apply_response_overrides(cfg)` 在**所有 `enable_*()` 之后**应用。
+当前配置直接位于 [config/wbc.py](../go1_gym/envs/config/wbc.py) 的
+`COMMON_OVERRIDES`。动态步态关闭时，对应参数仍可存在，但不增加命令槽位。
 
 实测组合结果：
 

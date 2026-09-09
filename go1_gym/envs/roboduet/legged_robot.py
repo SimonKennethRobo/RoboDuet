@@ -470,6 +470,14 @@ class LeggedRobot(BaseTask):
         rpy = quaternion_to_rpy(self.base_quat)
         self.roll, self.pitch, self.y = rpy[:, 0], rpy[:, 1], rpy[:, 2]
 
+        self.roll_pitch_buf = torch.zeros_like(self.reset_buf)
+        if self.cfg.rewards.use_terminal_roll_pitch:
+            self.roll_pitch_buf = (self.roll.abs() > self.cfg.rewards.terminal_body_ori) | (
+                self.pitch.abs() > self.cfg.rewards.terminal_body_ori
+            )
+            self.roll_pitch_buf &= self.episode_length_buf * self.dt > self.cfg.rewards.terminal_roll_pitch_grace_s
+            self.reset_buf |= self.roll_pitch_buf
+
         self._arm_check_termination_hook()
         self.reset_buf |= self.reverse_buf
 
@@ -527,6 +535,7 @@ class LeggedRobot(BaseTask):
         self.ripple_valid_steps[env_ids] = 0
         self.feet_air_time[env_ids] = 0.0
         self.episode_length_buf[env_ids] = 0
+        self._resample_push_interval(env_ids)
         self.reset_buf[env_ids] = 1
         # fill extras
         train_env_ids = env_ids[env_ids < self.num_train_envs]
@@ -648,6 +657,9 @@ class LeggedRobot(BaseTask):
         for metric_sum in self.performance_metric_sums.values():
             metric_sum[env_ids] = 0.0
 
+        self._reset_gait_phase(env_ids)
+
+    def _reset_gait_phase(self, env_ids):
         self.gait_indices[env_ids] = 0
         # R5: a grouped env adopts its twin's gait phase, not zero.  This has to
         # come after the line above, which is the reset's own phase clear, and
@@ -661,6 +673,13 @@ class LeggedRobot(BaseTask):
             grouped = env_ids[self.grouping.is_grouped[env_ids]]
             if grouped.numel() > 0:
                 self.gait_indices[grouped] = self.gait_indices[self.grouping.twin_of[grouped]]
+            # If the twin itself reset, surviving members also need its new
+            # phase. Otherwise the settling countdown expires on a group whose
+            # clocks still differ, making R5 compare different gait phases.
+            twins = env_ids[self.is_nominal_twin[env_ids]]
+            if twins.numel() > 0:
+                members = self.grouping.envs_of_groups(self.grouping.group_of[twins])
+                self.gait_indices[members] = self.gait_indices[self.grouping.twin_of[members]]
 
     def compute_observations(self):
 
@@ -2390,14 +2409,40 @@ class LeggedRobot(BaseTask):
                 self.complete_video_frames_eval = self.video_frames_eval[:]
             self.video_frames_eval = []
 
+    def _get_push_curriculum_intensity(self):
+        if not getattr(self.cfg.domain_rand, 'push_curriculum', False):
+            return 1.0
+        growth_iters = max(1, int(getattr(self.cfg.domain_rand, 'push_curriculum_growth_iterations', 1)))
+        initial_fraction = min(
+            1.0, max(0.0, float(getattr(self.cfg.domain_rand, 'push_curriculum_initial_fraction', 0.0)))
+        )
+        progress = min(1.0, max(0.0, int(getattr(global_switch, 'count', 0)) / growth_iters))
+        return initial_fraction + (1.0 - initial_fraction) * progress
+
+    def _resample_push_interval(self, env_ids, cfg=None):
+        if len(env_ids) == 0:
+            return
+        cfg = self.cfg if cfg is None else cfg
+        lo, hi = cfg.domain_rand.push_interval_range
+        self.next_push_step[env_ids] = self.episode_length_buf[env_ids] + torch.randint(
+            lo, hi + 1, (len(env_ids),), device=self.device
+        )
+
     def _push_robots(self, env_ids, cfg):
         """Random pushes the robots. Emulates an impulse by setting a randomized base velocity."""
         # R8.1 stage 4: the curriculum turns pushes on and ramps their strength.
         # This is what "robustness recovery" is made of in v1 -- there is no
         # terrain to make harder -- so the whole stage rests on it.
-        intensity = float(getattr(self, "domain_disturbance_intensity", 0.0))
-        if cfg.domain_rand.push_robots and intensity > 0.0:
-            push_env_ids = env_ids[self.episode_length_buf[env_ids] % int(cfg.domain_rand.push_interval) == 0]
+        intensity = float(getattr(self, "domain_disturbance_intensity", 0.0)) * self._get_push_curriculum_intensity()
+        if cfg.domain_rand.push_robots:
+            push_env_ids = env_ids[self.episode_length_buf[env_ids] >= self.next_push_step[env_ids]]
+            # Advance clocks even while R8 disables disturbances, avoiding a
+            # simultaneous overdue push across the pool on entry to stage 4.
+            self._resample_push_interval(push_env_ids, cfg)
+            if intensity <= 0.0:
+                return
+            # R5's nominal anchor must remain unperturbed in every R8 stage.
+            push_env_ids = push_env_ids[~self.is_nominal_twin[push_env_ids]]
             if len(push_env_ids) == 0:
                 return
 
@@ -2610,6 +2655,8 @@ class LeggedRobot(BaseTask):
         self.last_contact_filt = torch.zeros(
             self.num_envs, len(self.feet_indices), dtype=torch.bool, device=self.device, requires_grad=False
         )
+        self.next_push_step = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._resample_push_interval(torch.arange(self.num_envs, device=self.device))
         self.base_lin_vel = quat_rotate_inverse(self.base_quat, self.root_states[: self.num_envs, 7:10])
         self.base_ang_vel = quat_rotate_inverse(self.base_quat, self.root_states[: self.num_envs, 10:13])
         self.projected_gravity = quat_rotate_inverse(self.base_quat, self.gravity_vec)
@@ -3671,6 +3718,12 @@ class LeggedRobot(BaseTask):
         self.max_episode_length = cfg.env.max_episode_length
 
         cfg.domain_rand.push_interval = np.ceil(cfg.domain_rand.push_interval_s / self.dt)
+        interval = cfg.domain_rand.push_interval_s_range
+        if interval is None:
+            interval = [cfg.domain_rand.push_interval_s] * 2
+        if len(interval) != 2 or not (0 < interval[0] <= interval[1] < float("inf")):
+            raise ValueError("domain_rand.push_interval_s_range must be finite positive [min, max]")
+        cfg.domain_rand.push_interval_range = [int(np.ceil(value / self.dt)) for value in interval]
         cfg.domain_rand.rand_interval = np.ceil(cfg.domain_rand.rand_interval_s / self.dt)
         cfg.domain_rand.gravity_rand_interval = np.ceil(cfg.domain_rand.gravity_rand_interval_s / self.dt)
         cfg.domain_rand.gravity_rand_duration = np.ceil(

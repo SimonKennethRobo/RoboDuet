@@ -366,12 +366,28 @@ class Rewards:
         return torch.sum(rew_foot_clearance, dim=1)
 
     def _reward_feet_impact_vel(self):
+        """Bounded reward: exp(-impact^2 / sigma), 1 at zero touchdown speed.
+
+        Was a raw squared cost (needing a NEGATIVE scale) landing in
+        rew_buf_neg. Under only_positive_rewards_ji22_style that buffer is
+        summed with loco_energy/tracking_contacts_shaped_force/dof_acc/
+        orientation_control before the exp(rew_neg / sigma_rew_neg) gate --
+        this term's own per-step share of that sum stayed under ~1% even at
+        25x the original scale (stage1_gait_force_1/3/7: -0.02 -> -0.1 -> -0.5
+        moved the episode-sum roughly proportionally, but the raw impact_sq
+        it was computed from stayed ~14.5-16.4 the whole time, i.e. the scale
+        change bought zero behavior change). Bounded and positive moves it to
+        rew_buf_pos, same fix already used for raibert_heuristic's 'exp' form
+        below -- see RAIBERT_FORMS's docstring for why an unbounded neg-scale
+        term can get outvoted by bigger neg terms under this gate.
+        """
         prev_foot_velocities = self.env.prev_foot_velocities[:, :, 2].view(self.env.num_envs, -1)
         contact_states = torch.norm(self.env.contact_forces[:, self.env.feet_indices, :], dim=-1) > 1.0
 
-        rew_foot_impact_vel = contact_states * torch.square(torch.clip(prev_foot_velocities, -100, 0))
-
-        return torch.sum(rew_foot_impact_vel, dim=1)
+        impact_sq = torch.sum(
+            contact_states * torch.square(torch.clip(prev_foot_velocities, -100, 0)), dim=1
+        )
+        return torch.exp(-impact_sq / self.env.cfg.rewards.feet_impact_vel_sigma)
 
     def _orientation_error(self):
         """Squared projected-gravity error against the commanded attitude.
@@ -421,6 +437,30 @@ class Rewards:
         return self._orientation_error()[0]
 
     def _reward_raibert_heuristic(self):
+        """Foot placement against the Raibert nominal, in one of two forms.
+
+        rewards.raibert_form selects which, and the two are *not*
+        interchangeable -- they need opposite-signed scales, so
+        config.core.validate_raibert_form refuses a mismatch rather than
+        letting a sign error train silently:
+
+        'quadratic' (legacy, needs a negative scale) -- the raw sum of squared
+            placement errors. Unbounded, so it lands in rew_buf_neg and, under
+            rewards.only_positive_rewards_ji22_style, multiplies the *entire*
+            reward by exp(scale * err) (dt and sigma_rew_neg are both 0.02, so
+            the dt and 1/sigma cancel). That is a gate, not a penalty: a
+            tumbling robot's placement error explodes exactly when it most
+            needs the rest of its reward, which is the bistable failure the
+            stage1_sim2real_abl_4/7/9/11 runs died of -- every collapsed run
+            ended at 17-149 episode steps while every surviving one sat at
+            610-995, with nothing in between.
+
+        'exp' (needs a positive scale) -- exp(-err / raibert_sigma), bounded in
+            [0, 1]. Positive, so it lands in rew_buf_pos and *adds* instead of
+            gating; no scale can make it zero the other terms. It needs no
+            upright gate either: a fallen robot's error is large, so the term
+            simply decays to 0 rather than blowing up.
+        """
         cur_footsteps_translated = self.env.foot_positions - self.env.base_pos.unsqueeze(1)
         footsteps_in_body_frame = torch.zeros(self.env.num_envs, 4, 3, device=self.env.device)
         for i in range(4):
@@ -458,6 +498,10 @@ class Rewards:
 
         err_raibert_heuristic = torch.abs(desired_footsteps_body_frame - footsteps_in_body_frame[:, :, 0:2])
 
-        reward = torch.sum(torch.square(err_raibert_heuristic), dim=(1, 2))
+        err = torch.sum(torch.square(err_raibert_heuristic), dim=(1, 2))
 
-        return reward
+        # getattr keeps configs restored from checkpoints predating the switch
+        # on the legacy form.
+        if getattr(self.env.cfg.rewards, "raibert_form", "quadratic") == "exp":
+            return torch.exp(-err / self.env.cfg.rewards.raibert_sigma)
+        return err

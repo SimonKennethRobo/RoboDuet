@@ -4,6 +4,7 @@ import json
 import math
 import os
 import pickle as pkl
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from typing import Callable, Dict, List, NamedTuple, Optional, Tuple
 
@@ -167,8 +168,15 @@ def load_dog_policy_for_benchmark(
     ckpt_id: str,
     env_cfg,
     expected_dims: Optional[dict] = None,
+    device: str = "cuda:0",
 ) -> Callable:
-    """Load a dog policy whose observation/action layout matches its env group."""
+    """Load a dog policy whose observation/action layout matches its env group.
+
+    The policy runs on ``device`` -- the simulation's device -- so the whole
+    rollout stays on the GPU. Running it on the CPU instead costs a full
+    observation-history transfer off the device every step and dominates
+    evaluation time.
+    """
     dims = _read_dog_dims(logdir)
 
     if expected_dims is None:
@@ -182,7 +190,7 @@ def load_dog_policy_for_benchmark(
     mismatches = [
         f"{key}: checkpoint={dims[key]} env={expected}"
         for key, expected in expected_dims.items()
-        if dims[key] != expected
+        if key != "use_adaptation_module" and dims[key] != expected
     ]
     if mismatches:
         raise ValueError(
@@ -197,7 +205,7 @@ def load_dog_policy_for_benchmark(
         dims["dog_num_obs_history"],
         dims["dog_actions"],
         use_adaptation_module=dims["use_adaptation_module"],
-    ).to("cpu")
+    ).to(device)
 
     ckpt_id_ = "last_dog" if ckpt_id == "last" else ckpt_id.zfill(6)
     ckpt = torch.load(
@@ -211,7 +219,7 @@ def load_dog_policy_for_benchmark(
     body = actor_critic.actor_body
 
     def policy(obs: dict, info: dict = {}):
-        hist = obs["obs_history"].to("cpu")
+        hist = obs["obs_history"].to(device)
         actor_input = (hist,)
         if adaptation_module is not None:
             latent = adaptation_module(hist)
@@ -235,13 +243,24 @@ def load_dog_policy_for_benchmark(
 @dataclass
 class PolicyHandle:
     name: str
-    policy: Callable  # dog_policy(obs_dict) → action tensor (CPU)
+    policy: Callable  # dog_policy(obs_dict) → action tensor (sim device)
     env_start: int  # inclusive index into the shared env pool
     env_end: int  # exclusive
+    envs_per_point: int  # envs averaged for one scenario point (--num_envs_per_policy)
 
     @property
     def n_envs(self) -> int:
         return self.env_end - self.env_start
+
+    @property
+    def points_per_batch(self) -> int:
+        """Scenario points this handle's slice can evaluate simultaneously."""
+        return max(1, self.n_envs // self.envs_per_point)
+
+    def cell(self, point_index: int) -> Tuple[int, int]:
+        """Env range holding one scenario point's samples for this policy."""
+        start = self.env_start + point_index * self.envs_per_point
+        return start, start + self.envs_per_point
 
 
 class BenchmarkHistoryWrapper(HistoryWrapper):
@@ -495,28 +514,75 @@ class Accumulator:
         self.steps.add_(1.0)
 
     # ---- summary methods: called once per scenario point ----
+    #
+    # One accumulator covers the whole env pool; ``env_slice`` selects the envs
+    # belonging to a single scenario point, so per-step accumulation stays a
+    # handful of full-width ops no matter how many points share the rollout.
 
-    def rmse(self, key: str) -> float:
-        sq = self._stats.get(f"{key}_sq", torch.zeros(1, device=self.dev))
-        return float((sq / self.steps.clamp(min=1)).mean().sqrt().cpu())
+    def rmse(self, key: str, env_slice: slice = slice(None)) -> float:
+        sq = self._stats.get(f"{key}_sq")
+        if sq is None:
+            return 0.0
+        return float((sq[env_slice] / self.steps[env_slice].clamp(min=1)).mean().sqrt().cpu())
 
-    def mean(self, key: str) -> float:
-        s = self._stats.get(f"{key}_sum", torch.zeros(1, device=self.dev))
-        return float((s / self.steps.clamp(min=1)).mean().cpu())
+    def mean(self, key: str, env_slice: slice = slice(None)) -> float:
+        s = self._stats.get(f"{key}_sum")
+        if s is None:
+            return 0.0
+        return float((s[env_slice] / self.steps[env_slice].clamp(min=1)).mean().cpu())
 
-    def std(self, key: str) -> float:
-        s = self._stats.get(f"{key}_sum", torch.zeros(1, device=self.dev))
-        sq = self._stats.get(f"{key}_sq", torch.zeros(1, device=self.dev))
-        n = self.steps.clamp(min=1)
-        return float((sq / n - (s / n).pow(2)).clamp(min=0).mean().sqrt().cpu())
+    def std(self, key: str, env_slice: slice = slice(None)) -> float:
+        s = self._stats.get(f"{key}_sum")
+        sq = self._stats.get(f"{key}_sq")
+        if s is None or sq is None:
+            return 0.0
+        n = self.steps[env_slice].clamp(min=1)
+        return float((sq[env_slice] / n - (s[env_slice] / n).pow(2)).clamp(min=0).mean().sqrt().cpu())
 
-    def total_count(self, key: str) -> int:
-        t = self._stats.get(key, torch.zeros(1, device=self.dev))
-        return int(t.sum().cpu().item())
+    def total_count(self, key: str, env_slice: slice = slice(None)) -> int:
+        t = self._stats.get(key)
+        if t is None:
+            return 0
+        return int(t[env_slice].sum().cpu().item())
+
+    def view(self, start: int, end: int) -> "AccumulatorView":
+        return AccumulatorView(self, start, end)
 
     def reset(self):
         self._stats.clear()
         self.steps.zero_()
+
+
+class AccumulatorView:
+    """One scenario point's envs within a pooled Accumulator.
+
+    Exposes the same read API as Accumulator so result building does not care
+    whether a rollout measured one point or many.
+    """
+
+    def __init__(self, acc: Accumulator, start: int, end: int):
+        self._acc = acc
+        self._slice = slice(start, end)
+
+    @property
+    def steps(self) -> torch.Tensor:
+        return self._acc.steps[self._slice]
+
+    @property
+    def _stats(self) -> Dict[str, torch.Tensor]:
+        return self._acc._stats
+
+    def rmse(self, key: str) -> float:
+        return self._acc.rmse(key, self._slice)
+
+    def mean(self, key: str) -> float:
+        return self._acc.mean(key, self._slice)
+
+    def std(self, key: str) -> float:
+        return self._acc.std(key, self._slice)
+
+    def total_count(self, key: str) -> int:
+        return self._acc.total_count(key, self._slice)
 
 
 # ---------------------------------------------------------------------------
@@ -691,6 +757,10 @@ def _apply_benchmark_env_overrides(cfg, total_envs: int, envs_per_policy: int):
     cfg.asset.render_sphere = False
     cfg.env.episode_length_s = 20.0
     cfg.commands.resampling_time = 1e9
+    # Each benchmark cell owns its command. Training's group resampling and
+    # PRBS/chirp writers would overwrite it inside the physics callback.
+    cfg.response.grouping.enabled = False
+    cfg.response.excitation.enabled = False
     cfg.control.control_type = "M"
     cfg.rewards.use_terminal_body_height = True
     cfg.rewards.use_terminal_roll = True
@@ -718,6 +788,15 @@ def load_env_benchmark(
     return env, cfg
 
 
+def preview_command_layout(logdir: str, robot: Optional[str] = None) -> CommandLayout:
+    """Resolve a run's command layout without building its simulation.
+
+    Env pool sizing depends on which scenarios the layout enables, and that has
+    to be decided before WBCEnv is constructed.
+    """
+    return detect_command_layout(_load_cfg_from_pkl(logdir, robot=robot))
+
+
 # ---------------------------------------------------------------------------
 # Stage-1 global switch
 # ---------------------------------------------------------------------------
@@ -736,11 +815,31 @@ def configure_stage1(arm_intensity: float, ramp_iters: int = 1000):
 # Command setters (apply to all envs uniformly)
 # ---------------------------------------------------------------------------
 
+# Set by record_command_writes() while a scenario's command function runs, so
+# the caller learns which command columns that scenario actually drives. Batched
+# evaluation replays only those columns per env, leaving the rest as the env
+# itself set them.
+_CMD_WRITE_COLUMNS: Optional[set] = None
+
+
+@contextmanager
+def record_command_writes():
+    """Collect the command column indices written inside the block."""
+    global _CMD_WRITE_COLUMNS
+    columns: set = set()
+    _CMD_WRITE_COLUMNS = columns
+    try:
+        yield columns
+    finally:
+        _CMD_WRITE_COLUMNS = None
+
 
 def _set_cmd(env: HistoryWrapper, idx: int, value: float):
     b = env.env
     if b.commands_dog.shape[1] > idx:
         b.commands_dog[:, idx] = value
+        if _CMD_WRITE_COLUMNS is not None:
+            _CMD_WRITE_COLUMNS.add(idx)
 
 
 def set_vel_cmd(env: HistoryWrapper, x: float, y: float, yaw: float):
@@ -748,6 +847,8 @@ def set_vel_cmd(env: HistoryWrapper, x: float, y: float, yaw: float):
     b.commands_dog[:, 0] = x
     b.commands_dog[:, 1] = y
     b.commands_dog[:, 2] = yaw
+    if _CMD_WRITE_COLUMNS is not None:
+        _CMD_WRITE_COLUMNS.update((0, 1, 2))
 
 
 def set_pose_cmd(env: HistoryWrapper, pitch: float, roll: float, height_delta: float):
@@ -951,11 +1052,20 @@ def _eval_loop_parallel(
     cmd_fn: Optional[Callable] = None,
     settle_steps: int = 0,
     settle_cmd_fn: Optional[Callable] = None,
-) -> List[Accumulator]:
-    """Step all env groups in one call; accumulate metrics per-policy group.
+    metric_groups: Optional[List[Tuple[int, int]]] = None,
+) -> List["AccumulatorView"]:
+    """Step all env groups in one call; report metrics per metric group.
 
     Simulator tensors stay on device inside the metric loop.
-    Returns one Accumulator per handle, in the same order.
+
+    Actions are computed per handle, over that policy's whole env slice, so a
+    policy runs as one batched forward pass. Metrics accumulate once over the
+    whole pool -- every env carries its own command, so the maths is already
+    per-point correct -- and ``metric_groups`` (``(env_start, env_end)`` ranges)
+    only splits the result at the end, one view each, in the same order. It
+    defaults to one group per handle; batched scenario evaluation passes one
+    group per (policy, scenario point) cell so a single rollout yields every
+    point in the batch without extra per-step work.
 
     ``settle_steps`` runs that many un-accumulated steps first, holding
     ``settle_cmd_fn`` (falling back to ``cmd_fn``). Used by the step-response
@@ -970,7 +1080,8 @@ def _eval_loop_parallel(
 
     base = env.env
     gpu = base.device
-    n_per = handles[0].n_envs
+    if metric_groups is None:
+        metric_groups = [(h.env_start, h.env_end) for h in handles]
 
     def _step_policies():
         with torch.no_grad():
@@ -989,7 +1100,7 @@ def _eval_loop_parallel(
         (settle_cmd_fn or cmd_fn or (lambda _e: None))(env)
         _step_policies()
 
-    accs = [Accumulator(n_per, device=gpu) for _ in handles]
+    acc = Accumulator(base.num_envs, device=gpu)
     prev_contact = (base.contact_forces[:, base.feet_indices, 2] > 1.0).clone()
     contact_transition_counts = torch.zeros(base.num_envs, device=gpu)
     R2D = 180.0 / math.pi
@@ -1010,7 +1121,7 @@ def _eval_loop_parallel(
 
         env.step(all_actions, env.arm_fake_actions)
 
-        # --- shared tensors read once, then sliced per group (no extra copies) ---
+        # --- shared tensors read once; accumulated full-width (no extra copies) ---
         vel = base.base_lin_vel  # [total_envs, 3]
         ang = base.base_ang_vel  # [total_envs, 3]
         cmd = base.commands_dog  # [total_envs, D]
@@ -1032,93 +1143,69 @@ def _eval_loop_parallel(
             stance_width = _actual_stance_width(env)
             stance_length = _actual_stance_length(env)
 
-        # --- per-policy group accumulation ---
-        for h, acc in zip(handles, accs):
-            s, e = h.env_start, h.env_end
+        # --- accumulation over the whole pool ---
+        # Each env already holds its own scenario point's command, so every
+        # error below is per-point correct without slicing; the per-point split
+        # happens once at the end, in the returned views.
+        acc.add_sq_err("vx", vel[:, 0], cmd[:, 0])
+        acc.add_sq_err("vy", vel[:, 1], cmd[:, 1])
+        acc.add_sq_err("yaw", ang[:, 2], cmd[:, 2])
+        lin_vel_err = torch.sum(torch.square(cmd[:, :2] - vel[:, :2]), dim=1)
+        acc.add_sq("lin_vel_xy", lin_vel_err)
+        if ref_xi is not None:
+            # Preserve this branch's prescribed second-order R2 trajectory.
+            # Keep the two velocity channels for historical metric comparability.
+            acc.add_sq("response_consistency", torch.sum(torch.square(vel[:, :2] - ref_xi[:, :2]), dim=1))
+        yaw_err = torch.square(cmd[:, 2] - ang[:, 2])
+        acc.add_val("tracking_lin_vel_reward", torch.exp(-lin_vel_err / base.cfg.rewards.tracking_sigma))
+        acc.add_val("tracking_ang_vel_reward", torch.exp(-yaw_err / base.cfg.rewards.tracking_sigma_yaw))
 
-            vel_g = vel[s:e]
-            ang_g = ang[s:e]
-            cmd_g = cmd[s:e]
-            h_g = height[s:e]
+        if layout.has_body_pitch:
+            acc.add_sq_err("pitch_deg_track", pitch * R2D, cmd[:, 3] * R2D)
+        if layout.has_body_roll:
+            acc.add_sq_err("roll_deg_track", roll * R2D, cmd[:, 4] * R2D)
+            acc.add_sq("orientation_control", orientation_sq)
+        if layout.has_body_height:
+            acc.add_sq_err("height_track", height, cmd[:, 5] + layout.base_height_target)
 
-            acc.add_sq_err("vx", vel_g[:, 0], cmd_g[:, 0])
-            acc.add_sq_err("vy", vel_g[:, 1], cmd_g[:, 1])
-            acc.add_sq_err("yaw", ang_g[:, 2], cmd_g[:, 2])
-            lin_vel_err = torch.sum(torch.square(cmd_g[:, :2] - vel_g[:, :2]), dim=1)
-            acc.add_sq("lin_vel_xy", lin_vel_err)
-            if ref_xi is not None:
-                # Predictable-plant metric: deviation of the realised base
-                # velocity from the PRESCRIBED reference trajectory (R2's
-                # critically damped second-order model with a rate box), rather
-                # than from the raw command. Low = the closed loop behaves like
-                # the fixed linear plant the MPC will plan through.
-                # Restricted to the two velocity channels so the number stays
-                # comparable with results recorded before R2 replaced the
-                # first-order model.
-                resp_cons_err = torch.sum(torch.square(vel_g[:, :2] - ref_xi[s:e, :2]), dim=1)
-                acc.add_sq("response_consistency", resp_cons_err)
-            yaw_err = torch.square(cmd_g[:, 2] - ang_g[:, 2])
-            acc.add_val("tracking_lin_vel_reward", torch.exp(-lin_vel_err / base.cfg.rewards.tracking_sigma))
-            acc.add_val("tracking_ang_vel_reward", torch.exp(-yaw_err / base.cfg.rewards.tracking_sigma_yaw))
+        if layout.has_dynamic_gait:
+            contact_transition_counts.add_(_contact_transition_mask(env, prev_contact, slice(None)))
+            acc.add_sq_err("swing_h", swing_height, cmd[:, 7])
+            acc.add_sq_err("stance_w", stance_width, cmd[:, 8])
+            if layout.has_stance_length and cmd.shape[1] > 9:
+                acc.add_sq_err("stance_l", stance_length, cmd[:, 9])
 
-            if layout.has_body_pitch:
-                acc.add_sq_err("pitch_deg_track", pitch[s:e] * R2D, cmd_g[:, 3] * R2D)
-            if layout.has_body_roll:
-                acc.add_sq_err("roll_deg_track", roll[s:e] * R2D, cmd_g[:, 4] * R2D)
-                acc.add_sq("orientation_control", orientation_sq[s:e])
-            if layout.has_body_height:
-                acc.add_sq_err("height_track", h_g, cmd_g[:, 5] + layout.base_height_target)
+            acc.add_val("gait_contact_force_cost", gait_costs["contact_force_cost"])
+            acc.add_val("gait_contact_vel_cost", gait_costs["contact_vel_cost"])
+            acc.add_sq("foot_clearance", gait_costs["clearance_sq"])
+            acc.add_sq("raibert", gait_costs["raibert_sq"])
 
-            if layout.has_dynamic_gait:
-                freq_cmd_g = cmd_g[:, 6]
-                env_slice = slice(s, e)
-                transitions = _contact_transition_mask(env, prev_contact[env_slice], env_slice)
-                contact_transition_counts[s:e].add_(transitions)
+        # Stability RMS: raw value accumulation (always computed)
+        acc.add_val("height", height)
+        acc.add_val("pitch_deg_raw", pitch * R2D)
+        acc.add_val("roll_deg_raw", roll * R2D)
 
-                sw_cmd_g = cmd_g[:, 7]
-                sw_act_g = swing_height[s:e]
-                acc.add_sq_err("swing_h", sw_act_g, sw_cmd_g)
+        dog_t = torques[:, :12] if torques.shape[1] >= 12 else torques
+        acc.add_val("max_torque", dog_t.abs().max(dim=1).values)
+        acc.add_count("fell", (reset_b & ~timeout).float())
+        if hasattr(base, "body_height_buf"):
+            height_terminal = reset_b & base.body_height_buf
+        else:
+            terminal_h = float(getattr(base.cfg.rewards, "terminal_body_height", 0.17))
+            height_terminal = reset_b & (height < terminal_h)
+        acc.add_count("fell_height", (height_terminal & ~timeout).float())
 
-                sw_width_cmd_g = cmd_g[:, 8]
-                sw_width_act_g = stance_width[s:e]
-                acc.add_sq_err("stance_w", sw_width_act_g, sw_width_cmd_g)
-
-                if layout.has_stance_length and cmd_g.shape[1] > 9:
-                    st_len_cmd_g = cmd_g[:, 9]
-                    st_len_act_g = stance_length[s:e]
-                    acc.add_sq_err("stance_l", st_len_act_g, st_len_cmd_g)
-
-                acc.add_val("gait_contact_force_cost", gait_costs["contact_force_cost"][s:e])
-                acc.add_val("gait_contact_vel_cost", gait_costs["contact_vel_cost"][s:e])
-                acc.add_sq("foot_clearance", gait_costs["clearance_sq"][s:e])
-                acc.add_sq("raibert", gait_costs["raibert_sq"][s:e])
-
-            # Stability RMS: raw value accumulation (always computed)
-            acc.add_val("height", h_g)
-            acc.add_val("pitch_deg_raw", pitch[s:e] * R2D)
-            acc.add_val("roll_deg_raw", roll[s:e] * R2D)
-
-            dog_t = torques[s:e, :12] if torques.shape[1] >= 12 else torques[s:e]
-            acc.add_val("max_torque", dog_t.abs().max(dim=1).values)
-            acc.add_count("fell", (reset_b[s:e] & ~timeout[s:e]).float())
-            if hasattr(base, "body_height_buf"):
-                height_terminal = reset_b[s:e] & base.body_height_buf[s:e]
-            else:
-                terminal_h = float(getattr(base.cfg.rewards, "terminal_body_height", 0.17))
-                height_terminal = reset_b[s:e] & (h_g < terminal_h)
-            acc.add_count("fell_height", (height_terminal & ~timeout[s:e]).float())
-
-            acc.tick()
+        acc.tick()
 
     if layout.has_dynamic_gait:
         elapsed = max(float(n_steps) * float(base.dt), 1e-6)
-        for h, acc in zip(handles, accs):
-            s, e = h.env_start, h.env_end
-            cmd_g = base.commands_dog[s:e]
-            actual_freq = contact_transition_counts[s:e] / (8.0 * elapsed)
-            acc.add_sq("gait_freq", torch.square(actual_freq - cmd_g[:, 6]) * acc.steps.clamp(min=1))
+        actual_freq = contact_transition_counts / (8.0 * elapsed)
+        acc.add_sq(
+            "gait_freq",
+            torch.square(actual_freq - base.commands_dog[:, 6]) * acc.steps.clamp(min=1),
+        )
 
-    return accs
+    return [acc.view(s, e) for s, e in metric_groups]
 
 
 # ---------------------------------------------------------------------------

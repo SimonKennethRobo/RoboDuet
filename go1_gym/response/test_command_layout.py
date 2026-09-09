@@ -187,30 +187,33 @@ def test_curriculum_grid_is_small_enough_to_be_covered(cfg):
 
 
 # --------------------------------------------------------------------------
-# Ordering regression: enable_dyna_gait must not win over the R1 overrides
+# Profile ownership: enabling a layout must preserve command configuration
 # --------------------------------------------------------------------------
 
 
-def test_response_overrides_are_applied_after_enable_dyna_gait():
-    """``enable_dyna_gait`` rewrites gait_frequency_cmd_range[0] from
-    ``--dyna_gait_min_frequency``.  With the default 0.0 that would reopen the
-    band all the way down to "no gait at all" if the R1 overrides ran first."""
+def test_dynamic_gait_preserves_profile_command_values(monkeypatch):
+    """The profile owns the band; layout activation cannot silently rewrite it."""
     cfg = build_roboduet_config(_args(dyna_gait_min_frequency=0.0))
     assert cfg.commands.gait_frequency_cmd_range == [2.5, 3.5]
     assert cfg.commands.limit_gait_frequency == [2.5, 3.5]
 
-    # Even an explicit low value must not survive the R1 narrowing.
+    # The legacy CLI lower bound remains ineffective on this branch.
     cfg = build_roboduet_config(_args(dyna_gait_min_frequency=1.0))
     assert cfg.commands.gait_frequency_cmd_range == [2.5, 3.5]
 
+    from go1_gym.envs.config.wbc import ROBODUET_PROFILE
+    monkeypatch.setitem(ROBODUET_PROFILE.overrides, "commands.gait_frequency_cmd_range", [2.6, 3.4])
+    monkeypatch.setitem(ROBODUET_PROFILE.overrides, "commands.limit_gait_frequency", [2.5, 3.5])
+    cfg = build_roboduet_config(_args())
+    assert cfg.commands.gait_frequency_cmd_range == [2.6, 3.4]
+    assert cfg.commands.limit_gait_frequency == [2.5, 3.5]
+
 
 def test_build_without_dynamic_gait_still_works():
-    """The benchmark package builds a bare config at import time; the gait half
-    of the overrides must be skipped rather than raise when those columns do
-    not exist."""
+    """Inactive gait defaults must not add command slots to a bare config."""
     cfg = build_roboduet_config(_args(dyna_gait=False))
     assert cfg.dog.dog_num_commands == 6
-    assert cfg.commands.body_roll_range == [0.0, 0.0]  # non-gait half still applied
+    assert cfg.commands.body_roll_range == [0.0, 0.0]
     assert cfg.commands.num_bins_body_pitch == 5
 
 

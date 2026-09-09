@@ -147,9 +147,30 @@ COMMON_OVERRIDES = {
     "env.priv_observe_vel": True,
     "env.priv_observe_arm_mount_tf": True,
     "env.priv_observe_high_freq_goal": False,
-    # base body commands
-    "commands.body_roll_range": [-0.4, 0.4],
-    "commands.limit_body_roll": [-0.4, 0.4],
+    # R1 command defaults: keep every channel slot; only five channels enter
+    # the adaptive curriculum. Height is a delta from base_height_target.
+    "commands.body_roll_range": [0.0, 0.0],
+    "commands.limit_body_roll": [0.0, 0.0],
+    "commands.num_bins_body_roll": 1,
+    "commands.num_bins_body_pitch": 1,
+    "commands.num_bins_body_height": 1,
+    "commands.body_height_cmd": [-0.10, 0.05],
+    "commands.limit_body_height": [-0.10, 0.05],
+    "commands.gait_frequency_cmd_range": [2.8, 3.0],
+    "commands.limit_gait_frequency": [2.8, 3.0],
+    "commands.num_bins_gait_frequency": 1,
+    "commands.footswing_height_range": [0.04, 0.041],
+    "commands.limit_footswing_height": [0.04, 0.041],
+    "commands.num_bins_footswing_height": 1,
+    "commands.stance_width_range": [0.28, 0.32],
+    "commands.limit_stance_width": [0.28, 0.32],
+    "commands.num_bins_stance_width": 1,
+    "commands.stance_length_range": [0.43, 0.46],
+    "commands.limit_stance_length": [0.43, 0.46],
+    "commands.num_bins_stance_length": 1,
+    "commands.gait_duration_cmd_range": [0.49, 0.5],
+    "commands.limit_gait_duration": [0.49, 0.5],
+    "commands.num_bins_gait_duration": 1,
     "commands.T_force_range": [2.0, 4.0],
     "commands.add_force_thres": 0.3,
     # legs / dog policy
@@ -219,6 +240,15 @@ COMMON_OVERRIDES = {
     # namespace shared by pretrained-dog and WBC reward tables alike (see
     # LeggedRobot._prepare_reward_function's pretrained -> wbc fallback merge)
     "rewards.terminal_body_height": 0.17,
+    # v3-stage2 reward and attitude termination defaults.
+    "rewards.raibert_form": "quadratic",
+    "rewards.raibert_sigma": 0.35,
+    "reward_scales.raibert_heuristic": -1.0,
+    "reward_scales.feet_impact_vel": 0.4,
+    "reward_scales.feet_contact_forces": -0.01,
+    "rewards.feet_impact_vel_sigma": 0.02,
+    "rewards.terminal_body_ori": math.radians(60.0),
+    "rewards.terminal_roll_pitch_grace_s": 1.0,
     # ---- R4.4: hand the instantaneous posture terms over to R4.1 -------------
     # They guard a real failure mode: a policy can swing the body violently
     # inside a gait cycle and still look correct to R4.1, which sees only the
@@ -317,6 +347,14 @@ COMMON_OVERRIDES = {
     # halved episode length before stage 4 recovered it.
     "reward_scales.domain_consistency": -0.5,
     "reward_scales.loco_energy": -0.00004,
+    "domain_rand.push_robots": True,
+    "domain_rand.max_push_vel_xy": 1.0,
+    "domain_rand.push_interval_s_range": [1.0, 8.0],
+    "domain_rand.push_curriculum": True,
+    "domain_rand.push_curriculum_initial_fraction": 0.0,
+    "domain_rand.push_curriculum_growth_iterations": 8000,
+    "terrain.reset_curriculum_tracking_threshold": 0.35,
+    "terrain.reset_curriculum_growth_iterations": 12000,
     # domain randomization: base & mount
     "domain_rand.dog_obs_frame_drop_prob": 0.0,
     "domain_rand.added_mass_range": [-2.0, 2.0],
@@ -427,7 +465,7 @@ STAGE2_OVERRIDES = {
     "wbc.reward_scales.arm_contact": -1.0,
     "wbc.reward_scales.jump": 5.0,
     "wbc.reward_scales.hip_action_l2": -0.05,
-    "wbc.reward_scales.raibert_heuristic": -0.0,
+    "wbc.reward_scales.raibert_heuristic": -1.0,
     "wbc.rewards.terminal_body_height": 0.17,
     "wbc.rewards.use_terminal_body_height": True,
     "wbc.rewards.use_terminal_roll": False,
@@ -989,13 +1027,6 @@ RESPONSE_CURRICULUM_OVERRIDES = {
     "response.curriculum.refresh_threshold": 0.05,
 }
 
-# Enabled so the curriculum can gate it: _push_robots additionally requires a
-# non-zero disturbance intensity, which only stage 4 provides. Leaving this
-# False would make stage 4 a no-op, and stage 4 carries R8's entire robustness-
-# recovery claim -- in v1 there is no terrain to make harder, so pushes are all
-# it has.
-RESPONSE_CURRICULUM_OVERRIDES["domain_rand.push_robots"] = True
-
 
 ROBODUET_OVERRIDES = {
     **RESPONSE_MODEL_OVERRIDES,
@@ -1017,99 +1048,6 @@ FEATURE_LAYOUT = {
     "rot6d_command_dims": 3,
     "dynamic_gait_command_dims": 5,
     "goal_reaching_plan_action_dims": 9,
-}
-
-
-DYNAMIC_GAIT_BIN_CONFIG = {
-    "commands.num_bins_gait_frequency": 11,
-    "commands.num_bins_footswing_height": 5,
-    "commands.num_bins_gait_duration": 3,
-    "commands.num_bins_stance_width": 3,
-    "commands.num_bins_stance_length": 3,
-}
-
-
-# ============================================================
-# R1 -- command-space trimming for the response-consistent policy.
-#
-# Collapses the MoB behaviour space to the five channels the SE(3) MPC will
-# actually decide (forward/lateral velocity, yaw rate, body height, body pitch),
-# leaves gait frequency semi-free in a narrow band, and pins everything else.
-#
-# Applied by core.apply_response_overrides() AFTER the feature-enable block,
-# because enable_dyna_gait() rewrites gait_frequency_cmd_range from
-# --dyna_gait_min_frequency and would otherwise win.
-#
-# R1 invariant: frozen channels keep their slot in commands_dog.  Deleting an
-# index would change the observation width and poison the comparison against
-# the unmodified WTW policy.  They are frozen by giving them a degenerate
-# sampling range and a single curriculum bin, never by removing them.
-# ============================================================
-RESPONSE_COMMAND_OVERRIDES = {
-    # body roll: frozen at 0.  Its commandable amplitude (~+-10 deg) is the same
-    # order as the roll oscillation trot induces on its own (+-2-4 deg), so the
-    # signal-to-noise ratio does not support identifying a roll response.  Left
-    # as an ablation, not a permanent restriction.
-    "commands.body_roll_range": [0.0, 0.0],
-    "commands.limit_body_roll": [0.0, 0.0],
-    "commands.num_bins_body_roll": 1,
-    # body pitch / body height stay decision variables -- the MPC needs body
-    # lean and height adjustment to help manipulation -- and become real
-    # curriculum dimensions instead of the single all-covering bin they had.
-    "commands.num_bins_body_pitch": 5,
-    "commands.num_bins_body_height": 5,
-    # body height: narrowed to the band the robot can actually hold.
-    #
-    # The command is a delta on rewards.base_height_target (0.30), so wtw.py's
-    # [-0.2, 0.3] asks for body heights of [0.10, 0.60] m.  Measured against
-    # that: 36.7% of samples ask for more than 0.40 m, and nothing above ~0.32 m
-    # is reachable -- a trained policy saturates at 0.319 m however hard it is
-    # commanded.  At the other end 14.3% ask for less than terminal_body_height
-    # (0.17), so obeying them ends the episode; the policy correctly refuses and
-    # floors at ~0.226 m.  About 70% of the commanded range is therefore
-    # unusable, and the measured DC gain on this channel is 0.11-0.19.
-    #
-    # That is fatal specifically for R4.3, whose whole job is to pin the DC gain
-    # to 1, and for R4.1, which rewards tracking a reference model that faithfully
-    # follows a physically impossible command.  The band below is the one a
-    # trained policy demonstrably covers (0.226-0.319 m), with the low end lifted
-    # to keep 0.03 m of margin over the termination height.
-    #
-    # Overridden here rather than in wtw.py so stage 2 keeps the wider range.
-    # Widen again once a policy actually tracks this channel -- the ceiling is a
-    # property of the learned gait, not a measured kinematic limit (a fixed-PD
-    # sweep does not settle well enough to give one).
-    "commands.body_height_cmd": [-0.10, 0.03],
-    "commands.limit_body_height": [-0.10, 0.03],
-}
-
-# Only meaningful with --dyna_gait (dog_num_commands == 11); without it these
-# columns do not exist.
-RESPONSE_GAIT_COMMAND_OVERRIDES = {
-    # Semi-free: trained over a narrow band for robustness, fixed at deployment,
-    # recorded as a conditioning input for the gait-phase residual model.
-    # A single bin keeps it out of the adaptive curriculum (R1 invariant) while
-    # still sampling uniformly across the band.
-    "commands.gait_frequency_cmd_range": [2.5, 3.5],
-    "commands.limit_gait_frequency": [2.5, 3.5],
-    "commands.num_bins_gait_frequency": 1,
-    # Gait type is locked to trot: different gaits have structurally different
-    # gait-phase residuals, and mixing them stops the residual model converging.
-    # footswing height and duty are already effectively fixed upstream; stance
-    # width/length were not, and are narrowed to a small band around the values
-    # _reward_raibert_heuristic treats as nominal (0.30 / 0.45).
-    "commands.footswing_height_range": [0.06, 0.061],
-    "commands.limit_footswing_height": [0.06, 0.061],
-    "commands.num_bins_footswing_height": 1,
-    "commands.stance_width_range": [0.28, 0.32],
-    "commands.limit_stance_width": [0.28, 0.32],
-    "commands.num_bins_stance_width": 1,
-    "commands.stance_length_range": [0.42, 0.46],
-    "commands.limit_stance_length": [0.42, 0.46],
-    "commands.num_bins_stance_length": 1,
-    "commands.gait_duration_cmd_range": [0.49, 0.5],
-    "commands.limit_gait_duration": [0.49, 0.5],
-    "commands.num_bins_gait_duration": 1,
 }
 
 

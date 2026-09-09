@@ -336,6 +336,8 @@ if __name__ == "__main__":
         "the M2 direction-dependent reachability table.",
     )
 
+    parser.add_argument('--raibert_exp', action='store_true', default=False,
+                        help='Use exponential Raibert reward with v3-stage2 weights (0.4 / 0.2).')
     args = parser.parse_args()
 
     main(args)

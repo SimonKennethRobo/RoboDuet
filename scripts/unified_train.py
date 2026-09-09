@@ -186,6 +186,8 @@ if __name__ == '__main__':
     parser.add_argument('--use_rot6d', action='store_true', default=False)
     parser.add_argument('--dyna_gait', action='store_true', default=False)
 
+    parser.add_argument('--raibert_exp', action='store_true', default=False,
+                        help='Use exponential Raibert reward with v3-stage2 weights (0.4 / 0.2).')
     args = parser.parse_args()
 
     train_go1(args)

@@ -269,6 +269,11 @@ class LeggedRobotDefaults:
         gravity_range = [-1.0, 1.0]
         push_robots = True
         push_interval_s = 15
+        # Optional per-env, per-push interval jitter; None keeps the fixed period.
+        push_interval_s_range = None
+        push_curriculum = False
+        push_curriculum_initial_fraction = 0.0
+        push_curriculum_growth_iterations = 10000
         max_push_vel_xy = 1.
         max_push_ang_vel = 0.6
         randomize_action_delay = True
@@ -299,9 +304,13 @@ class LeggedRobotDefaults:
         terminal_foot_height = -0.005
         use_terminal_roll_pitch = False
         terminal_body_ori = 0.5
+        terminal_roll_pitch_grace_s = 0.
         kappa_gait_probs = 0.07
         gait_force_sigma = 50.
         gait_vel_sigma = 0.5
+        feet_impact_vel_sigma = 0.02
+        raibert_form = "quadratic"
+        raibert_sigma = 0.35
         footswing_height = 0.09
 
     class reward_scales:

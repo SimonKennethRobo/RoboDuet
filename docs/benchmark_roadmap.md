@@ -25,21 +25,25 @@
 | `benchmark/dog_policy/evaluation.py` | dog-only evaluation 实现，包括 policy/env 加载、配置兼容性检查、metric 累积和结构化结果保存。 |
 | `benchmark/env_fps.py` | 环境吞吐 benchmark，用不同 env count 测量 FPS、耗时和显存。 |
 
-`benchmark/dog_policy/cli.py` 当前定位是 dog-only policy benchmark。它把多个候选 policy 放到同一个共享 simulation 中运行：
+`benchmark/dog_policy/cli.py` 当前定位是 dog-only policy benchmark。它把多个候选 policy 放到同一个共享 simulation 中运行，并且在 policy 之下再按 scenario point 切分一层：
 
 ```text
-total_envs = num_envs_per_policy * num_policies
+total_envs = num_envs_per_policy * num_policies * points_per_rollout
+points_per_rollout = min(max_num_envs // (num_envs_per_policy * num_policies), 场景最大 grid 点数)
 ```
 
-每个 policy 拥有一段连续的 env slice。例如 3 个 policy、每个 policy 32 个 env，则总共创建 96 个 env：
+`--num_envs_per_policy` 只决定单个 policy 在**单个 scenario point** 上取平均的样本量；`--max_num_envs` 是 env 池上限，决定一次 rollout 能同时铺开多少个 grid 点。例如 2 个 policy、每个 point 32 个 env、场景 A 有 15 个 grid 点，则创建 960 个 env：
 
 ```text
-policy A -> env [0:32)
-policy B -> env [32:64)
-policy C -> env [64:96)
+policy A -> env [0:480)    其中 point k -> env [k*32:(k+1)*32)
+policy B -> env [480:960)  其中 point k -> env [480+k*32:480+(k+1)*32)
 ```
 
-每一步中，脚本分别对每个 env slice 调对应 policy，然后一次 `env.step()` 推进全部 env。这个设计已经利用了 IsaacGym 的 GPU 并行能力，比逐个 policy 串行启动 simulation 更高效。
+每一步中，脚本按 policy slice 调对应 policy（每个 policy 仍是一次批量前向），一次 `env.step()` 推进全部 env，然后按 (policy, point) cell 分别累积 metric。因此整个 grid 只需要一次 rollout，而不是每个 grid 点各跑一次。grid 大于 `points_per_rollout` 时会拆成多次 rollout。
+
+有两个约束会限制并行：不同 observation/control layout 的 policy 不能共享 simulation（自动分组、逐组串行）；scenario B 扫的 arm intensity 是进程级全局量而非 per-env，所以它的点之间不能合批。
+
+dog policy 与 simulation 跑在同一个 device（`--sim_device`）。此前 policy 被固定加载到 CPU，每步都要把整个 observation history 搬出 GPU 再把 action 搬回来，这项开销约占 rollout 时间的 95%，同时导致 GPU 利用率很低——也正因为它是瓶颈，grid 并行的收益会被完全掩盖。
 
 需要提前注意的是，RoboDuet 本身是双 policy 设计：
 
