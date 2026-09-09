@@ -725,6 +725,16 @@ def _load_cfg_from_pkl(logdir: str, robot: Optional[str] = None) -> ConfigNode:
 
 
 def _apply_benchmark_env_overrides(cfg, total_envs: int, envs_per_policy: int):
+    # Benchmark scenarios own initialization difficulty, not the checkpoint's
+    # training cohort. Also let scenario E's existing zero-range override work.
+    if cfg.terrain.reset_mode == "fixed_mixture":
+        cfg.terrain.roll_init_range = cfg.terrain.reset_mix_easy_tilt_rad
+        cfg.terrain.pitch_init_range = cfg.terrain.reset_mix_easy_tilt_rad
+        cfg.terrain.yaw_init_range = cfg.terrain.reset_mix_yaw_rad
+        cfg.terrain.z_init_range = cfg.terrain.reset_mix_z_m
+        cfg.terrain.reset_mode = "legacy"
+        cfg.terrain.reset_curriculum = False
+    cfg.terrain.robustness_metrics = False
     cfg.terrain.mesh_type = "plane"
     cfg.terrain.teleport_robots = False
     for attr in [

@@ -16,6 +16,7 @@ from params_proto import PrefixProto
 
 import wandb
 from go1_gym import MINI_GYM_ROOT_DIR
+from go1_gym.envs.roboduet.robustness import log_robustness_iteration
 from go1_gym.envs.roboduet.utils import aggregate_episode_value, apply_wbc_reward_settings
 from go1_gym.envs.roboduet.wbc_env_wrapper import HistoryWrapper
 from go1_gym.utils import global_switch
@@ -531,6 +532,7 @@ class Runner:
 
                 ep_string = f""
                 wandb_dict = {}
+                log_robustness_iteration(self.env, self.log_dir, it, wandb_dict)
                 wandb_dict["Efficiency/collect_time"] = collection_time
                 wandb_dict["Efficiency/learn_time"] = learn_time
                 self.tot_timesteps += self.num_steps_per_env * self.env.num_envs

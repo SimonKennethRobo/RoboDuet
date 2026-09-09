@@ -49,6 +49,7 @@ from go1_gym.response.reward_terms import (
 from go1_gym.utils import global_switch, quaternion_to_rpy
 from go1_gym.utils.math_utils import get_scale_shift, quat_apply_yaw
 from go1_gym.utils.terrain import Terrain
+from go1_gym.envs.roboduet.robustness import FixedResetMixture, RobustnessMetrics
 
 #: The reward terms the adaptive command curriculum reads as its progress
 #: signal.  R6 invariant 2: only the original tracking terms may appear here --
@@ -1564,6 +1565,17 @@ class LeggedRobot(BaseTask):
         """Accumulate one simulator-step sample in physical units, without reward functions or scales."""
         lin_vel_error = self.base_lin_vel[:, :2] - self.commands_dog[:, :2]
         yaw_rate_error = self.base_ang_vel[:, 2] - self.commands_dog[:, 2]
+        if self.robustness_metrics is not None:
+            self.robustness_age_steps += 1
+            n = self.num_train_envs
+            zeros = torch.zeros(n, dtype=torch.bool, device=self.device)
+            height_failure = self.body_height_buf[:n] if self.cfg.rewards.use_terminal_body_height else zeros
+            orientation_failure = self.roll_pitch_buf[:n] if self.cfg.rewards.use_terminal_roll_pitch else zeros
+            self.robustness_metrics.update(
+                torch.cat((lin_vel_error[:n], yaw_rate_error[:n, None]), dim=1),
+                self.robustness_age_steps[:n], self.reset_buf[:n], self.time_out_buf[:n],
+                height_failure, orientation_failure, self.robustness_push_mask[:n],
+            )
         sums = self.performance_metric_sums
         sums["vx_abs_error"] += torch.abs(lin_vel_error[:, 0])
         sums["vy_abs_error"] += torch.abs(lin_vel_error[:, 1])
@@ -1886,7 +1898,19 @@ class LeggedRobot(BaseTask):
         self._arm_log_performance_metrics_hook(train_env_ids, steps)
 
     def _init_reset_curriculum(self):
-        self.reset_curriculum_enabled = bool(getattr(self.cfg.terrain, 'reset_curriculum', False))
+        self.reset_mixture = FixedResetMixture(self.cfg.terrain, self.num_envs, self.num_train_envs, self.device)
+        self.robustness_push_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        # Unlike episode_length_buf, this clock is never randomized by Runner.
+        self.robustness_age_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self.robustness_metrics = (
+            RobustnessMetrics(self.reset_mixture.hard[:self.num_train_envs], self.dt,
+                              self.cfg.terrain.robustness_early_window_s)
+            if self.cfg.terrain.robustness_metrics else None
+        )
+        self.reset_curriculum_enabled = bool(getattr(self.cfg.terrain, 'reset_curriculum', False)) and not self.reset_mixture.enabled
+        if self.reset_mixture.enabled:
+            n_hard = int(self.reset_mixture.hard[:self.num_train_envs].sum().item())
+            print(f"[reset mixture groups] train easy={self.num_train_envs - n_hard}, hard={n_hard}; legacy reset ramp bypassed", flush=True)
         self.reset_curriculum_started = False
         self.reset_curriculum_start_iteration = -1
         self.reset_curriculum_intensity = 1.0
@@ -1989,6 +2013,17 @@ class LeggedRobot(BaseTask):
         if not getattr(self, 'reset_curriculum_enabled', False):
             return max_range
         return max_range * float(getattr(self, 'reset_curriculum_intensity', 1.0))
+
+    def pop_robustness_metrics(self):
+        if self.robustness_metrics is None:
+            return {}
+        values = self.robustness_metrics.pop()
+        values["ResetMix/configured_hard_fraction"] = (
+            self.cfg.terrain.reset_mix_hard_fraction if self.reset_mixture.enabled else 0.0
+        )
+        values["Disturbance/configured_max_push_ang_vel_rad_s"] = self.cfg.domain_rand.max_push_ang_vel
+        values["Disturbance/configured_max_push_vel_xy_mps"] = self.cfg.domain_rand.max_push_vel_xy
+        return values
 
     def _resample_commands(self, env_ids):
         if len(env_ids) == 0:
@@ -2346,6 +2381,12 @@ class LeggedRobot(BaseTask):
         yaw_init_range = self._get_reset_curriculum_range("yaw_init_range")
         pitch_init_range = self._get_reset_curriculum_range("pitch_init_range")
         roll_init_range = self._get_reset_curriculum_range("roll_init_range")
+        mixture = self.reset_mixture
+        self.robustness_age_steps[env_ids] = 0
+        if mixture.enabled:
+            z_init_range = cfg.terrain.reset_mix_z_m
+            yaw_init_range = cfg.terrain.reset_mix_yaw_rad
+            tilt_limit = mixture.limit(env_ids, int(global_switch.count))
 
         # base position
         if self.custom_origins:
@@ -2373,12 +2414,19 @@ class LeggedRobot(BaseTask):
         init_yaws = torch_rand_float(
             -yaw_init_range, yaw_init_range, (len(env_ids), 1), device=self.device
         )
-        init_pitches = torch_rand_float(
-            -pitch_init_range, pitch_init_range, (len(env_ids), 1), device=self.device
-        )
-        init_rolls = torch_rand_float(
-            -roll_init_range, roll_init_range, (len(env_ids), 1), device=self.device
-        )
+        if mixture.enabled:
+            init_pitches = torch_rand_float(-1., 1., (len(env_ids), 1), device=self.device) * tilt_limit
+            init_rolls = torch_rand_float(-1., 1., (len(env_ids), 1), device=self.device) * tilt_limit
+        else:
+            init_pitches = torch_rand_float(-pitch_init_range, pitch_init_range, (len(env_ids), 1), device=self.device)
+            init_rolls = torch_rand_float(-roll_init_range, roll_init_range, (len(env_ids), 1), device=self.device)
+            mixture.episode_tilt_limit[env_ids] = max(pitch_init_range, roll_init_range)
+        tilt = torch.acos(torch.clamp(torch.cos(init_pitches[:, 0]) * torch.cos(init_rolls[:, 0]), -1., 1.))
+        mixture.episode_tilt[env_ids] = tilt
+        if self.robustness_metrics is not None:
+            train_ids = env_ids[env_ids < self.num_train_envs]
+            self.robustness_metrics.record_reset(train_ids, mixture.episode_tilt[train_ids],
+                                                 mixture.episode_tilt_limit[train_ids])
         q_yaw = quat_from_angle_axis(init_yaws, torch.Tensor([0, 0, 1]).to(self.device))[:, 0, :]
         q_pitch = quat_from_angle_axis(init_pitches, torch.Tensor([0, 1, 0]).to(self.device))[:, 0, :]
         q_roll = quat_from_angle_axis(init_rolls, torch.Tensor([1, 0, 0]).to(self.device))[:, 0, :]
@@ -2434,6 +2482,7 @@ class LeggedRobot(BaseTask):
         # This is what "robustness recovery" is made of in v1 -- there is no
         # terrain to make harder -- so the whole stage rests on it.
         intensity = float(getattr(self, "domain_disturbance_intensity", 0.0)) * self._get_push_curriculum_intensity()
+        self.robustness_push_mask[env_ids] = False
         if cfg.domain_rand.push_robots:
             push_env_ids = env_ids[self.episode_length_buf[env_ids] >= self.next_push_step[env_ids]]
             # Advance clocks even while R8 disables disturbances, avoiding a
@@ -2445,6 +2494,7 @@ class LeggedRobot(BaseTask):
             push_env_ids = push_env_ids[~self.is_nominal_twin[push_env_ids]]
             if len(push_env_ids) == 0:
                 return
+            self.robustness_push_mask[push_env_ids] = True
 
             max_vel = cfg.domain_rand.max_push_vel_xy * intensity
             max_push_ang = cfg.domain_rand.max_push_ang_vel * intensity

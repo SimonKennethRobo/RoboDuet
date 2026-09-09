@@ -5,6 +5,7 @@ in an explicit order and never mutate module-level classes or previous builds.
 """
 
 import warnings
+import math
 from copy import deepcopy
 from dataclasses import dataclass, fields, is_dataclass
 from typing import Any, Mapping
@@ -109,6 +110,13 @@ def apply_config_snapshot(cfg, snapshot, *, strict=True, drop_unknown=False):
     resurrected into the live cfg, so it is dropped with a warning.
     """
 
+    # Full pre-mixture checkpoint snapshots must not inherit a newly enabled
+    # reset mode from today's wbc.py. Partial config updates keep their meaning.
+    if "env" in snapshot and "terrain" in snapshot and hasattr(cfg, "terrain"):
+        if "reset_mode" not in snapshot["terrain"]:
+            cfg.terrain.reset_mode = "legacy"
+        if "robustness_metrics" not in snapshot["terrain"]:
+            cfg.terrain.robustness_metrics = False
     for key, value in snapshot.items():
         if not hasattr(cfg, key):
             if drop_unknown:
@@ -622,6 +630,7 @@ def configure_robot_asset(cfg, robot):
 
 
 def validate_roboduet_cfg(cfg):
+    validate_reset_mixture(cfg.terrain)
     required_fields = (
         ("env.num_observations", cfg.env.num_observations),
         ("env.num_obs_history", cfg.env.num_obs_history),
@@ -735,6 +744,27 @@ def validate_raibert_form(cfg):
                 f"The 'exp' form returns a bounded reward in [0, 1] and the 'quadratic' "
                 f"form returns an unbounded cost -- use set_raibert_form so the two stay paired."
             )
+
+
+def validate_reset_mixture(t):
+    if t.reset_mode not in ("legacy", "fixed_mixture"):
+        raise ValueError("terrain.reset_mode must be legacy or fixed_mixture")
+    if not 0 <= t.reset_mix_hard_fraction <= 1:
+        raise ValueError("reset_mix_hard_fraction must be in [0, 1]")
+    for name in ("reset_mix_easy_tilt_rad", "reset_mix_hard_tilt_rad",
+                 "reset_mix_yaw_rad", "reset_mix_z_m", "robustness_early_window_s"):
+        value = getattr(t, name)
+        if not math.isfinite(value) or value < 0:
+            raise ValueError("terrain.{} must be finite and nonnegative".format(name))
+    if t.reset_mix_easy_tilt_rad > t.reset_mix_hard_tilt_rad or t.reset_mix_hard_tilt_rad > math.pi:
+        raise ValueError("reset tilt ranges must satisfy 0 <= easy <= hard <= pi")
+    for name in ("reset_mix_start_iteration", "reset_mix_ramp_iterations", "reset_mix_seed"):
+        value = getattr(t, name)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError("terrain.{} must be a nonnegative integer".format(name))
+    if t.reset_mix_ramp_iterations == 0 or t.robustness_early_window_s == 0:
+        raise ValueError("reset ramp iterations and metrics early window must be positive")
+
 
 def build_roboduet_config(args=None, *, options=None, debug=False):
     """Build one finalized RoboDuet config without mutating another build."""

@@ -67,6 +67,7 @@ def robot(monkeypatch):
     env.cfg = build_roboduet_config()
     env.device = 'cpu'
     env.num_envs = 32
+    env.robustness_push_mask = torch.zeros(32, dtype=torch.bool)
     env.dt = .02
     env.cfg.domain_rand.push_interval_range = [2, 8]
     env.episode_length_buf = torch.full((32,), 10, dtype=torch.long)
@@ -89,6 +90,7 @@ def test_pushes_keep_r8_gate_and_nominal_twins(robot):
     before = robot.root_states.clone()
     robot._push_robots(ids, robot.cfg)
     assert not robot.writes
+    assert not robot.robustness_push_mask.any()
     assert torch.all(robot.next_push_step > robot.episode_length_buf)
     assert torch.unique(robot.next_push_step).numel() > 1
     torch.testing.assert_close(robot.root_states, before)
@@ -97,6 +99,7 @@ def test_pushes_keep_r8_gate_and_nominal_twins(robot):
     robot._push_robots(ids, robot.cfg)
     torch.testing.assert_close(robot.root_states[robot.is_nominal_twin], before[robot.is_nominal_twin])
     assert torch.equal(robot.writes[0].long(), ids[~robot.is_nominal_twin])
+    assert torch.equal(robot.robustness_push_mask, ~robot.is_nominal_twin)
     assert robot.root_states[:, 7:9].abs().max() <= .5 * robot.cfg.domain_rand.max_push_vel_xy
     assert robot.root_states[:, 10:13].abs().max() <= .5 * robot.cfg.domain_rand.max_push_ang_vel
     robot._push_robots(ids, robot.cfg)
@@ -151,7 +154,7 @@ def test_source_reward_weights_and_raibert_presets():
     assert cfg.wbc.reward_scales.raibert_heuristic == -1.
     assert cfg.reward_scales.feet_contact_forces == -.01
     assert cfg.reward_scales.feet_impact_vel == .4
-    assert cfg.rewards.feet_impact_vel_sigma == .02
+    assert cfg.rewards.feet_impact_vel_sigma == .8
     assert not hasattr(cfg.reward_scales, 'raibert_sigma')
     assert resolve_reward_scales(cfg)['raibert_heuristic']['active']
     set_raibert_form(cfg, 'exp')
@@ -173,7 +176,7 @@ def test_exponential_impact_rewards_soft_touchdown():
     env.prev_foot_velocities[1, 0, 2] = -.1
     env.prev_foot_velocities[2, 0, 2] = -.2
     actual = Rewards(env)._reward_feet_impact_vel()
-    torch.testing.assert_close(actual, torch.exp(-torch.tensor([0., .01, .04]) / .02))
+    torch.testing.assert_close(actual, torch.exp(-torch.tensor([0., .01, .04]) / .8))
     assert actual[0] > actual[1] > actual[2]
 
 
@@ -197,3 +200,53 @@ def test_push_curriculum_source_timing_and_r8_gate(robot, monkeypatch):
     robot.domain_disturbance_intensity = 0.
     robot._push_robots(torch.arange(32), robot.cfg)
     assert not robot.writes
+
+
+def test_reset_mixture_preserves_training_partition_and_ramp():
+    from go1_gym.envs.roboduet.robustness import FixedResetMixture
+    cfg = build_roboduet_config()
+    cfg.terrain.reset_mix_hard_fraction = .25
+    rng = torch.random.get_rng_state().clone()
+    mixture = FixedResetMixture(cfg.terrain, 40, 32, 'cpu')
+    other = FixedResetMixture(cfg.terrain, 48, 32, 'cpu')
+    assert torch.equal(rng, torch.random.get_rng_state())
+    assert torch.equal(mixture.hard[:32], other.hard[:32])
+    assert mixture.hard[:32].sum() == 8
+    ids = torch.arange(32)
+    early = mixture.limit(ids, 4000).flatten()
+    late = mixture.limit(ids, 12000).flatten()
+    torch.testing.assert_close(early, torch.full((32,), cfg.terrain.reset_mix_easy_tilt_rad))
+    torch.testing.assert_close(late[mixture.hard[:32]], torch.full((8,), cfg.terrain.reset_mix_hard_tilt_rad))
+    torch.testing.assert_close(late[~mixture.hard[:32]], early[~mixture.hard[:32]])
+
+
+def test_old_snapshot_and_benchmark_disable_reset_mixture():
+    from go1_gym.envs.config import apply_config_snapshot, cfg_to_dict
+    cfg = build_roboduet_config()
+    snapshot = cfg_to_dict(cfg)
+    snapshot['terrain'].pop('reset_mode')
+    snapshot['terrain'].pop('robustness_metrics')
+    apply_config_snapshot(cfg, snapshot)
+    assert cfg.terrain.reset_mode == 'legacy'
+    assert not cfg.terrain.robustness_metrics
+    cfg = build_roboduet_config()
+    _apply_benchmark_env_overrides(cfg, 32, 4)
+    assert cfg.terrain.reset_mode == 'legacy'
+    assert not cfg.terrain.robustness_metrics
+    assert not cfg.terrain.reset_curriculum
+
+
+def test_robustness_metrics_count_failed_and_ongoing_steps_then_drain():
+    from go1_gym.envs.roboduet.robustness import RobustnessMetrics
+    metrics = RobustnessMetrics(torch.tensor([False, True]), .02, .04)
+    error = torch.tensor([[1., 2., 3.], [3., 4., 5.]])
+    yes = torch.tensor([True, True])
+    no = ~yes
+    metrics.update(error, torch.tensor([1, 3]), torch.tensor([False, True]), no, no, yes, no)
+    values = metrics.pop()
+    assert values['TrackingTime/all/sample_count'] == 2
+    assert values['TrackingTime/all/vx_mae_mps'] == 2
+    assert values['TrackingAge/easy/early/sample_count'] == 1
+    assert values['TrackingAge/hard/late/sample_count'] == 1
+    assert values['Termination/all/failures_count'] == 1
+    assert metrics.pop()['TrackingTime/all/sample_count'] == 0

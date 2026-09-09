@@ -236,19 +236,18 @@ COMMON_OVERRIDES = {
     "arm.arm_num_observation_history": 60,
     "arm.arm_num_commands": 6,
     "arm.use_adaptation_module": False,
-    # rewards: locomotion (dog) -- these are cfg.reward_scales.*, the base
-    # namespace shared by pretrained-dog and WBC reward tables alike (see
-    # LeggedRobot._prepare_reward_function's pretrained -> wbc fallback merge)
+
     "rewards.terminal_body_height": 0.17,
     # v3-stage2 reward and attitude termination defaults.
     "rewards.raibert_form": "quadratic",
     "rewards.raibert_sigma": 0.35,
     "reward_scales.raibert_heuristic": -1.0,
-    "reward_scales.feet_impact_vel": 0.4,
-    "reward_scales.feet_contact_forces": -0.01,
-    "rewards.feet_impact_vel_sigma": 0.02,
     "rewards.terminal_body_ori": math.radians(60.0),
     "rewards.terminal_roll_pitch_grace_s": 1.0,
+
+    "reward_scales.feet_impact_vel": 0.4,
+    "rewards.feet_impact_vel_sigma": 0.8,
+    "reward_scales.feet_contact_forces": -0.01,
     # ---- R4.4: hand the instantaneous posture terms over to R4.1 -------------
     # They guard a real failure mode: a policy can swing the body violently
     # inside a gait cycle and still look correct to R4.1, which sees only the
@@ -349,13 +348,33 @@ COMMON_OVERRIDES = {
     "reward_scales.loco_energy": -0.00004,
     "domain_rand.push_robots": True,
     "domain_rand.max_push_vel_xy": 1.0,
+    "domain_rand.max_push_ang_vel": 0.6,
     "domain_rand.push_interval_s_range": [1.0, 8.0],
     "domain_rand.push_curriculum": True,
     "domain_rand.push_curriculum_initial_fraction": 0.0,
     "domain_rand.push_curriculum_growth_iterations": 8000,
     "terrain.reset_curriculum_tracking_threshold": 0.35,
-    "terrain.reset_curriculum_growth_iterations": 12000,
-    # domain randomization: base & mount
+    "terrain.reset_curriculum_growth_iterations": 15000,
+
+    # Robustness experiments: edit here, start one process, wait for its
+    # [reset mixture] banner, then edit for the next process. No config files.
+    # "legacy" retains the old score-gated reset course; "fixed_mixture"
+    # bypasses it and uses the fixed env groups / iteration schedule below.
+    # A/B/C/D/E/F hard fractions: 0.0 / 1.0 / 0.1 / 0.2 / 0.4 / 0.2.
+    # For the planned comparison, max_push_ang_vel above is 0.6 for A-E,
+    # 1.0 for F. Keep max_push_vel_xy and other settings identical across runs.
+    "terrain.reset_mode": "fixed_mixture",
+    "terrain.reset_mix_hard_fraction": 0,
+    "terrain.reset_mix_seed": 1234,  # partition RNG, independent of training RNG
+    "terrain.reset_mix_easy_tilt_rad": math.radians(18.0),
+    "terrain.reset_mix_hard_tilt_rad": math.radians(45.0),
+    "terrain.reset_mix_yaw_rad": 0.314,
+    "terrain.reset_mix_z_m": 0.05,
+    "terrain.reset_mix_start_iteration": 4000,
+    "terrain.reset_mix_ramp_iterations": 8000,
+    "terrain.robustness_metrics": True,  # raw step sums in robustness.jsonl + wandb
+    "terrain.robustness_early_window_s": 2.0,
+
     "domain_rand.dog_obs_frame_drop_prob": 0.0,
     "domain_rand.added_mass_range": [-2.0, 2.0],
     "domain_rand.randomize_lag_timesteps": False,

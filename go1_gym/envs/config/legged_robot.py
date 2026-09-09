@@ -98,6 +98,18 @@ class LeggedRobotDefaults:
         reset_curriculum_tracking_ema_alpha = 0.05
         reset_curriculum_stability_iterations = 100
         reset_curriculum_growth_iterations = 5000
+        # Independent of the legacy reward-gated reset curriculum.
+        reset_mode = "legacy"  # legacy | fixed_mixture
+        reset_mix_hard_fraction = 0.2
+        reset_mix_seed = 1234
+        reset_mix_easy_tilt_rad = 0.314
+        reset_mix_hard_tilt_rad = 0.7853981633974483
+        reset_mix_yaw_rad = 0.314
+        reset_mix_z_m = 0.05
+        reset_mix_start_iteration = 4000
+        reset_mix_ramp_iterations = 8000
+        robustness_metrics = False
+        robustness_early_window_s = 2.0
         x_init_offset = 0.
         y_init_offset = 0.
         teleport_robots = True
