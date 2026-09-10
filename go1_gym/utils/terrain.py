@@ -6,6 +6,52 @@ import numpy as np
 from isaacgym import terrain_utils
 from numpy.random import choice
 
+def roughness_tier_columns(num_cols, num_tiers, weights=None):
+    """Contiguous column bands, one per roughness tier, tier 0 first.
+
+    A tier is a set of columns rather than a per-tile flag precisely so that it
+    is addressable at runtime: moving an environment between tiers is a tensor
+    write, whereas regenerating a tile is impossible once the trimesh has been
+    handed to the simulator.
+
+    ``weights`` gives each tier's share of the columns.  It exists because the
+    flat tier is not just "one of the tiers": it is the ground the R5 nominal
+    twins have to stay on for a whole episode of walking, so it needs to be
+    wide enough that they cannot walk out of it.  Equal shares by default.
+    """
+    if num_tiers <= 0 or num_cols <= 0:
+        return []
+    if weights is None:
+        weights = [1.0] * num_tiers
+    if len(weights) != num_tiers:
+        raise ValueError(f"{len(weights)} tier weights for {num_tiers} tiers")
+    total = float(sum(weights))
+    if total <= 0:
+        raise ValueError("roughness tier weights must sum to something positive")
+    bands, start, accumulated = [], 0, 0.0
+    for tier, weight in enumerate(weights):
+        accumulated += weight
+        end = num_cols if tier == num_tiers - 1 else int(round(num_cols * accumulated / total))
+        # Every tier needs at least one column, and the last one takes the
+        # rounding remainder so no column is left unassigned.
+        end = max(end, start + 1)
+        end = min(end, num_cols - (num_tiers - 1 - tier))
+        bands.append(list(range(start, end)))
+        start = end
+    if sum(len(b) for b in bands) != num_cols:
+        raise ValueError(f"tier bands cover {sum(len(b) for b in bands)} of {num_cols} columns")
+    return bands
+
+
+def tier_of_each_column(bands):
+    """Inverse of :func:`roughness_tier_columns`: column index -> tier."""
+    lookup = {}
+    for tier, band in enumerate(bands):
+        for col in band:
+            lookup[col] = tier
+    return [lookup[c] for c in range(len(lookup))]
+
+
 class Terrain:
     def __init__(self, cfg, num_robots, eval_cfg=None, num_eval_robots=0) -> None:
 
@@ -67,12 +113,46 @@ class Terrain:
             self._initialize_terrain(self.eval_cfg)
 
     def _initialize_terrain(self, cfg):
-        if cfg.curriculum:
+        if getattr(cfg, "roughness_tiers", None):
+            self.tiered_roughness_terrain(cfg)
+        elif cfg.curriculum:
             self.curriculum(cfg)
         elif cfg.selected:
             self.selected_terrain(cfg)
         else:
             self.randomized_terrain(cfg)
+
+    def tiered_roughness_terrain(self, cfg):
+        """Mild rough ground only, in fixed roughness tiers laid out by column.
+
+        Deliberately not one of the branches in ``make_terrain``: this is a
+        robustness randomisation, not a terrain-generalisation task.  There are
+        no slopes, no stairs, no discrete obstacles and no stepping stones --
+        just band-limited height noise whose amplitude is the tier.
+
+        Tier 0 is exactly flat and is where the R5 nominal twins stand.  A twin
+        on uneven ground would make the response every other environment is
+        being aligned to a moving target, which is the one thing the whole
+        consistency objective cannot tolerate.
+        """
+        tiers = list(cfg.roughness_tiers)
+        cfg.roughness_tier_columns = roughness_tier_columns(
+            cfg.num_cols, len(tiers), getattr(cfg, "roughness_tier_weights", None)
+        )
+        column_tier = tier_of_each_column(cfg.roughness_tier_columns)
+        for k in range(cfg.num_sub_terrains):
+            (i, j) = np.unravel_index(k, (cfg.num_rows, cfg.num_cols))
+            amplitude = float(tiers[column_tier[j]])
+            terrain = terrain_utils.SubTerrain("terrain",
+                                               width=cfg.width_per_env_pixels,
+                                               length=cfg.width_per_env_pixels,
+                                               vertical_scale=cfg.vertical_scale,
+                                               horizontal_scale=cfg.horizontal_scale)
+            if amplitude > 0.0:
+                terrain_utils.random_uniform_terrain(terrain, min_height=-amplitude,
+                                                    max_height=amplitude, step=0.005,
+                                                    downsampled_scale=0.2)
+            self.add_terrain_to_map(cfg, terrain, i, j)
 
     def randomized_terrain(self, cfg):
         for k in range(cfg.num_sub_terrains):

@@ -67,6 +67,15 @@ class LeggedRobotDefaults:
         dynamic_friction = 1.0
         restitution = 0.0
         terrain_noise_magnitude = 0.1
+        # Mild-rough-ground mode: a list of roughness amplitudes in metres,
+        # one per tier, laid out as column bands (see utils/terrain.py).
+        # Tier 0 must be 0.0 -- it is the flat ground the R5 twins stand on.
+        # None keeps the stock terrain_proportions behaviour.
+        roughness_tiers = None
+        # Share of the columns each tier gets. The flat tier needs the
+        # largest share: it has to be wide enough that a twin cannot walk
+        # out of it in one episode. None means equal shares.
+        roughness_tier_weights = None
         # rough terrain only:
         terrain_smoothness = 0.005
         measure_heights = True

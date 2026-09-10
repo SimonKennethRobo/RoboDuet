@@ -356,13 +356,13 @@ COMMON_OVERRIDES = {
     "terrain.reset_curriculum_tracking_threshold": 0.35,
     "terrain.reset_curriculum_growth_iterations": 15000,
 
-    # Robustness experiments: edit here, start one process, wait for its
-    # [reset mixture] banner, then edit for the next process. No config files.
-    # "legacy" retains the old score-gated reset course; "fixed_mixture"
-    # bypasses it and uses the fixed env groups / iteration schedule below.
-    # A/B/C/D/E/F hard fractions: 0.0 / 1.0 / 0.1 / 0.2 / 0.4 / 0.2.
-    # For the planned comparison, max_push_ang_vel above is 0.6 for A-E,
-    # 1.0 for F. Keep max_push_vel_xy and other settings identical across runs.
+    "terrain.mesh_type": "trimesh",
+    "terrain.measure_heights": True,
+    "terrain.roughness_tiers": [0.0, 0.02, 0.04],
+    # Half the map is flat: a twin has to stay on it for a whole episode,
+    # and at commands.limit_vel_y an episode covers 20 m.
+    "terrain.roughness_tier_weights": [0.5, 0.25, 0.25],
+    "terrain.center_robots": False,  # use all num_rows x num_cols tiles
     "terrain.reset_mode": "fixed_mixture",
     "terrain.reset_mix_hard_fraction": 0.2,
     "terrain.reset_mix_seed": 1234,  # partition RNG, independent of training RNG

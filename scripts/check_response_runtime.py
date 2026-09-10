@@ -29,6 +29,9 @@ R6  the identification environments really are excited (jump count, chirp band),
 DR  base mass / CoM randomisation and the EE payload's own CoM offset reach the
     simulator rather than only the tensors, and the sensing latency delays the
     measured half of the observation while leaving commands untouched.
+TERRAIN  the mild-rough tiles carry the amplitudes they were configured with,
+    the nominal twins stand on the flat tier at every curriculum intensity, and
+    body height is measured against the local ground.
 """
 
 import argparse
@@ -1424,11 +1427,113 @@ def check_dr(env, cfg, steps=40):
     return failures
 
 
+def check_terrain(env, cfg, steps=60):
+    """Mild rough ground: the right tiles, the right environments on them, and
+    every height still measured against the local ground.
+
+    The failure this is really guarding is the quiet one: a nominal twin
+    standing on uneven tile.  Nothing crashes, no metric looks wrong, and the
+    response that every other environment is being aligned to just stops being
+    a fixed target.
+    """
+    base = env.env
+    failures = []
+    if not base._terrain_roughness_active():
+        print(f"  terrain.mesh_type={cfg.terrain.mesh_type}, "
+              f"roughness_tiers={getattr(cfg.terrain, 'roughness_tiers', None)}: rough ground is off")
+        if cfg.terrain.mesh_type in ("trimesh", "heightfield"):
+            failures.append("trimesh terrain without roughness tiers: the tiles are unaddressable")
+        return failures
+
+    tiers = list(cfg.terrain.roughness_tiers)
+    if float(tiers[0]) != 0.0:
+        failures.append(f"tier 0 is {tiers[0]} m, not flat: the twins have nowhere nominal to stand")
+    if not cfg.terrain.measure_heights:
+        failures.append(
+            "measure_heights is off on rough ground: every body-height quantity "
+            "silently reverts to the world frame (global invariant 9)"
+        )
+
+    # --- the tiles really carry the amplitudes they were asked for ----------
+    field = base.terrain.height_field_raw * cfg.terrain.vertical_scale
+    per_env_pixels = int(cfg.terrain.terrain_width / cfg.terrain.horizontal_scale)
+    print(f"  {'tier':<6}{'asked (m)':>12}{'tile spread (m)':>18}{'envs':>8}{'twins':>8}")
+    env_tiers = base._terrain_tier_of_env()
+    for tier, amplitude in enumerate(tiers):
+        columns = cfg.terrain.roughness_tier_columns[tier]
+        col = columns[len(columns) // 2]
+        patch = field[:per_env_pixels, col * per_env_pixels:(col + 1) * per_env_pixels]
+        spread = float(patch.max() - patch.min())
+        selected = env_tiers == tier
+        twins = int((selected & base.is_nominal_twin).sum()) if base._grouping_active() else 0
+        print(f"  {tier:<6}{amplitude:>12.3f}{spread:>18.4f}{int(selected.sum()):>8}{twins:>8}")
+        # random_uniform_terrain quantises to vertical_scale, so allow a step.
+        if abs(spread - 2 * amplitude) > 2 * cfg.terrain.vertical_scale:
+            failures.append(
+                f"tier {tier} tiles span {spread:.4f} m, expected {2 * amplitude:.4f} m"
+            )
+        if tier > 0 and twins:
+            failures.append(f"{twins} nominal twin(s) are standing on tier {tier}")
+
+    # --- the twins are flat, and stay flat when the curriculum opens up -----
+    if base._grouping_active():
+        every = torch.arange(cfg.env.num_envs, device=base.device)
+        base._assign_terrain_tiers(every, intensity=1.0)
+        env_tiers = base._terrain_tier_of_env()
+        twin_tiers = env_tiers[base.is_nominal_twin]
+        others = env_tiers[~base.is_nominal_twin]
+        print(f"  at intensity 1.0: twins on tiers {sorted(set(int(t) for t in twin_tiers))}, "
+              f"others on {sorted(set(int(t) for t in others))}")
+        if int(twin_tiers.max()) != 0:
+            failures.append("a twin left flat ground when the randomisation opened up")
+        if len(tiers) > 1 and int(others.max()) == 0:
+            failures.append("at full intensity no environment reached a rough tier")
+
+        base._assign_terrain_tiers(every, intensity=0.0)
+        if int(base._terrain_tier_of_env().max()) != 0:
+            failures.append("at intensity 0 some environment is not on flat ground")
+        base._assign_terrain_tiers(every, intensity=1.0)
+
+        # A twin walks for a whole episode.  Being *placed* on flat ground is
+        # not the invariant -- staying on it is.
+        _, y_reach = base._episode_reach()
+        width = float(cfg.terrain.terrain_width)
+        safe = base._terrain_tier_band(0, confined=True)
+        stray = base.is_nominal_twin & ~torch.isin(base.terrain_types, safe)
+        flat_band = cfg.terrain.roughness_tier_columns[0]
+        print(f"  lateral reach in one episode {y_reach:.1f} m; flat band is "
+              f"{len(flat_band) * width:.0f} m wide, {len(safe)} of its {len(flat_band)} columns "
+              f"are further than that from another tier or the map edge")
+        if int(stray.sum()) > 0:
+            failures.append(
+                f"{int(stray.sum())} twin(s) can walk out of the flat tier within one episode"
+            )
+
+    # --- heights are measured against the local ground ----------------------
+    env.reset()
+    dog_a, arm_a = zero_actions(env, cfg)
+    for _ in range(steps):
+        env.step(dog_a, arm_a)
+    reference = base._terrain_reference_height()
+    print(f"  terrain reference height: [{float(reference.min()):.4f}, {float(reference.max()):.4f}] m")
+    if not isinstance(base.measured_heights, torch.Tensor):
+        failures.append("measured_heights is still a scalar; _terrain_reference_height cannot work")
+    elif float(reference.abs().max()) == 0.0:
+        failures.append("every terrain reference height is 0 on rough ground")
+    if base._grouping_active():
+        twin_reference = reference[base.is_nominal_twin].abs().max()
+        print(f"  max |reference height| under a twin: {float(twin_reference):.4f} m")
+        if float(twin_reference) > cfg.terrain.vertical_scale:
+            failures.append("a twin's ground is not flat")
+
+    return failures
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--check", default="all",
-                        choices=["r1", "r2", "r3", "r4", "r5", "r6", "r8", "conv", "dr", "all"])
+                        choices=["r1", "r2", "r3", "r4", "r5", "r6", "r8", "conv", "dr", "terrain", "all"])
     parser.add_argument("--num_envs", type=int, default=64)
     parser.add_argument("--sim_device", type=str, default="cuda:0")
     parser.add_argument("--robot", type=str, default="go2_x5")
@@ -1438,7 +1543,7 @@ def main():
     args = parser.parse_args()
 
     env, cfg = build_env(args.num_envs, args.sim_device, args.robot)
-    wanted = (["conv", "r1", "r2", "r3", "r4", "r5", "r6", "r8", "dr"]
+    wanted = (["conv", "r1", "r2", "r3", "r4", "r5", "r6", "r8", "dr", "terrain"]
               if args.check == "all" else [args.check])
 
     results = {}
@@ -1470,6 +1575,8 @@ def main():
             results[name] = check_conv(env, cfg)
         elif name == "dr":
             results[name] = check_dr(env, cfg)
+        elif name == "terrain":
+            results[name] = check_terrain(env, cfg)
 
     print("\n=== summary ===")
     failed = False

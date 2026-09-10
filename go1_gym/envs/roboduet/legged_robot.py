@@ -1292,6 +1292,137 @@ class LeggedRobot(BaseTask):
         # Payload and CoM are body properties: without this the curriculum's
         # redraw above stays in our tensors and never reaches the simulator.
         self.refresh_actor_rigid_body_props(every, self.cfg)
+        self._assign_terrain_tiers(every, intensity)
+
+    def _terrain_roughness_active(self):
+        """True when tiered rough ground is generated and addressable."""
+        return (
+            self.cfg.terrain.mesh_type in ("trimesh", "heightfield")
+            and bool(getattr(self.cfg.terrain, "roughness_tiers", None))
+            and hasattr(self, "terrain_types")
+        )
+
+    def _assign_terrain_tiers(self, env_ids, intensity=None):
+        """Place environments on roughness tiers, twins always on the flat one.
+
+        The tiles themselves are baked into the trimesh before the simulator
+        starts and cannot be regenerated, so terrain roughness cannot ramp the
+        way friction does.  What *can* change at runtime is which tile an
+        environment stands on -- so the curriculum is expressed as a moving
+        distribution over tiers rather than as a moving amplitude.
+
+        The new origin takes effect at that environment's next reset, which is
+        also the only moment where teleporting a robot is physically sane.
+        """
+        if not self._terrain_roughness_active() or len(env_ids) == 0:
+            return
+        tier_columns = getattr(self.cfg.terrain, "roughness_tier_columns", None)
+        if not tier_columns:
+            return
+        num_tiers = len(tier_columns)
+        if intensity is None:
+            intensity = float(getattr(self, "domain_randomization_intensity", 1.0))
+        # Expected tier grows with the randomisation intensity: at 0 every
+        # environment is on flat ground (so stage 1 is unchanged from the
+        # flat-only setup), at 1 the draw is uniform over every tier.
+        span = 1.0 + max(0.0, min(1.0, intensity)) * (num_tiers - 1)
+        draw = torch.rand(len(env_ids), device=self.device) * span
+        tiers = draw.long().clamp_(0, num_tiers - 1)
+        if self._grouping_active():
+            tiers[self.is_nominal_twin[env_ids]] = 0
+
+        twin = (
+            self.is_nominal_twin[env_ids]
+            if self._grouping_active()
+            else torch.zeros(len(env_ids), dtype=torch.bool, device=self.device)
+        )
+        columns = torch.zeros(len(env_ids), dtype=torch.long, device=self.device)
+        for tier in range(num_tiers):
+            for confined in (False, True):
+                selected = (tiers == tier) & (twin if confined else ~twin)
+                if not torch.any(selected):
+                    continue
+                band = self._terrain_tier_band(tier, confined=confined)
+                columns[selected] = band[
+                    torch.randint(len(band), (int(selected.sum()),), device=self.device)
+                ]
+        self.terrain_types[env_ids] = columns
+        rows = self.cfg.terrain.num_rows
+        low, high = (1, rows - 1) if rows > 2 else (0, rows)
+        self.terrain_levels[env_ids] = torch.randint(
+            low, high, (len(env_ids),), device=self.device
+        )
+        self.env_origins[env_ids] = self.cfg.terrain.terrain_origins[
+            self.terrain_levels[env_ids], self.terrain_types[env_ids]
+        ]
+
+    def _episode_reach(self):
+        """How far a robot can travel in one episode, per axis, in metres.
+
+        Taken from the command *limits* rather than the current sampling
+        ranges: the adaptive curriculum walks the ranges towards the limits
+        over training, so sizing anything off today's range would hold until
+        the curriculum opened up and then quietly stop holding.
+        """
+        seconds = float(self.cfg.env.episode_length_s)
+        return (
+            float(max(abs(v) for v in self.cfg.commands.limit_vel_x)) * seconds,
+            float(max(abs(v) for v in self.cfg.commands.limit_vel_y)) * seconds,
+        )
+
+    def _terrain_tier_band(self, tier, confined=False):
+        """Columns an environment of ``tier`` may be placed on.
+
+        ``confined`` restricts the choice to columns from which a full episode
+        of walking cannot leave the tier or the map.  It is used for the R5
+        nominal twins and only for them: a twin that wanders onto rough ground
+        stops being the fixed reference the whole consistency objective is
+        defined against, and nothing about the run would look wrong.
+
+        Everyone else may cross tiers freely -- for them a change of ground
+        mid-episode is terrain randomisation, which is the point of the
+        feature, not a defect.
+        """
+        band = self.cfg.terrain.roughness_tier_columns[tier]
+        if confined:
+            width = float(self.cfg.terrain.terrain_width)
+            _, reach = self._episode_reach()
+            span = width * self.cfg.terrain.num_cols
+            safe = [
+                col for col in band
+                if (col + 0.5) * width - reach >= 0.0
+                and (col + 0.5) * width + reach <= span
+                and all(
+                    other in band
+                    for other in range(
+                        max(0, int(((col + 0.5) * width - reach) // width)),
+                        min(self.cfg.terrain.num_cols - 1, int(((col + 0.5) * width + reach) // width)) + 1,
+                    )
+                )
+            ]
+            if not safe:
+                raise ValueError(
+                    f"no column of roughness tier {tier} is further than {reach:.1f} m "
+                    f"(one episode of lateral walking at commands.limit_vel_y) from the "
+                    f"next tier or the edge of the map. Widen the tier via "
+                    f"terrain.roughness_tier_weights, or enlarge terrain.num_cols / "
+                    f"terrain.terrain_width."
+                )
+            band = safe
+        return torch.tensor(band, dtype=torch.long, device=self.device)
+
+    def _terrain_tier_of_env(self):
+        """Per-env roughness tier, derived from the column it stands on."""
+        tier_columns = getattr(self.cfg.terrain, "roughness_tier_columns", None)
+        tiers = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        if not self._terrain_roughness_active() or not tier_columns:
+            return tiers
+        for tier, band in enumerate(tier_columns):
+            if not band:
+                continue
+            lookup = torch.tensor(band, dtype=torch.long, device=self.device)
+            tiers[torch.isin(self.terrain_types, lookup)] = tier
+        return tiers
 
     def _nominalize_twins(self, env_ids=None):
         """Hold the nominal twins at nominal domain values.
@@ -3480,6 +3611,9 @@ class LeggedRobot(BaseTask):
         # those values are never revisited (randomize_rigids_after_start is off).
         self._ensure_grouping()
         self._nominalize_twins()
+        # After the grouping, because the twins have to land on flat tiles, and
+        # before the actor loop below, which reads env_origins for start_pose.
+        self._assign_terrain_tiers(torch.arange(self.num_envs, device=self.device))
         self.arm_mount_bucket_of_env = torch.zeros(
             self.num_envs, dtype=torch.long, device=self.device
         )
