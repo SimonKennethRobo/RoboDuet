@@ -191,6 +191,7 @@ def main(args):
         tags=args.tags,
         dir=f"{MINI_GYM_ROOT_DIR}",
         config=wandb_config,
+        settings=wandb.Settings(console="off"),
     )
 
     if args.debug:

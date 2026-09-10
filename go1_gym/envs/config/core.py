@@ -648,6 +648,19 @@ def validate_roboduet_cfg(cfg):
     # which every build and every load_env path runs through.
     validate_arm_action_mode(cfg)
     validate_raibert_form(cfg)
+    # Both of these reach for LeggedRobot._get_ground_frictions, which no
+    # longer exists in this fork -- it belonged to WTW's per-tile terrain
+    # friction.  Turning either on used to survive config build and then die
+    # inside the privileged-observation construction, minutes into a run, with
+    # an AttributeError that says nothing about the cause.
+    for name in ("priv_observe_ground_friction", "priv_observe_ground_friction_per_foot"):
+        if getattr(cfg.env, name, False):
+            raise ValueError(
+                f"env.{name} is not supported: per-tile ground friction needs the "
+                "trimesh terrain this fork does not run. The friction the robot "
+                "feels is domain_rand.randomize_friction / friction_range, which "
+                "the critic already sees as env.priv_observe_friction."
+            )
 
 
 def resolve_reward_scales(cfg):

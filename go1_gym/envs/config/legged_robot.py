@@ -295,6 +295,13 @@ class LeggedRobotDefaults:
         # the previous step's (already-noised) observation instead of a fresh
         # one -- simulates a dropped sensor/comms frame. 0 = disabled.
         dog_obs_frame_drop_prob = 0.0
+        # Sensing latency on the measured half of the dog observation, in
+        # policy steps of dt (0.02 s).  The range is a per-episode draw --
+        # a robot's constant transport delay -- scaled by the R8
+        # randomisation curriculum; the jitter is redrawn every step.
+        randomize_dog_obs_latency = False
+        dog_obs_latency_steps_range = [0, 0]
+        dog_obs_latency_jitter_steps = 0
 
     class rewards:
         only_positive_rewards = False  # if true negative total rewards are clipped at zero (avoids early termination problems)
@@ -356,7 +363,6 @@ class LeggedRobotDefaults:
         clip_actions = 100.
 
         friction_range = [0.05, 4.5]
-        ground_friction_range = [0.05, 4.5]
         restitution_range = [0, 1.0]
         added_mass_range = [-1., 3.]
         com_displacement_range = [-0.1, 0.1]

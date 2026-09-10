@@ -179,7 +179,7 @@ COMMON_OVERRIDES = {
     "dog.dog_num_observation_history": 30,
     "dog.dog_num_commands": 6,
     "dog.use_adaptation_module": False,
-    "dog.add_obs_noise": False,
+    "dog.add_obs_noise": True,
     "dog.observe_lin_vel": True,
     "dog.observe_pose_actual": True,
     "dog.observe_track_error": True,
@@ -241,7 +241,7 @@ COMMON_OVERRIDES = {
     # v3-stage2 reward and attitude termination defaults.
     "rewards.raibert_form": "quadratic",
     "rewards.raibert_sigma": 0.35,
-    "reward_scales.raibert_heuristic": -1.0,
+    "reward_scales.raibert_heuristic": -3.0,
     "rewards.terminal_body_ori": math.radians(60.0),
     "rewards.terminal_roll_pitch_grace_s": 1.0,
 
@@ -348,7 +348,7 @@ COMMON_OVERRIDES = {
     "reward_scales.loco_energy": -0.00004,
     "domain_rand.push_robots": True,
     "domain_rand.max_push_vel_xy": 1.0,
-    "domain_rand.max_push_ang_vel": 0.6,
+    "domain_rand.max_push_ang_vel": 1.0,
     "domain_rand.push_interval_s_range": [1.0, 8.0],
     "domain_rand.push_curriculum": True,
     "domain_rand.push_curriculum_initial_fraction": 0.0,
@@ -364,7 +364,7 @@ COMMON_OVERRIDES = {
     # For the planned comparison, max_push_ang_vel above is 0.6 for A-E,
     # 1.0 for F. Keep max_push_vel_xy and other settings identical across runs.
     "terrain.reset_mode": "fixed_mixture",
-    "terrain.reset_mix_hard_fraction": 0,
+    "terrain.reset_mix_hard_fraction": 0.2,
     "terrain.reset_mix_seed": 1234,  # partition RNG, independent of training RNG
     "terrain.reset_mix_easy_tilt_rad": math.radians(18.0),
     "terrain.reset_mix_hard_tilt_rad": math.radians(45.0),
@@ -376,8 +376,23 @@ COMMON_OVERRIDES = {
     "terrain.robustness_early_window_s": 2.0,
 
     "domain_rand.dog_obs_frame_drop_prob": 0.0,
+    # Sensing latency, in policy steps of 0.02 s.  0-1 step covers the 5-20 ms
+    # a real IMU + encoder + driver + inference chain adds on top of the
+    # control period; widen it in the domain-randomisation sweep rather than
+    # here, so a run's latency exposure stays readable from its parameters.pkl.
+    "domain_rand.randomize_dog_obs_latency": True,
+    "domain_rand.dog_obs_latency_steps_range": [0, 1],
+    "domain_rand.dog_obs_latency_jitter_steps": 0,
     "domain_rand.added_mass_range": [-2.0, 2.0],
     "domain_rand.randomize_lag_timesteps": False,
+    # Global invariant 12.  Base CoM was the one body-level domain parameter
+    # still switched off, which left every training robot perfectly balanced
+    # about its geometric centre -- the single condition a real quadruped with
+    # a 3 kg arm bolted on top is never in.  +-5 cm, not the WTW default of
+    # +-15 cm: that was sized for a bare Go1, and 15 cm is beyond the base's
+    # own half-length here.
+    "domain_rand.randomize_com_displacement": True,
+    "domain_rand.com_displacement_range": [-0.05, 0.05],
     "domain_rand.randomize_end_effector_force": False,
     "domain_rand.max_force": 15.0,
     "domain_rand.max_force_offset": 0.01,
@@ -425,6 +440,11 @@ STAGE1_OVERRIDES = {
     "domain_rand.stage1_arm.link_com_range": 0.1,
     "domain_rand.stage1_arm.randomize_ee_payload": True,
     "domain_rand.stage1_arm.ee_payload_mass_range": [0.0, 1.5],
+    # Per-axis half-width, in the EE frame, of the offset between the grasp
+    # point and the payload's centre of mass (global invariant 12).  Sized on
+    # the objects this arm is meant to carry: a 10 cm reach along the tool
+    # axis, less across it.
+    "domain_rand.stage1_arm.ee_payload_com_offset_range": [0.10, 0.05, 0.05],
 }
 
 

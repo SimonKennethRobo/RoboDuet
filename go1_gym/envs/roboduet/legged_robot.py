@@ -511,6 +511,7 @@ class LeggedRobot(BaseTask):
         self._nominalize_twins(env_ids)
         if self.cfg.domain_rand.randomize_rigids_after_start:
             self.refresh_actor_rigid_shape_props(env_ids, self.cfg)
+            self.refresh_actor_rigid_body_props(env_ids, self.cfg)
 
         self._reset_dofs(env_ids, self.cfg)
         self._reset_root_states(env_ids, self.cfg)
@@ -1230,8 +1231,10 @@ class LeggedRobot(BaseTask):
         "Kp_factor": 1.0,
         "Kd_factor": 1.0,
         "ee_payload": 0.0,
+        "ee_payload_com": 0.0,
         "arm_link_mass": 1.0,
         "arm_link_com": 0.0,
+        "dog_obs_latency": 0.0,
     }
 
     def _domain_nominal(self, name):
@@ -1286,6 +1289,9 @@ class LeggedRobot(BaseTask):
         self._randomize_rigid_body_props(every, self.cfg)
         self._nominalize_twins()
         self.refresh_actor_rigid_shape_props(every, self.cfg)
+        # Payload and CoM are body properties: without this the curriculum's
+        # redraw above stays in our tensors and never reaches the simulator.
+        self.refresh_actor_rigid_body_props(every, self.cfg)
 
     def _nominalize_twins(self, env_ids=None):
         """Hold the nominal twins at nominal domain values.
@@ -1418,10 +1424,22 @@ class LeggedRobot(BaseTask):
                 * (max_payload - min_payload)
                 + min_payload
             )
-        if cfg.domain_rand.randomize_com_displacement:
-            min_com_displacement, max_com_displacement = self._domain_range(
-                cfg.domain_rand.com_displacement_range, "com_displacement"
-            )
+        # Base CoM is drawn once, while the actors are being created, and is
+        # then frozen: IsaacGym ignores a CoM write after prepare_sim (see
+        # refresh_actor_rigid_body_props).  Redrawing it later would only
+        # desynchronise this tensor -- which the critic reads as privileged
+        # input -- from the body the simulator is actually integrating.
+        #
+        # Drawn at the full configured range rather than at the curriculum's
+        # current intensity, for the same reason: a value that cannot be
+        # revisited cannot ramp, and starting it at the stage-1 floor would
+        # pin it there for the whole run.  A fixed per-robot mass distribution
+        # is the mildest kind of randomisation anyway -- it does not move
+        # under the policy the way a push or a friction change does.
+        if cfg.domain_rand.randomize_com_displacement and not getattr(
+            self, "_body_props_locked", False
+        ):
+            min_com_displacement, max_com_displacement = cfg.domain_rand.com_displacement_range
             self.com_displacements[env_ids, :] = (
                 torch.rand(len(env_ids), 3, dtype=torch.float, device=self.device, requires_grad=False)
                 * (max_com_displacement - min_com_displacement)
@@ -1455,6 +1473,43 @@ class LeggedRobot(BaseTask):
                 rigid_shape_props[i].restitution = self.restitutions[env_id, 0]
 
             self.gym.set_actor_rigid_shape_properties(self.envs[env_id], 0, rigid_shape_props)
+
+    def refresh_actor_rigid_body_props(self, env_ids, cfg):
+        """Push the base payload mass into the simulator.
+
+        Mass lives in the *body* properties, which -- unlike the shape
+        properties above -- IsaacGym reads when the actor is created.  Every
+        resample after that (the R8 randomisation curriculum, a per-reset
+        redraw) updated ``self.payloads`` and the simulator never heard about
+        it: the robot kept the mass it was born with, silently, for the whole
+        run, while the critic was handed the new number as privileged input.
+
+        **Mass only, and not by oversight.**  Measured on this IsaacGym build
+        with the GPU pipeline: a post-``prepare_sim`` write of ``props[0].com``
+        returns success and is then ignored -- the read-back still shows the
+        creation-time value, with ``recomputeInertia`` either way.  Mass does
+        take (a +40 kg env visibly sags against an unloaded one).  So the CoM
+        displacement is drawn once, before the actors exist, and never moved
+        again; see ``_randomize_rigid_body_props``.  If a curriculum-scalable
+        CoM is ever needed, the way to get it is the trick the EE payload
+        already uses -- synthesise the gravitational torque ``m g x delta``
+        with an applied wrench -- not this call.
+
+        Deliberately not routed through ``_process_rigid_body_props``.  That
+        method is a *creation* callback -- it caches ``props[0].mass`` as the
+        nominal body mass and adds the camera mass to the end effector -- so
+        calling it a second time would take default+payload as the new default
+        and re-add the camera on every refresh.  Here we read the live props
+        and write back only the field this randomisation owns.
+        """
+        for env_id in env_ids:
+            env_id = int(env_id)
+            env_handle, actor_handle = self.envs[env_id], self.actor_handles[env_id]
+            body_props = self.gym.get_actor_rigid_body_properties(env_handle, actor_handle)
+            body_props[0].mass = self.default_body_mass + float(self.payloads[env_id])
+            self.gym.set_actor_rigid_body_properties(
+                env_handle, actor_handle, body_props, recomputeInertia=True
+            )
 
     def _randomize_dof_props(self, env_ids, cfg):
         if cfg.domain_rand.randomize_motor_strength:
@@ -2350,6 +2405,7 @@ class LeggedRobot(BaseTask):
         if self.cfg.domain_rand.randomize_rigids_after_start:
             self._randomize_rigid_body_props(env_ids, self.cfg)
             self.refresh_actor_rigid_shape_props(env_ids, self.cfg)
+            self.refresh_actor_rigid_body_props(env_ids, self.cfg)
 
     def _reset_dofs(self, env_ids, cfg):
         """Resets DOF position and velocities of selected environmments
@@ -3472,6 +3528,9 @@ class LeggedRobot(BaseTask):
             self.arm_mount_tfs[i] = to_torch(
                 self.arm_mount_bucket_tfs[bucket_id], device=self.device, dtype=torch.float
             )
+
+        # Past this point the actors exist and their CoM is fixed for the run.
+        self._body_props_locked = True
 
         self.feet_indices = torch.zeros(len(feet_names), dtype=torch.long, device=self.device, requires_grad=False)
         for i in range(len(feet_names)):

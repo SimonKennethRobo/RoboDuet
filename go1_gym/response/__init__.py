@@ -48,6 +48,7 @@ from .curriculum import (
 )
 from .deviation import ResponseDeviationEstimator
 from .grouping import EnvGrouping
+from .latency import LatencyBuffer
 from .residual import PhaseResidualEstimator
 from .reference import (
     DEFAULT_CHANNELS,
@@ -75,6 +76,7 @@ __all__ = [
     "SIGNAL_NAMES",
     "ExcitationSampler",
     "EnvGrouping",
+    "LatencyBuffer",
     "ResponseDeviationEstimator",
     "ResponseCurriculum",
     "RippleReport",

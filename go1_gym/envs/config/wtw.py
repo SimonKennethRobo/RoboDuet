@@ -106,8 +106,6 @@ WTW_PROFILE = ConfigProfile(
         "domain_rand.gravity_impulse_duration": 0.99,
         "domain_rand.randomize_com_displacement": False,
         "domain_rand.com_displacement_range": [-0.15, 0.15],
-        "domain_rand.randomize_ground_friction": True,
-        "domain_rand.ground_friction_range": [0.0, 0.0],
         "domain_rand.randomize_motor_strength": True,
         "domain_rand.motor_strength_range": [0.9, 1.1],
         "domain_rand.randomize_motor_offset": True,

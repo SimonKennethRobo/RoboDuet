@@ -26,6 +26,9 @@ R8  the stage curriculum really reaches the reward: terms are registered from
 R6  the identification environments really are excited (jump count, chirp band),
     really are excluded from the curriculum, and really are the only ones
     touched.
+DR  base mass / CoM randomisation and the EE payload's own CoM offset reach the
+    simulator rather than only the tensors, and the sensing latency delays the
+    measured half of the observation while leaving commands untouched.
 """
 
 import argparse
@@ -1245,11 +1248,187 @@ def _longest_plan_segment(generations, signals, episodes, is_identification, wan
 # ---------------------------------------------------------------------------
 
 
+def check_dr(env, cfg, steps=40):
+    """Domain randomisation reaches the simulator, and sensing latency delays
+    only what a sensor produces.
+
+    Both halves of this check exist because their failure mode is silence.  A
+    payload resampled into a tensor that IsaacGym never re-reads trains exactly
+    like no randomisation at all, and an observation delayed by zero steps
+    looks like a healthy run of a policy that is quietly still being handed the
+    present.
+    """
+    base = env.env
+    failures = []
+    env.reset()
+    dog_a, arm_a = zero_actions(env, cfg)
+
+    # --- body properties actually reach the simulator ----------------------
+    def sim_base_props(env_id):
+        props = base.gym.get_actor_rigid_body_properties(
+            base.envs[env_id], base.actor_handles[env_id]
+        )
+        return props[0].mass, (props[0].com.x, props[0].com.y, props[0].com.z)
+
+    # The CoM the simulator integrates must be the CoM the critic is told
+    # about: IsaacGym will not move it after prepare_sim, so the invariant is
+    # that nothing else moves it either.
+    probe = min(4, cfg.env.num_envs)
+    print(f"  {'env':<5}{'mass':>10}{'com x':>10}{'com y':>10}{'com z':>10}")
+    for env_id in range(cfg.env.num_envs):
+        _, com = sim_base_props(env_id)
+        for axis, value in enumerate(com):
+            if abs(value - float(base.com_displacements[env_id, axis])) > 1e-6:
+                failures.append(
+                    f"env {env_id}: com_displacements[{axis}] "
+                    f"{float(base.com_displacements[env_id, axis]):.4f} but the simulator "
+                    f"is integrating {value:.4f}"
+                )
+
+    base.payloads[:probe] = torch.tensor([1.5, -1.5, 0.75, 0.0][:probe], device=base.device)
+    base.refresh_actor_rigid_body_props(range(probe), cfg)
+    for env_id in range(probe):
+        mass, com = sim_base_props(env_id)
+        print(f"  {env_id:<5}{mass:>10.4f}{com[0]:>10.4f}{com[1]:>10.4f}{com[2]:>10.4f}")
+        want = base.default_body_mass + float(base.payloads[env_id])
+        if abs(mass - want) > 1e-4:
+            failures.append(f"env {env_id}: sim base mass {mass:.4f} != {want:.4f}")
+
+    # Refreshing twice must not compound: the old creation-time callback cached
+    # props[0].mass as the nominal mass, so a second pass would have added the
+    # payload to a base that already contained it.
+    mass_once, _ = sim_base_props(0)
+    base.refresh_actor_rigid_body_props(range(probe), cfg)
+    mass_twice, _ = sim_base_props(0)
+    if abs(mass_once - mass_twice) > 1e-6:
+        failures.append(
+            f"refresh is not idempotent: {mass_once:.4f} -> {mass_twice:.4f}"
+        )
+
+    # --- the randomisation is on, and the twins are exempt ------------------
+    com_before = base.com_displacements.clone()
+    env.reset()
+    for _ in range(steps):
+        env.step(dog_a, arm_a)
+    if not torch.equal(com_before, base.com_displacements):
+        failures.append(
+            "com_displacements was redrawn after the actors were created; the "
+            "simulator cannot follow it there"
+        )
+    com_spread = float(base.com_displacements.abs().max())
+    print(f"  max |base com displacement| {com_spread:.4f} m")
+    if cfg.domain_rand.randomize_com_displacement and com_spread <= 0.0:
+        failures.append("randomize_com_displacement is on but every env is at 0")
+    if base._grouping_active():
+        twins = base.is_nominal_twin
+        if float(base.com_displacements[twins].abs().max()) > 0.0:
+            failures.append("a nominal twin has a non-zero base com displacement")
+        if float(base.stage1_ee_payload_com[twins].abs().max()) > 0.0:
+            failures.append("a nominal twin carries an offset payload")
+        if int(base.dog_obs_latency.delays[twins].max()) != 0:
+            failures.append("a nominal twin observes with a delay")
+
+    # --- the payload hangs off its centre of mass, not the grasp point ------
+    # Forced to full intensity rather than waiting for the curriculum: at
+    # iteration 0 the arm disturbance is off, so a plain rollout would exercise
+    # nothing here and report success for a branch it never entered.
+    previous = getattr(base, "stage1_arm_play_intensity", None)
+    try:
+        base.stage1_arm_play_intensity = 1.0
+        everyone = torch.arange(cfg.env.num_envs, device=base.device)
+        base._resample_stage1_ee_payload(everyone)
+        base._nominalize_twins(everyone)
+        env.step(dog_a, arm_a)
+        loaded = (base.stage1_ee_payload_mass > 0.0) & (
+            base.stage1_ee_payload_com.abs().sum(dim=-1) > 0.0
+        )
+        print(f"  payload offset exercised on {int(loaded.sum())}/{cfg.env.num_envs} envs")
+        if not torch.any(loaded):
+            failures.append("no env drew both a payload mass and a CoM offset at full intensity")
+        else:
+            base._apply_stage1_ee_payload_force()
+            ee_pos = base.rigid_body_state.view(base.num_envs, -1, 13)[:, base.ee_idx, :3]
+            lever = (base.stage1_payload_force_positions[:, base.ee_idx] - ee_pos)[loaded]
+            offset = base.stage1_ee_payload_com[loaded]
+            print(f"  payload lever arm: max {float(lever.norm(dim=-1).max()):.4f} m")
+            if float(lever.norm(dim=-1).min()) <= 0.0:
+                failures.append("a loaded env applies its payload at the grasp point")
+            # The lever is the offset rotated into the world: a rotation, so
+            # the length has to survive it exactly.
+            length_error = (lever.norm(dim=-1) - offset.norm(dim=-1)).abs().max()
+            if float(length_error) > 1e-5:
+                failures.append(
+                    f"the payload lever arm is not the sampled offset rotated ({float(length_error):.2e})"
+                )
+            if base._grouping_active() and float(
+                base.stage1_ee_payload_com[base.is_nominal_twin].abs().max()
+            ) > 0.0:
+                failures.append("a nominal twin carries an offset payload at full intensity")
+    finally:
+        if previous is None:
+            if hasattr(base, "stage1_arm_play_intensity"):
+                del base.stage1_arm_play_intensity
+        else:
+            base.stage1_arm_play_intensity = previous
+
+    # --- sensing latency: measured segments are late, commands are not ------
+    delay = min(1, base.dog_obs_latency.max_steps)
+    if delay == 0:
+        failures.append("dog_obs_latency has no capacity; the delay can never bite")
+    else:
+        # Observation noise is added *after* the delay, so with it on the
+        # comparison below measures the noise, not the lag.  Silenced for the
+        # duration of this sub-check and restored afterwards: the two
+        # mechanisms are independent and this gate is about the lag.
+        noise_was = getattr(base.cfg.dog, "add_obs_noise", True)
+        base.cfg.dog.add_obs_noise = False
+        env.reset()
+        base.dog_obs_latency.delays[:] = delay
+        base.dog_obs_latency_fill[:] = True
+        snapshots, observed = [], []
+        for _ in range(steps):
+            env.step(dog_a, arm_a)
+            base.dog_obs_latency.delays[:] = delay          # survive the resets
+            obs = env.get_dog_observations()["obs"]
+            snapshots.append(base.projected_gravity.clone())
+            observed.append(obs[:, :3].clone())
+        base.cfg.dog.add_obs_noise = noise_was
+        # Only envs whose ring holds `delay` steps of post-reset history: a
+        # reset legitimately refills it with the fresh state, so an env that
+        # restarted inside the window is expected to read the present.
+        settled = base.episode_length_buf > delay
+        print(f"  {int(settled.sum())}/{cfg.env.num_envs} envs have {delay} step(s) of history")
+        if torch.any(settled):
+            lag_error = (observed[-1][settled] - snapshots[-1 - delay][settled]).abs().max()
+            live_error = (observed[-1][settled] - snapshots[-1][settled]).abs().max()
+            print(f"  gravity obs vs t-{delay}: {float(lag_error):.2e}   vs t: {float(live_error):.2e}")
+            if float(lag_error) > 1e-5:
+                failures.append(
+                    f"observed gravity does not match the measurement {delay} step(s) ago"
+                )
+            if float(live_error) <= 1e-5:
+                failures.append("observed gravity is the live value: the delay is not applied")
+        else:
+            failures.append("no environment survived long enough to test the delay")
+
+        # A command is known onboard without a sensor, so it must appear in the
+        # very observation built after it changes.
+        base.commands_dog[:, 0] = 0.4321
+        obs = env.get_dog_observations()["obs"]
+        commanded = obs[:, 3 * base.num_actions_loco + 3]
+        expected = 0.4321 * float(base.commands_scale_dog[0])
+        print(f"  vx command in obs: {float(commanded[0]):.4f} (expected {expected:.4f})")
+        if abs(float(commanded[0]) - expected) > 1e-4:
+            failures.append("the vx command is not reaching the observation undelayed")
+
+    return failures
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--check", default="all",
-                        choices=["r1", "r2", "r3", "r4", "r5", "r6", "r8", "conv", "all"])
+                        choices=["r1", "r2", "r3", "r4", "r5", "r6", "r8", "conv", "dr", "all"])
     parser.add_argument("--num_envs", type=int, default=64)
     parser.add_argument("--sim_device", type=str, default="cuda:0")
     parser.add_argument("--robot", type=str, default="go2_x5")
@@ -1259,7 +1438,7 @@ def main():
     args = parser.parse_args()
 
     env, cfg = build_env(args.num_envs, args.sim_device, args.robot)
-    wanted = (["conv", "r1", "r2", "r3", "r4", "r5", "r6", "r8"]
+    wanted = (["conv", "r1", "r2", "r3", "r4", "r5", "r6", "r8", "dr"]
               if args.check == "all" else [args.check])
 
     results = {}
@@ -1289,6 +1468,8 @@ def main():
             results[name] = check_r8(env, cfg)
         elif name == "conv":
             results[name] = check_conv(env, cfg)
+        elif name == "dr":
+            results[name] = check_dr(env, cfg)
 
     print("\n=== summary ===")
     failed = False

@@ -336,7 +336,6 @@ def load_env(logdir, wrapper, headless=False, device='cuda:0', robot=None):
     cfg.domain_rand.randomize_motor_offset = False
     cfg.domain_rand.randomize_motor_strength = False
     cfg.domain_rand.randomize_friction_indep = False
-    cfg.domain_rand.randomize_ground_friction = False
     cfg.domain_rand.randomize_base_mass = False
     cfg.domain_rand.randomize_Kd_factor = False
     cfg.domain_rand.randomize_Kp_factor = False
