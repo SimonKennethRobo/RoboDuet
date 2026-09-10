@@ -227,8 +227,8 @@ COMMON_OVERRIDES = {
     "reward_scales.feet_impact_vel": 0.4,
     "rewards.feet_impact_vel_sigma": 0.8,
     "reward_scales.feet_contact_forces": -0.01,
-    "commands.footswing_height_range": [0.04, 0.041],
-    "commands.limit_footswing_height": [0.04, 0.041],
+    "commands.footswing_height_range": [0.03, 0.05],
+    "commands.limit_footswing_height": [0.03, 0.05],
 
     "rewards.raibert_form": "quadratic",
     "reward_scales.raibert_heuristic": -1,
@@ -242,7 +242,7 @@ COMMON_OVERRIDES = {
     # "reward_scales.feet_swing_height": -20.0,
 
     # Training recipe: benchmark / sim2real / none. CLI can override this.
-    "domain_rand.mode": "benchmark",
+    "domain_rand.mode": "sim2real",
     "domain_rand.push_robots": True,
     "domain_rand.max_push_vel_xy": 1.0,
     "domain_rand.max_push_ang_vel": 1.0,
@@ -255,6 +255,8 @@ COMMON_OVERRIDES = {
 
     # Baked mild height-noise bands; each reset samples a tier uniformly.
     "terrain.mesh_type": "trimesh",
+    "terrain.height_reference": "terrain",
+    "terrain.slope_treshold": None,  # preserve regular-grid triangles for height queries
     "terrain.measure_heights": True,
     "terrain.roughness_tiers": [0.0, 0.02, 0.04],
     "terrain.roughness_tier_weights": [0.5, 0.25, 0.25],  # map column shares

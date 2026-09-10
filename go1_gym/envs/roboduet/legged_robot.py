@@ -27,6 +27,7 @@ from go1_gym.envs.config import ConfigNode
 from go1_gym.utils import global_switch, quaternion_to_rpy
 from go1_gym.utils.math_utils import get_scale_shift, quat_apply_yaw
 from go1_gym.utils.terrain import Terrain
+from go1_gym.utils.height_sampling import sample_triangle_heights
 from go1_gym.envs.roboduet.robustness import FixedResetMixture, RobustnessMetrics
 
 from go1_gym.envs.config.domain_randomization import resolve_domain_randomization
@@ -447,7 +448,8 @@ class LeggedRobot(BaseTask):
         self.reset_buf |= self.time_out_buf
         if self.cfg.rewards.use_terminal_body_height:
             self.body_height_buf = (
-                torch.mean(self.root_states[:, 2].unsqueeze(1) - self.measured_heights, dim=1)
+                (self._body_height() if self._uses_terrain_height() else
+                 torch.mean(self.root_states[:, 2].unsqueeze(1) - self.measured_heights, dim=1))
                 < self.cfg.rewards.terminal_body_height
             )
             self.reset_buf = torch.logical_or(self.body_height_buf, self.reset_buf)
@@ -761,7 +763,7 @@ class LeggedRobot(BaseTask):
             privileged_obs_buf = torch.cat(
                 (
                     privileged_obs_buf,
-                    ((self.root_states[: self.num_envs, 2]).view(self.num_envs, -1) - body_height_shift)
+                    ((self._body_height()).view(self.num_envs, -1) - body_height_shift)
                     * body_height_scale,
                 ),
                 dim=1,
@@ -1163,6 +1165,7 @@ class LeggedRobot(BaseTask):
             "vertical_velocity_sq",
             "horizontal_angular_velocity_sq",
             "base_height_sq_error",
+            "base_height_signed_error",
             "foot_slip_speed_sum",
             "foot_contact_samples",
             "locomotion_power_sum",
@@ -1213,9 +1216,10 @@ class LeggedRobot(BaseTask):
         else:
             reference_height = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         height_command = self.commands_dog[:, 5] if self.commands_dog.shape[1] > 5 else 0.0
-        body_height = self.base_pos[:, 2] - reference_height
+        body_height = self._body_height() if self._uses_terrain_height() else self.base_pos[:, 2] - reference_height
         height_target = float(self.cfg.rewards.base_height_target) + height_command
         sums["base_height_sq_error"] += torch.square(body_height - height_target)
+        sums["base_height_signed_error"] += body_height - height_target
 
         foot_contact = self.contact_forces[:, self.feet_indices, 2] > 1.0
         foot_slip_speed = torch.norm(self.foot_velocities[:, :, :2], dim=-1)
@@ -1260,6 +1264,7 @@ class LeggedRobot(BaseTask):
             torch.sqrt(episode_mean("horizontal_angular_velocity_sq"))
         )
         extras["perf_base_height_rmse_m"] = mean_valid(torch.sqrt(episode_mean("base_height_sq_error")))
+        extras["perf_base_height_signed_error_m"] = mean_valid(episode_mean("base_height_signed_error"))
         contact_samples = sums["foot_contact_samples"][train_env_ids]
         contact_valid = valid & (contact_samples > 0)
         slip_speed = sums["foot_slip_speed_sum"][train_env_ids] / torch.clamp(contact_samples, min=1.0)
@@ -2873,6 +2878,41 @@ class LeggedRobot(BaseTask):
         points[:, :, 0] = grid_x.flatten()
         points[:, :, 1] = grid_y.flatten()
         return points
+
+    def _uses_terrain_height(self):
+        return getattr(self.cfg.terrain, "height_reference", "world") == "terrain"
+
+    def _ground_height_at(self, xy):
+        """World-space ground height at arbitrary XY positions, including after reset."""
+        if self.cfg.terrain.mesh_type == "plane":
+            return torch.zeros_like(xy[..., 0])
+        if self.height_samples is None:
+            raise RuntimeError("Terrain-relative heights require a height grid")
+        t = self.terrain.cfg
+        if t.mesh_type == "trimesh" and t.slope_treshold is not None:
+            raise ValueError("Terrain height queries require unshifted triangles (slope_treshold=None)")
+        return sample_triangle_heights(self.height_samples, xy, t.horizontal_scale,
+                                       t.vertical_scale, t.border_size)
+
+    def _body_ground_reference(self):
+        if not self._uses_terrain_height() or self.cfg.terrain.mesh_type == "plane":
+            return torch.zeros_like(self.base_pos[:, 2])
+        # Query current root pose, not the pre-reset measured_heights cache.
+        if not hasattr(self, "body_height_points"):
+            x = torch.tensor(self.cfg.terrain.measured_points_x, device=self.device)
+            y = torch.tensor(self.cfg.terrain.measured_points_y, device=self.device)
+            gx, gy = torch.meshgrid(x, y, indexing="ij")
+            self.body_height_points = torch.stack((gx.flatten(), gy.flatten(), torch.zeros_like(gx.flatten())), -1)
+        local = self.body_height_points.unsqueeze(0).expand(self.num_envs, -1, -1)
+        points = quat_apply_yaw(self.base_quat.repeat(1, local.shape[1]), local) + self.base_pos.unsqueeze(1)
+        return self._ground_height_at(points[..., :2]).mean(dim=1)
+
+    def _body_height(self):
+        return self.base_pos[:, 2] - self._body_ground_reference()
+
+    def _foot_clearance(self):
+        z = self.foot_positions[:, :, 2]
+        return z - self._ground_height_at(self.foot_positions[..., :2]) if self._uses_terrain_height() else z
 
     def _get_heights(self, env_ids, cfg):
         """Samples heights of the terrain at required points around each robot.

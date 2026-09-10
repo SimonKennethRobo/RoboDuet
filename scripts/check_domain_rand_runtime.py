@@ -37,6 +37,11 @@ def main():
             if step in (5, 15):
                 env.reset_idx(torch.tensor([0, 2], device="cuda:0"))
         assert torch.isfinite(env.root_states).all()
+        assert torch.isfinite(env._body_height()).all()
+        assert torch.isfinite(env._foot_clearance()).all()
+        measured = env._dog_measurement_snapshot()
+        height_slot = env.dog_measurement_slices["body_pose"].start
+        torch.testing.assert_close(measured[:, height_slot], env._body_height())
         assert torch.equal(env.com_displacements, creation_com)
         if mode != "none":
             assert env.stage1_ee_payload_com.abs().max().item() > 0

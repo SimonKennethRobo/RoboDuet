@@ -481,6 +481,8 @@ def write_config_yaml(path, robot, config_name, cfg, ctx):
     phases: 0.5
     offsets: 0.0
     bounds: 0.0
+  # base_height input must follow this reference (world z / height above local ground).
+  height_reference: "{cfg.terrain.height_reference}"
   base_height_target: {float(cfg.rewards.base_height_target):g}
   # Version 2 omits disabled terms from observations; version 1 retains
   # legacy zero slots. The observations list determines concatenation order.
@@ -630,7 +632,11 @@ def export(logdir, rl_sar_root=None, ckpt_id="last", robot=None,
     if any((cfg.dog.observe_lin_vel, cfg.dog.observe_pose_actual, cfg.dog.observe_track_error)):
         log("[export_rl_sar] NOTE: this policy observes base linear velocity "
             "and/or base height. rl_sar must be fed a state estimate "
-            "(RobotState::base.lin_vel in BODY frame, base.position in WORLD frame).")
+            "(RobotState::base.lin_vel in BODY frame).")
+        log(f"[export_rl_sar] height_reference={cfg.terrain.height_reference}: "
+            + ("base_height must be height above the local ground; world z is valid only on ground at z=0. "
+               "The deployment state estimator must provide this value; YAML metadata does not convert it."
+               if cfg.terrain.height_reference == "terrain" else "base_height must be world-frame z."))
     return out_dir
 
 

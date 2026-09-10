@@ -1607,7 +1607,7 @@ class WBCEnv(LeggedRobot):
         if self.cfg.env.priv_observe_body_height:
             scale, shift = get_scale_shift(self.cfg.normalization.body_height_range)
             privileged_obs_buf = torch.cat(
-                (privileged_obs_buf, ((self.root_states[: self.num_envs, 2]).view(self.num_envs, -1) - shift) * scale),
+                (privileged_obs_buf, (self._body_height().view(self.num_envs, -1) - shift) * scale),
                 dim=1,
             )
 
@@ -2532,7 +2532,7 @@ class WBCEnv(LeggedRobot):
                 (self.dof_pos[:, arm_slice] - self.default_dof_pos[:, arm_slice])
                 * self.obs_scales.dof_pos,
                 self.dof_vel[:, arm_slice] * self.obs_scales.dof_vel,
-                torch.stack((self.roll, self.pitch, self.base_pos[:, 2]), dim=-1),
+                torch.stack((self.roll, self.pitch, self._body_height()), dim=-1),
                 self.base_lin_vel,
                 self.base_ang_vel,
                 vel_residual,
@@ -2734,7 +2734,7 @@ class WBCEnv(LeggedRobot):
             self.dof_vel[:, : self.num_actions_loco],
             self.base_ang_vel,
             self.base_lin_vel,
-            torch.stack((self.base_pos[:, 2], self.pitch, self.roll), dim=-1),
+            torch.stack((self._body_height(), self.pitch, self.roll), dim=-1),
             self.dof_pos[:, arm_slice],
             self.dof_vel[:, arm_slice],
         ]

@@ -233,8 +233,7 @@ class Rewards:
         return torch.sum(out_of_limits, dim=1)
 
     def _reward_jump(self):
-        reference_heights = 0
-        body_height = self.env.base_pos[:, 2] - reference_heights
+        body_height = self.env._body_height()
         jump_height_target = self.env.commands_dog[:, 5] + self.env.cfg.rewards.base_height_target
         reward = - torch.square(body_height - jump_height_target)
         return reward
@@ -280,8 +279,7 @@ class Rewards:
         return rew_slip
 
     def _reward_feet_contact_vel(self):
-        reference_heights = 0
-        near_ground = self.env.foot_positions[:, :, 2] - reference_heights < 0.03
+        near_ground = self.env._foot_clearance() < 0.03
         foot_velocities = torch.square(torch.norm(self.env.foot_velocities[:, :, 0:3], dim=2).view(self.env.num_envs, -1))
         rew_contact_vel = torch.sum(near_ground * foot_velocities, dim=1)
         return rew_contact_vel
@@ -293,7 +291,7 @@ class Rewards:
 
     def _reward_feet_clearance_cmd_linear(self):
         phases = 1 - torch.abs(1.0 - torch.clip((self.env.foot_indices * 2.0) - 1.0, 0.0, 1.0) * 2.0)
-        foot_height = (self.env.foot_positions[:, :, 2]).view(self.env.num_envs, -1)# - reference_heights
+        foot_height = self.env._foot_clearance()
         if self.env.cfg.commands.use_dynamic_gait:
             footswing_height = self.env.commands_dog[:, 7:8]  # (num_envs, 1)
         else:

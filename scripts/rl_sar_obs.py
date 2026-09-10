@@ -42,6 +42,9 @@ class RlSarObservation:
     """
 
     def __init__(self, params):
+        # base_height is already in the bundle height_reference: world z for
+        # legacy bundles, or height above local ground for terrain bundles.
+        # This observation builder does not estimate the ground surface.
         self.p = params
         self.num_leg = int(params["num_leg_dofs"])
         self.num_arm = int(params["num_arm_dofs"])

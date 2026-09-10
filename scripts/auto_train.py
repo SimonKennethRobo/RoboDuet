@@ -73,7 +73,7 @@ def apply_dog_checkpoint_command_limits(cfg, ckpt_path):
     if isinstance(dog_cfg, dict):
         restore_dog_observation_layout(cfg, dog_cfg)
         print(f"Dog checkpoint observations: {cfg.dog.dog_num_observations}D, "
-              f"layout v{cfg.dog.observation_layout_version}", flush=True)
+              f"layout v{cfg.dog.observation_layout_version}, height_reference={cfg.terrain.height_reference}", flush=True)
     copied = []
     print(f"Loaded dog policy parameters from {params_path}", flush=True)
     print("Dog command limits applied to stage2:", flush=True)

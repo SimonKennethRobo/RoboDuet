@@ -71,6 +71,7 @@ class LeggedRobotDefaults:
         # one per tier, laid out as column bands (see utils/terrain.py).
         # Tier 0 must be 0.0 -- it is the flat ground the R5 twins stand on.
         # None keeps the stock terrain_proportions behaviour.
+        height_reference = "world"  # legacy world / terrain (relative height)
         roughness_tiers = None
         # Share of the columns each tier gets. The flat tier needs the
         # largest share: it has to be wide enough that a twin cannot walk

@@ -117,3 +117,41 @@ PATH=/opt/miniconda3/envs/isaacgym/bin:$PATH LD_LIBRARY_PATH=/opt/miniconda3/env
 ```
 
 Use `--mode benchmark` or `--mode none` for the other modes.
+
+## Height reference and uneven-ground rewards
+
+New training uses `terrain.height_reference = "terrain"` in `COMMON_OVERRIDES`.
+Body-height observations (including arm pose and privileged height), dog height
+tracking error, jump reward, height metrics and height termination share
+`base_z - mean(local_ground_heights)`. The fixed yaw-aligned window uses
+`terrain.measured_points_x/y`; samples are queried at the current root pose so
+reset observations cannot reuse the previous episode's ground reference.
+The relative body measurement enters the sensing-delay buffer as one quantity.
+
+Swing clearance and near-ground velocity rewards use each foot's own ground
+height, retaining the 2 cm foot-radius offset. The separate triangle query
+matches the regular grid's 00--11 diagonal, rather than bilinear interpolation
+or the old minimum-of-three query. New trimesh training sets
+`terrain.slope_treshold = None` to prevent vertex relocation; the legacy
+`_get_heights()` scan is unchanged. Terrain-relative queries reject trimeshes
+with slope relocation enabled instead of silently reporting an inaccurate height.
+
+Full old checkpoints without the reference field restore `"world"`, including
+old metric/termination behavior. Stage-2 dog loading also restores the field.
+New bundles serialize the field in parameters.pkl and RL-SAR YAML. On ground at
+z=0, world and relative heights coincide. On elevated/uneven terrain the RL-SAR
+state estimator must supply height above local ground; the export metadata does
+not modify the external deployment executable. Existing world-frame odometry z
+is not sufficient there. Observation widths are unchanged; new terrain semantics
+require new training or an explicitly validated fine-tuning run.
+
+`perf_base_height_signed_error_m` is actual minus target: negative means lower
+than commanded. Use it alongside RMSE to distinguish persistent squat bias from
+oscillation. No reward weights, push settings or hard-reset fractions were changed
+by the height fix.
+
+Height regression tests:
+
+```bash
+PATH=/opt/miniconda3/envs/isaacgym/bin:$PATH LD_LIBRARY_PATH=/opt/miniconda3/envs/isaacgym/lib:$LD_LIBRARY_PATH PYTHONPATH=. /opt/miniconda3/envs/isaacgym/bin/python -m pytest -q go1_gym/envs/config/test_height_reference.py
+```

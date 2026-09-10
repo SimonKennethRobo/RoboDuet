@@ -114,6 +114,7 @@ def apply_config_snapshot(cfg, snapshot, *, strict=True, drop_unknown=False):
     # Full pre-mixture checkpoint snapshots must not inherit a newly enabled
     # reset mode from today's wbc.py. Partial config updates keep their meaning.
     if "env" in snapshot and "terrain" in snapshot and hasattr(cfg, "terrain"):
+        cfg.terrain.height_reference = snapshot["terrain"].get("height_reference", "world")
         if "reset_mode" not in snapshot["terrain"]:
             cfg.terrain.reset_mode = "legacy"
         if "robustness_metrics" not in snapshot["terrain"]:
@@ -372,6 +373,7 @@ def restore_dog_observation_layout(cfg, snapshot):
     today's observation switches for a saved actor, even if widths coincide.
     Call before creating the environment/history buffers.
     """
+    cfg.terrain.height_reference = snapshot.get("terrain", {}).get("height_reference", "world")
     dog = snapshot.get("dog", {})
     # Width equality alone cannot prove command/rotation semantics agree.
     for section, names in (
@@ -946,6 +948,13 @@ def configure_robot_asset(cfg, robot):
 
 def validate_roboduet_cfg(cfg):
     domain_randomization_mode(cfg)
+    if cfg.terrain.height_reference not in ("world", "terrain"):
+        raise ValueError("terrain.height_reference must be world or terrain")
+    if cfg.terrain.height_reference == "terrain":
+        if cfg.terrain.mesh_type == "trimesh" and cfg.terrain.slope_treshold is not None:
+            raise ValueError("terrain height queries require terrain.slope_treshold=None (unshifted triangles)")
+        if cfg.terrain.mesh_type not in ("plane", "trimesh", "heightfield"):
+            raise ValueError("terrain height reference requires a ground surface")
     for name in ("priv_observe_ground_friction", "priv_observe_ground_friction_per_foot"):
         if getattr(cfg.env, name, False):
             raise ValueError(f"env.{name} is unsupported; use env.priv_observe_friction for actor friction.")
