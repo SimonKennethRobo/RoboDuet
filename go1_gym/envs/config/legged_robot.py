@@ -266,6 +266,7 @@ class LeggedRobotDefaults:
         thickness = 0.01
 
     class domain_rand:
+        mode = "sim2real"  # Legacy/base behavior; RoboDuet selects benchmark.
         rand_interval_s = 10
         randomize_rigids_after_start = True
         randomize_friction = True

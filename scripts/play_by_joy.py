@@ -531,7 +531,7 @@ def main(args):
     )
     apply_checkpoint_command_limits(cfg)
 
-    config_path = os.path.join(os.path.dirname(joylink_client.__file__), "../../config/loco_ctrl.yaml")
+    config_path = os.path.join(os.path.dirname(joylink_client.__file__), "../../config/xbox.yaml")
     joy_ctrl = JoystickController(config_path, dog_cmd, arm_cmd)
     joy_ctrl.print_command_mapping()
     dog_policy = load_dog_policy(logdir, ckpt_id, cfg)

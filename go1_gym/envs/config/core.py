@@ -11,6 +11,7 @@ from dataclasses import dataclass, fields, is_dataclass
 from typing import Any, Mapping
 
 from .legged_robot import LeggedRobotDefaults
+from .domain_randomization import domain_randomization_mode
 
 # Arm action interface selector (cfg.arm.action_mode). Defined here rather
 # than in wbc.py because both the CLI plumbing and validate_roboduet_cfg need
@@ -117,6 +118,17 @@ def apply_config_snapshot(cfg, snapshot, *, strict=True, drop_unknown=False):
             cfg.terrain.reset_mode = "legacy"
         if "robustness_metrics" not in snapshot["terrain"]:
             cfg.terrain.robustness_metrics = False
+    # Migrate the removed master flag without mutating the checkpoint data.
+    # A disabled legacy flag took precedence even when a mode was present.
+    if "domain_rand" in snapshot:
+        snapshot = dict(snapshot)
+        dr = dict(snapshot["domain_rand"])
+        legacy_enabled = dr.pop("enabled", None)
+        if legacy_enabled is False:
+            dr["mode"] = "none"
+        elif "mode" not in dr and (legacy_enabled is not None or "env" in snapshot):
+            dr["mode"] = "sim2real"
+        snapshot["domain_rand"] = dr
     for key, value in snapshot.items():
         if not hasattr(cfg, key):
             if drop_unknown:
@@ -194,6 +206,7 @@ class RoboDuetRuntimeOptions:
     # A.3 calls for (2D table vs sphere approximation).
     reach_table: bool = True
     raibert_form: str = None
+    domain_rand_mode: str = None
 
     @classmethod
     def from_args(cls, args):
@@ -209,6 +222,7 @@ class RoboDuetRuntimeOptions:
             arm_action_mode=getattr(args, "arm_action_mode", None),
             reach_table=not getattr(args, "no_reach_table", False),
             raibert_form="exp" if getattr(args, "raibert_exp", False) else getattr(args, "raibert_form", None),
+            domain_rand_mode=getattr(args, "domain_rand_mode", None),
         )
 
 
@@ -630,6 +644,7 @@ def configure_robot_asset(cfg, robot):
 
 
 def validate_roboduet_cfg(cfg):
+    domain_randomization_mode(cfg)
     validate_reset_mixture(cfg.terrain)
     required_fields = (
         ("env.num_observations", cfg.env.num_observations),
@@ -789,6 +804,8 @@ def build_roboduet_config(args=None, *, options=None, debug=False):
     if options is None:
         options = RoboDuetRuntimeOptions.from_args(args) if args is not None else RoboDuetRuntimeOptions(4096, "go2")
     cfg = build_config(GO1_PROFILE, WTW_PROFILE, ROBODUET_PROFILE)
+    if options.domain_rand_mode is not None:
+        cfg.domain_rand.mode = options.domain_rand_mode
     _derive_wbc_rewards(cfg, WBC_REWARD_FACTORS)
     derive_privileged_normalization_ranges(cfg)
     cfg.env.num_envs = options.num_envs

@@ -22,6 +22,24 @@ def test_benchmark_disables_training_command_writers_without_changing_observatio
     assert cfg.dog.dog_num_observations == width
 
 
+@pytest.mark.parametrize("mode", ["benchmark", "sim2real", "none"])
+def test_benchmark_domain_recipe_is_independent_of_checkpoint_mode(mode):
+    from go1_gym.envs.config import cfg_to_dict
+    from go1_gym.envs.config.domain_randomization import resolve_domain_randomization
+    cfg = build_roboduet_config()
+    cfg.domain_rand.mode = mode
+    cfg.domain_rand.stage1_arm.link_mass_range = [99., 100.]
+    _apply_benchmark_env_overrides(cfg, 32, 4)
+    reference = build_roboduet_config()
+    _apply_benchmark_env_overrides(reference, 32, 4)
+    assert cfg_to_dict(cfg.domain_rand) == cfg_to_dict(reference.domain_rand)
+    assert not cfg.domain_rand.randomize_action_delay
+    assert not cfg.domain_rand.randomize_mount_position
+    assert not cfg.noise.add_noise
+    cfg.domain_rand.randomize_dog_obs_latency = True
+    assert resolve_domain_randomization(cfg).domain_rand.randomize_dog_obs_latency
+
+
 def test_batched_commands_preserve_cells_and_unowned_columns():
     commands = torch.arange(12 * 11, dtype=torch.float).reshape(12, 11)
     env = SimpleNamespace(env=SimpleNamespace(commands_dog=commands))

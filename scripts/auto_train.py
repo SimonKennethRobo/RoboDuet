@@ -11,6 +11,7 @@ from datetime import datetime
 import wandb
 from go1_gym import MINI_GYM_ROOT_DIR
 from go1_gym.envs.config import ARM_ACTION_MODES, build_roboduet_config, cfg_to_dict
+from go1_gym.envs.config.domain_randomization import DOMAIN_RAND_MODES, domain_randomization_mode
 from go1_gym.envs.roboduet.utils import StageSchedule, apply_wbc_reward_settings
 from go1_gym.envs.roboduet.wbc_env import WBCEnv
 from go1_gym.envs.roboduet.wbc_env_wrapper import HistoryWrapper
@@ -126,6 +127,7 @@ def main(args):
     args.tags.append(f"seed{args.seed}")
 
     cfg = build_roboduet_config(args, debug=args.debug)
+    print(f"[domain rand] training mode: {domain_randomization_mode(cfg)}", flush=True)
     if cfg.terrain.reset_mode == "fixed_mixture":
         print("[reset mixture] " + str({k: v for k, v in cfg_to_dict(cfg.terrain).items()
                                        if k.startswith("reset_mix")}), flush=True)
@@ -294,6 +296,8 @@ if __name__ == "__main__":
     parser.add_argument("--video", action="store_true", default=False)
 
     parser.add_argument("--num_envs", type=int, default=4096)
+    parser.add_argument("--domain_rand_mode", choices=DOMAIN_RAND_MODES, default=None,
+                        help="Training DR recipe: benchmark (profile default), sim2real, or none.")
     parser.add_argument("--num_steps_per_env", type=int, default=RunnerArgs.num_steps_per_env)
     parser.add_argument("--num_mini_batches", type=int, default=PPO_Args.num_mini_batches)
 

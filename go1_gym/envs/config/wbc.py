@@ -76,6 +76,9 @@ ROBOT_ARM_SPEC = {
 # stage-2-submode-specific below), and base/mount domain randomization.
 # ============================================================
 COMMON_OVERRIDES = {
+    # Main training target: perturbed simulation benchmark.
+    # sim2real retains the full recipe; none is a nominal-dynamics ablation.
+    "domain_rand.mode": "benchmark",
     # robot init pose (leg + arm joint angles)
     "init_state.default_joint_angles": {
         "FL_hip_joint": 0.1,
@@ -375,7 +378,7 @@ COMMON_OVERRIDES = {
     "terrain.robustness_metrics": True,  # raw step sums in robustness.jsonl + wandb
     "terrain.robustness_early_window_s": 2.0,
 
-    "domain_rand.dog_obs_frame_drop_prob": 0.0,
+    "domain_rand.dog_obs_frame_drop_prob": 0.05,
     # Sensing latency, in policy steps of 0.02 s.  0-1 step covers the 5-20 ms
     # a real IMU + encoder + driver + inference chain adds on top of the
     # control period; widen it in the domain-randomisation sweep rather than

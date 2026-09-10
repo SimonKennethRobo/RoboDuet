@@ -26,6 +26,7 @@ from go1_gym import MINI_GYM_ROOT_DIR
 from go1_gym.envs.base.base_task import BaseTask
 from go1_gym.envs.base.curriculum import command_curriculum_bounds, command_curriculum_local_range
 from go1_gym.envs.config import ConfigNode
+from go1_gym.envs.config.domain_randomization import resolve_domain_randomization
 from go1_gym.response import (
     DECISION_CHANNEL_UNITS,
     GAIT_FREQUENCY,
@@ -88,6 +89,8 @@ class LeggedRobot(BaseTask):
         graphics_device_id=None,
     ):
 
+        cfg = resolve_domain_randomization(cfg)
+        eval_cfg = resolve_domain_randomization(eval_cfg)
         self.cfg = cfg
         self.eval_cfg = eval_cfg
         self.sim_params = sim_params
