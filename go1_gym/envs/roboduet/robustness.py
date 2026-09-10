@@ -106,7 +106,8 @@ def log_robustness_iteration(env, log_dir, iteration, wandb_dict):
     values = pop()
     if not values:
         return
-    wandb_dict.update(values)
+    from go1_gym.logging_metrics import robustness_metrics
+    wandb_dict.update(robustness_metrics(values))
     row = {"iteration": int(iteration), **values}
     with (Path(log_dir) / "robustness.jsonl").open("a", encoding="utf-8") as stream:
         stream.write(json.dumps(row, allow_nan=False) + "\n")

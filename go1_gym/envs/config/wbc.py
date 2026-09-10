@@ -232,7 +232,7 @@ COMMON_OVERRIDES = {
 
     "rewards.raibert_form": "quadratic",
     "reward_scales.raibert_heuristic": -1,
-    "reward_scales.raibert_sigma": 0.35,
+    "rewards.raibert_sigma": 0.35,
 
     "rewards.gait_reward_mode": "clock",
     # "reward_scales.gait_sync": 2.0,

@@ -14,6 +14,7 @@ import torch
 from params_proto import PrefixProto
 
 import wandb
+from go1_gym.logging_metrics import episode_metric_name, ppo_metrics, configure_wandb
 from go1_gym import MINI_GYM_ROOT_DIR
 from go1_gym.envs.roboduet.robustness import log_robustness_iteration
 from go1_gym.envs.roboduet.utils import aggregate_episode_value, apply_wbc_reward_settings
@@ -278,6 +279,8 @@ class Runner:
         else:
             self.alg_dog.actor_critic.eval()
 
+        configure_wandb(wandb.run)
+        logging_started = time.perf_counter()
         rewbuffer = deque(maxlen=100)
         lenbuffer = deque(maxlen=100)
         rewbuffer_eval = deque(maxlen=100)
@@ -425,6 +428,7 @@ class Runner:
             stop = time.time()
             learn_time = stop - start
 
+            arm_updated_this_iteration = bool(global_switch.switch_open)
             self._advance_stage_schedule(it)
 
             if self.log_dir is not None:
@@ -437,12 +441,15 @@ class Runner:
                 ep_string = f""
                 wandb_dict = {}
                 log_robustness_iteration(self.env, self.log_dir, it, wandb_dict)
-                wandb_dict["Efficiency/collect_time"] = collection_time
-                wandb_dict["Efficiency/learn_time"] = learn_time
+                wandb_dict["Runtime/collection_time_s"] = collection_time
+                wandb_dict["Runtime/learning_time_s"] = learn_time
                 self.tot_timesteps += self.num_steps_per_env * self.env.num_envs
                 self.tot_time += learn_time + collection_time
                 iteration_time = learn_time + collection_time
                 fps = self.num_steps_per_env * self.env.num_envs / iteration_time
+                wandb_dict.update({"Runtime/iteration": it, "Runtime/env_steps": self.tot_timesteps,
+                                   "Runtime/wall_time_s": time.perf_counter() - logging_started,
+                                   "Runtime/env_steps_per_s": fps})
 
                 episode_keys = dict.fromkeys(key for ep_info in ep_infos for key in ep_info)
                 for key in episode_keys:
@@ -453,30 +460,9 @@ class Runner:
                     ep_string += f"""{f"Mean episode {key}:":>{pad}} {mean:.4f}\n"""
 
                     if not self.debug:
-                        if key == "stage1_arm_curriculum_intensity":
-                            wandb_dict["Curriculum/arm_disturbance_intensity"] = mean
-                        elif key.startswith("curriculum_threshold_"):
-                            name = key.replace("curriculum_threshold_", "", 1)
-                            wandb_dict["Curriculum/threshold_" + name] = mean
-                        elif key == "command_curriculum_weight":
-                            wandb_dict["Curriculum/command_bin_weight"] = mean
-                        elif key.startswith("stage2_base_unlock_"):
-                            name = key.replace("stage2_base_unlock_", "", 1)
-                            wandb_dict["Curriculum/stage2_base_unlock_" + name] = mean
-                        elif key.startswith("reset_curriculum_"):
-                            name = key.replace("reset_curriculum_", "", 1)
-                            wandb_dict["Curriculum/reset_" + name] = mean
-                        elif key.startswith("traj_curriculum_"):
-                            name = key.replace("traj_curriculum_", "", 1)
-                            wandb_dict["Curriculum/traj_" + name] = mean
-                        elif key.startswith("perf_"):
-                            name = key.replace("perf_", "", 1)
-                            wandb_dict["Performance/" + name] = mean
-                        elif key.startswith("global_switch_"):
-                            name = key.replace("global_switch_", "", 1)
-                            wandb_dict["Global_Switch/" + name] = mean
-                        else:
-                            wandb_dict["Train_Reward_episode/" + key] = mean
+                        metric_name = episode_metric_name(key)
+                        if metric_name is not None:
+                            wandb_dict[metric_name] = mean
 
                 arm_action_std = (
                     self.alg_arm.actor_critic.std.clone()
@@ -486,21 +472,25 @@ class Runner:
                 dog_action_std = self.alg_dog.actor_critic.std.clone()
                 if not self.debug:
                     if self.arm_policy_enabled:
-                        wandb_dict["Train_Loss/mean_value_loss_arm"] = mean_value_loss_arm
-                        wandb_dict["Train_Loss/mean_surrogate_loss_arm"] = mean_surrogate_loss_arm
-                        wandb_dict["Train_Loss/mean_adaptation_module_loss_arm"] = mean_adaptation_module_loss_arm
+                        wandb_dict.update(ppo_metrics("Arm", trainable=arm_updated_this_iteration,
+                            action_std=arm_action_std.mean(), value_loss=mean_value_loss_arm,
+                            surrogate_loss=mean_surrogate_loss_arm,
+                            adaptation_enabled=self.arm_model.use_adaptation_module,
+                            adaptation_loss=mean_adaptation_module_loss_arm))
+                    wandb_dict.update(ppo_metrics("Dog", trainable=dog_policy_trainable,
+                        action_std=dog_action_std.mean(), value_loss=mean_value_loss_dog,
+                        surrogate_loss=mean_surrogate_loss_dog,
+                        adaptation_enabled=self.dog_model.use_adaptation_module,
+                        adaptation_loss=mean_adaptation_module_loss_dog))
 
-                    wandb_dict["Train_Loss/mean_value_loss_dog"] = mean_value_loss_dog
-                    wandb_dict["Train_Loss/mean_surrogate_loss_dog"] = mean_surrogate_loss_dog
-                    wandb_dict["Train_Loss/mean_adaptation_module_loss_dog"] = mean_adaptation_module_loss_dog
-
-                    if self.arm_policy_enabled:
-                        wandb_dict["Train_std/arm_action_std"] = arm_action_std.mean()
-                    wandb_dict["Train_std/dog_action_std"] = dog_action_std.mean()
+                    if dog_policy_trainable:
+                        wandb_dict["PPO/Dog/learning_rate"] = self.alg_dog.optimizer.param_groups[0]["lr"]
+                    if self.arm_policy_enabled and arm_updated_this_iteration:
+                        wandb_dict["PPO/Arm/learning_rate"] = self.alg_arm.optimizer.param_groups[0]["lr"]
 
                     if len(rewbuffer) > 0:
-                        wandb_dict["Train_Total_Reward/mean_reward"] = statistics.mean(rewbuffer)
-                        wandb_dict["Train_Total_Reward/mean_episode_length"] = statistics.mean(lenbuffer)
+                        wandb_dict["Episode/Shared/return_mean_100ep"] = statistics.mean(rewbuffer)
+                        wandb_dict["Episode/Shared/length_steps_mean_100ep"] = statistics.mean(lenbuffer)
 
                     wandb.log(wandb_dict, step=it)
                 str = f" \033[1m Learning iteration {it}/{tot_iter} \033[0m "

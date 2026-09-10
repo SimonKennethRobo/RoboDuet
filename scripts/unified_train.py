@@ -146,10 +146,7 @@ def train_go1(headless=True):
             pickle.dump(temp_dict, f)
         wandb.save(osp.join(args.log_dir, "parameters.pkl"), policy="now")
 
-        wandb.log({
-            "Global_Switch/start": global_switch.pretrained_to_wbc_start,
-            "Global_Switch/end": global_switch.pretrained_to_wbc_end,
-            }, step=0)
+
 
     env = WBCEnv(
         sim_device=args.sim_device,
