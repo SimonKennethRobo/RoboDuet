@@ -567,7 +567,8 @@ CSV logger 都按 `num_of_dofs` 遍历。导出脚本生成的所有 18 维数�
 
 ### 2.10 使用方法
 
-**`scripts/play_by_key_stage1.py` 每次运行都会自动导出**，在建 env 之前执行，
+**`play_by_joy.py`、`play_by_key_stage1.py`、`play_by_key_stage2.py` 和
+`play_by_key_stage2_traj.py` 每次运行都会自动导出 dog 策略**，在建 env 之前执行，
 所以你在 viewer 里看到的策略和 rl_sar 里躺着的 bundle 不会各自漂移。产物写在
 **run 自己的目录里**（`<logdir>/rl_sar/`），run 保持自包含，不显式指定
 `--rl_sar_root` 就不会有任何东西落到 `runs/` 之外。导出失败只警告不中断
@@ -579,14 +580,16 @@ python scripts/play_by_key_stage1.py --logdir runs/<date>/<run>
 # 直接写进 checkout：--rl_sar_root /path/to/rl_sar
 ```
 
-产出保持 rl_sar 自己的两层布局，所以可以原地被消费（把 rl_sar 指到这个目录），
-也可以整个 `policy/` 拷进 checkout：
+默认 `config_name` 为 run 目录名，可用 `--rl_sar_config_name` 覆盖。默认只生成：
 
 ```
-runs/<date>/<run>/rl_sar/policy/<robot>/base.yaml
-runs/<date>/<run>/rl_sar/policy/<robot>/<config_name>/config.yaml
-runs/<date>/<run>/rl_sar/policy/<robot>/<config_name>/policy.pt
+runs/<date>/<run>/rl_sar/<config_name>/config.yaml
+runs/<date>/<run>/rl_sar/<config_name>/policy.pt
 ```
+
+可将 `<config_name>/` 复制到已有 checkout 的 `policy/<robot>/`。显式传入
+`--rl_sar_root` 时会生成 `policy/<robot>/<config_name>/` 和机器人级 `base.yaml`。
+自动导出仅包含 dog 策略，不包含 stage2 arm 策略。
 
 也可以单独跑（不需要 IsaacGym）：
 
