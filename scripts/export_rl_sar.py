@@ -31,9 +31,11 @@ import argparse
 import importlib.util
 import pickle as pkl
 import sys
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import torch
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
@@ -485,7 +487,71 @@ def write_config_yaml(path, robot, config_name, cfg, ctx):
 {float_entry('default_dof_pos', ctx['default_dof_pos'])}
   joint_mapping: {ctx['joint_mapping']}
 """
+    response = response_observation_config(cfg, robot)
+    body += "\n" + "\n".join(
+        "  " + line for line in yaml.safe_dump(
+            {"response_observation": response}, sort_keys=False
+        ).splitlines()
+    ) + "\n"
     path.write_text(HEADER.format(**ctx['provenance']) + "\n" + body)
+
+
+def response_observation_config(cfg, robot):
+    """Export the reference/estimator constants and base-to-grasp FK chain.
+
+    Joint origins come from the training URDF and joint angles are indexed in
+    policy order. No simulator installation or runtime URDF parser is needed
+    by the deployment. The grasp offset is applied exactly once after ee_body.
+    """
+    from go1_gym.response.reference import build_channels
+
+    channels = build_channels(cfg.response.channel_order, cfg.response.omega_n,
+                              cfg.response.rate_limit)
+    _, command_scales = dog_command_layout(cfg)
+    training_joints, _, _ = joint_order_lists(cfg, robot)
+    asset_path = Path(str(cfg.asset.file).replace("{MINI_GYM_ROOT_DIR}", str(REPO_ROOT)))
+    tree = ET.parse(asset_path).getroot()
+    parent_joint = {j.find("child").get("link"): j for j in tree.findall("joint")}
+    link = cfg.asset.ee_body_name
+    chain = []
+    while link in parent_joint:
+        joint = parent_joint[link]
+        kind = joint.get("type")
+        if kind not in ("fixed", "revolute", "continuous"):
+            raise ValueError(f"Unsupported EE chain joint type: {kind}")
+        origin = joint.find("origin")
+        def vector(element, key, default):
+            return [float(v) for v in (element.get(key, default) if element is not None else default).split()]
+        chain.append({
+            "name": joint.get("name"),
+            "xyz": vector(origin, "xyz", "0 0 0"),
+            "rpy": vector(origin, "rpy", "0 0 0"),
+            "axis": vector(joint.find("axis"), "xyz", "1 0 0"),
+            "dof_index": -1 if kind == "fixed" else training_joints.index(joint.get("name")),
+        })
+        link = joint.find("parent").get("link")
+    if not chain:
+        raise ValueError(f"No kinematic chain found for EE body {cfg.asset.ee_body_name}")
+    deviation = cfg.response.deviation
+    return {
+        "version": 1,
+        "channels": [c.name for c in channels],
+        "omega_n": [c.omega_n for c in channels],
+        "rate_limit": [c.rate_limit for c in channels],
+        "obs_scale": [float(command_scales[c.cmd_index]) for c in channels],
+        "command_amplitude": [float(cfg.response.reward.calibration_amplitudes[c.name]) for c in channels],
+        "deviation": {
+            "channels": list(deviation.channels),
+            "tau_s": float(deviation.tau_s),
+            "warmup_s": float(deviation.warmup_s),
+            "rate_deadband": float(deviation.rate_deadband),
+            "excitation_fraction": float(deviation.excitation_fraction),
+        },
+        "ee_base_link": link,
+        "ee_body_name": cfg.asset.ee_body_name,
+        "ee_chain": list(reversed(chain)),
+        "ee_local_pos": [float(v) for v in cfg.arm.ik.ee_local_pos],
+    }
 
 
 # ---------------------------------------------------------------------------
