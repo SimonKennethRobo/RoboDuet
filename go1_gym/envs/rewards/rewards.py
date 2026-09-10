@@ -114,7 +114,7 @@ class Rewards:
             env.response_oscillation,
             env.response_delta_hat,
             env.response_channel_weights,
-            mask=env.response_phase_variance_mask,
+            mask=env.response_phase_variance_mask * env.response_soft_gate.unsqueeze(-1),
         )
 
     def _reward_steady_gain(self):
@@ -126,7 +126,7 @@ class Rewards:
             env.response_detrended,
             env.response_ref.gather_commands(env.commands_dog),
             env.response_channel_weights,
-            mask=env.response_steady_gain_mask,
+            mask=env.response_steady_gain_mask * env.response_soft_gate.unsqueeze(-1),
         )
 
     def _reward_domain_consistency(self):
@@ -146,7 +146,7 @@ class Rewards:
             env.response_twin_detrended,
             env.response_channel_weights,
             env.grouping.valid,
-        ) * env.response_consistency_gain
+        ) * env.response_consistency_gain * env.response_soft_gate
 
     def _reward_lin_vel_z(self):
         # Penalize z axis base linear velocity

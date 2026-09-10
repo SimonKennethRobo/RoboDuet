@@ -294,6 +294,8 @@ class LeggedRobotDefaults:
         # Optional per-env, per-push interval jitter; None keeps the fixed period.
         push_interval_s_range = None
         push_curriculum = False
+        # Legacy RL-MPC runs additionally gate pushes on the response stage.
+        push_use_response_curriculum = True
         push_curriculum_initial_fraction = 0.0
         push_curriculum_growth_iterations = 10000
         max_push_vel_xy = 1.

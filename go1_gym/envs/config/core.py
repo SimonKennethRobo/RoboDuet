@@ -123,6 +123,10 @@ def apply_config_snapshot(cfg, snapshot, *, strict=True, drop_unknown=False):
     if "domain_rand" in snapshot:
         snapshot = dict(snapshot)
         dr = dict(snapshot["domain_rand"])
+        # Preserve the push schedule when restoring a full legacy checkpoint.
+        # Partial overrides and new snapshots keep their explicit preference.
+        if "env" in snapshot and "push_use_response_curriculum" not in dr:
+            dr["push_use_response_curriculum"] = True
         legacy_enabled = dr.pop("enabled", None)
         if legacy_enabled is False:
             dr["mode"] = "none"

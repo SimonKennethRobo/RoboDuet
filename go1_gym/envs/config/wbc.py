@@ -354,13 +354,14 @@ COMMON_OVERRIDES = {
     "domain_rand.max_push_ang_vel": 1.0,
     "domain_rand.push_interval_s_range": [1.0, 8.0],
     "domain_rand.push_curriculum": True,
+    "domain_rand.push_use_response_curriculum": False,
     "domain_rand.push_curriculum_initial_fraction": 0.0,
     "domain_rand.push_curriculum_growth_iterations": 8000,
     "terrain.reset_curriculum_tracking_threshold": 0.35,
     "terrain.reset_curriculum_growth_iterations": 15000,
 
-    "terrain.mesh_type": "trimesh",
-    "terrain.measure_heights": True,
+    "terrain.mesh_type": "plane",
+    "terrain.measure_heights": False,
     "terrain.roughness_tiers": [0.0, 0.02, 0.04],
     # Half the map is flat: a twin has to stay on it for a whole episode,
     # and at commands.limit_vel_y an episode covers 20 m.
@@ -833,7 +834,9 @@ RESPONSE_MODEL_OVERRIDES = {
     # R4.1's soft target: consistency is dropped for this long after a large
     # disturbance or a bad slip, so the policy is never asked to trade stability
     # for predictability.
-    "response.reward.soft_gate_hold_s": 0.5,
+    "response.reward.soft_gate_hold_s": 1.0,
+    "response.reward.soft_gate_pose_error_rad": 0.25,
+    "response.reward.soft_gate_ang_vel_rad_s": 1.5,
     # Tail thresholds, not typical values. Each trigger holds the gate shut for
     # 25 steps, so a trigger firing on x% of steps shuts the gate for ~25x% of
     # the time -- measured: a 0.5 m/s slip threshold fires on 2.05% of steps and

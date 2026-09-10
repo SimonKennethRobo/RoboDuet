@@ -48,7 +48,7 @@ from go1_gym.response.reward_terms import (
     steady_gain,
 )
 from go1_gym.utils import global_switch, quaternion_to_rpy
-from go1_gym.utils.math_utils import get_scale_shift, quat_apply_yaw
+from go1_gym.utils.math_utils import get_scale_shift, quat_apply_yaw, wrap_to_pi
 from go1_gym.utils.terrain import Terrain
 from go1_gym.envs.roboduet.robustness import FixedResetMixture, RobustnessMetrics
 
@@ -920,16 +920,11 @@ class LeggedRobot(BaseTask):
         )
 
     def _update_response_soft_gate(self):
-        """R4.1's soft target: drop consistency while recovering from a hit.
+        """Suspend response objectives until recovery has remained stable.
 
-        Response consistency is a soft objective -- under a large disturbance the
-        policy must be free to prioritise staying upright. Two triggers, both
-        read from quantities the env already computes:
-
-        * a bad slip, measured as the mean horizontal speed of the feet that are
-          actually in contact;
-        * a large body acceleration, which is what an external push looks like
-          from the base.
+        Pose error is relative to the command, so a commanded lean is allowed.
+        Slip/acceleration catch impacts; pose error/body rates also catch a
+        gradual loss of balance. Known pushes start this timer directly.
         """
         reward_cfg = self.cfg.response.reward
         contact = (self.contact_forces[:, self.feet_indices, 2] > 1.0).float()
@@ -941,6 +936,14 @@ class LeggedRobot(BaseTask):
         )
         triggered = (mean_slip > float(reward_cfg.soft_gate_slip_speed)) | (
             acceleration > float(reward_cfg.soft_gate_accel)
+        )
+        # Dog command layout: velocity[0:3], pitch[3], roll[4], height[5].
+        pitch_error = wrap_to_pi(self.pitch - self.commands_dog[:, 3]).abs()
+        roll_error = wrap_to_pi(self.roll - self.commands_dog[:, 4]).abs()
+        pose_limit = float(reward_cfg.soft_gate_pose_error_rad)
+        triggered |= (pitch_error > pose_limit) | (roll_error > pose_limit)
+        triggered |= self.base_ang_vel[:, :2].abs().amax(dim=-1) > float(
+            reward_cfg.soft_gate_ang_vel_rad_s
         )
         self.response_soft_gate_timer = soft_gate_from_events(
             self.response_soft_gate_timer, triggered, self.soft_gate_hold_steps
@@ -2212,6 +2215,13 @@ class LeggedRobot(BaseTask):
         )
         values["Disturbance/configured_max_push_ang_vel_rad_s"] = self.cfg.domain_rand.max_push_ang_vel
         values["Disturbance/configured_max_push_vel_xy_mps"] = self.cfg.domain_rand.max_push_vel_xy
+        intensity = self._get_push_curriculum_intensity()
+        if self.cfg.domain_rand.push_use_response_curriculum:
+            intensity *= float(getattr(self, "domain_disturbance_intensity", 0.0))
+        if not self.cfg.domain_rand.push_robots:
+            intensity = 0.0
+        # curriculum_disturbance still describes the legacy R8 stage multiplier.
+        values["Disturbance/effective_push_intensity"] = intensity
         return values
 
     def _resample_commands(self, env_ids):
@@ -2668,10 +2678,10 @@ class LeggedRobot(BaseTask):
 
     def _push_robots(self, env_ids, cfg):
         """Random pushes the robots. Emulates an impulse by setting a randomized base velocity."""
-        # R8.1 stage 4: the curriculum turns pushes on and ramps their strength.
-        # This is what "robustness recovery" is made of in v1 -- there is no
-        # terrain to make harder -- so the whole stage rests on it.
-        intensity = float(getattr(self, "domain_disturbance_intensity", 0.0)) * self._get_push_curriculum_intensity()
+        # Learn recovery from the start; optionally retain the legacy R8 gate.
+        intensity = self._get_push_curriculum_intensity()
+        if getattr(cfg.domain_rand, "push_use_response_curriculum", True):
+            intensity *= float(getattr(self, "domain_disturbance_intensity", 0.0))
         self.robustness_push_mask[env_ids] = False
         if cfg.domain_rand.push_robots:
             push_env_ids = env_ids[self.episode_length_buf[env_ids] >= self.next_push_step[env_ids]]
@@ -2685,6 +2695,9 @@ class LeggedRobot(BaseTask):
             if len(push_env_ids) == 0:
                 return
             self.robustness_push_mask[push_env_ids] = True
+            # _update_response_soft_gate runs later in this same step and
+            # decrements once; keep a full hold window after this event.
+            self.response_soft_gate_timer[push_env_ids] = self.soft_gate_hold_steps + 1
 
             max_vel = cfg.domain_rand.max_push_vel_xy * intensity
             max_push_ang = cfg.domain_rand.max_push_ang_vel * intensity
