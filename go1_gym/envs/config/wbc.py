@@ -158,7 +158,7 @@ COMMON_OVERRIDES = {
     "dog.dog_num_observation_history": 30,
     "dog.dog_num_commands": 6,
     "dog.use_adaptation_module": False,
-    "dog.add_obs_noise": False,
+    "dog.add_obs_noise": True,
     "dog.observation_layout_version": 2, # Version 2 removes disabled observation terms; version 1 only set to zero.
     "dog.observe_clock_inputs": True,
     "dog.observe_lin_vel": True,
@@ -241,9 +241,11 @@ COMMON_OVERRIDES = {
     # "reward_scales.feet_stance_width": 1.0,
     # "reward_scales.feet_swing_height": -20.0,
 
+    # Training recipe: benchmark / sim2real / none. CLI can override this.
+    "domain_rand.mode": "benchmark",
     "domain_rand.push_robots": True,
     "domain_rand.max_push_vel_xy": 1.0,
-    "domain_rand.max_push_ang_vel": 0.6,
+    "domain_rand.max_push_ang_vel": 1.0,
     "domain_rand.push_interval_s_range": [1.0, 8.0],
     "domain_rand.push_curriculum": True,
     "domain_rand.push_curriculum_initial_fraction": 0.0,
@@ -251,15 +253,14 @@ COMMON_OVERRIDES = {
     "terrain.reset_curriculum_tracking_threshold": 0.35,
     "terrain.reset_curriculum_growth_iterations": 15000,
 
-    # Robustness experiments: edit here, start one process, wait for its
-    # [reset mixture] banner, then edit for the next process. No config files.
-    # "legacy" retains the old score-gated reset course; "fixed_mixture"
-    # bypasses it and uses the fixed env groups / iteration schedule below.
-    # A/B/C/D/E/F hard fractions: 0.0 / 1.0 / 0.1 / 0.2 / 0.4 / 0.2.
-    # For the planned comparison, max_push_ang_vel above is 0.6 for A-E,
-    # 1.0 for F. Keep max_push_vel_xy and other settings identical across runs.
+    # Baked mild height-noise bands; each reset samples a tier uniformly.
+    "terrain.mesh_type": "trimesh",
+    "terrain.measure_heights": True,
+    "terrain.roughness_tiers": [0.0, 0.02, 0.04],
+    "terrain.roughness_tier_weights": [0.5, 0.25, 0.25],  # map column shares
+    "terrain.center_robots": False,
     "terrain.reset_mode": "fixed_mixture",
-    "terrain.reset_mix_hard_fraction": 0,
+    "terrain.reset_mix_hard_fraction": 0.2,
     "terrain.reset_mix_seed": 1234,  # partition RNG, independent of training RNG
     "terrain.reset_mix_easy_tilt_rad": math.radians(18.0),
     "terrain.reset_mix_hard_tilt_rad": math.radians(45.0),
@@ -271,6 +272,12 @@ COMMON_OVERRIDES = {
     "terrain.robustness_early_window_s": 2.0,
 
     "domain_rand.dog_obs_frame_drop_prob": 0.0,
+    "domain_rand.randomize_dog_obs_latency": True,
+    "domain_rand.dog_obs_latency_steps_range": [0, 1],  # policy steps
+    "domain_rand.dog_obs_latency_jitter_steps": 0,
+    "domain_rand.randomize_com_displacement": True,
+    "domain_rand.com_displacement_range": [-0.05, 0.05],  # fixed at creation
+
     "domain_rand.added_mass_range": [-2.0, 2.0],
     "domain_rand.randomize_lag_timesteps": False,
     "domain_rand.randomize_end_effector_force": False,
@@ -320,6 +327,7 @@ STAGE1_OVERRIDES = {
     "domain_rand.stage1_arm.link_com_range": 0.1,
     "domain_rand.stage1_arm.randomize_ee_payload": True,
     "domain_rand.stage1_arm.ee_payload_mass_range": [0.0, 1.5],
+    "domain_rand.stage1_arm.ee_payload_com_offset_range": [0.10, 0.05, 0.05],
 }
 
 

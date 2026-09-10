@@ -29,6 +29,8 @@ from go1_gym.utils.math_utils import get_scale_shift, quat_apply_yaw
 from go1_gym.utils.terrain import Terrain
 from go1_gym.envs.roboduet.robustness import FixedResetMixture, RobustnessMetrics
 
+from go1_gym.envs.config.domain_randomization import resolve_domain_randomization
+
 class LeggedRobot(BaseTask):
     def __init__(
         self,
@@ -42,6 +44,8 @@ class LeggedRobot(BaseTask):
         graphics_device_id=None,
     ):
 
+        cfg = resolve_domain_randomization(cfg)
+        eval_cfg = resolve_domain_randomization(eval_cfg)
         self.cfg = cfg
         self.eval_cfg = eval_cfg
         self.sim_params = sim_params
@@ -479,7 +483,9 @@ class LeggedRobot(BaseTask):
         if self.cfg.domain_rand.randomize_rigids_after_start:
             self._randomize_rigid_body_props(env_ids, self.cfg)
             self.refresh_actor_rigid_shape_props(env_ids, self.cfg)
+            self.refresh_actor_rigid_body_props(env_ids, self.cfg)
 
+        self._assign_terrain_tiers(env_ids)
         self._reset_dofs(env_ids, self.cfg)
         self._reset_root_states(env_ids, self.cfg)
         self._arm_post_reset_refresh_hook(env_ids)
@@ -1009,6 +1015,27 @@ class LeggedRobot(BaseTask):
 
         return props
 
+    def _assign_terrain_tiers(self, env_ids):
+        """Sample baked roughness tiles at creation/reset, using the full tier range."""
+        for cfg, ids in ((self.cfg, env_ids[env_ids < self.num_train_envs]),
+                         (self.eval_cfg, env_ids[env_ids >= self.num_train_envs])):
+            if cfg is None or len(ids) == 0 or cfg.terrain.mesh_type not in ("trimesh", "heightfield"):
+                continue
+            bands = getattr(cfg.terrain, "roughness_tier_columns", None)
+            if not bands:
+                continue
+            tiers = torch.randint(len(bands), (len(ids),), device=self.device)
+            columns = torch.empty_like(tiers)
+            for tier, band in enumerate(bands):
+                selected = tiers == tier
+                choices = torch.tensor(band, dtype=torch.long, device=self.device)
+                columns[selected] = choices[torch.randint(len(band), (int(selected.sum()),), device=self.device)]
+            rows = cfg.terrain.num_rows
+            low, high = (1, rows - 1) if rows > 2 else (0, rows)
+            self.terrain_types[ids] = columns
+            self.terrain_levels[ids] = torch.randint(low, high, (len(ids),), device=self.device)
+            self.env_origins[ids] = cfg.terrain.terrain_origins[self.terrain_levels[ids], columns]
+
     def _randomize_rigid_body_props(self, env_ids, cfg):
         if cfg.domain_rand.randomize_base_mass:
             min_payload, max_payload = cfg.domain_rand.added_mass_range
@@ -1018,7 +1045,7 @@ class LeggedRobot(BaseTask):
                 * (max_payload - min_payload)
                 + min_payload
             )
-        if cfg.domain_rand.randomize_com_displacement:
+        if cfg.domain_rand.randomize_com_displacement and not getattr(self, "_body_props_locked", False):
             min_com_displacement, max_com_displacement = cfg.domain_rand.com_displacement_range
             self.com_displacements[env_ids, :] = (
                 torch.rand(len(env_ids), 3, dtype=torch.float, device=self.device, requires_grad=False)
@@ -1052,6 +1079,24 @@ class LeggedRobot(BaseTask):
 
             self.gym.set_actor_rigid_shape_properties(self.envs[env_id], 0, rigid_shape_props)
 
+    def refresh_actor_rigid_body_props(self, env_ids, cfg):
+        """Write the sampled chassis mass before reset state writes.
+
+        CoM stays fixed at actor creation. Do not call the creation callback
+        again: it caches nominal mass and adds the camera mass.
+        """
+        for env_id in env_ids:
+            env_id = int(env_id)
+            env_handle, actor_handle = self.envs[env_id], self.actor_handles[env_id]
+            body_props = self.gym.get_actor_rigid_body_properties(env_handle, actor_handle)
+            mass = self.default_body_mass + float(self.payloads[env_id])
+            if mass <= 0:
+                raise ValueError("domain_rand.added_mass_range produces nonpositive chassis mass")
+            body_props[self.base_mass_body_index].mass = mass
+            self.gym.set_actor_rigid_body_properties(
+                env_handle, actor_handle, body_props, recomputeInertia=True
+            )
+
     def _randomize_dof_props(self, env_ids, cfg):
         if cfg.domain_rand.randomize_motor_strength:
             min_strength, max_strength = cfg.domain_rand.motor_strength_range
@@ -1083,16 +1128,22 @@ class LeggedRobot(BaseTask):
             )
 
     def _process_rigid_body_props(self, props, env_id):
-        self.default_body_mass = props[0].mass
+        # Go2+arm assets have a light "base" at index 0 and the chassis at
+        # "trunk". Applying +/-2 kg to that light body creates negative mass.
+        self.base_mass_body_index = self.body_names.index("trunk") if "trunk" in self.body_names else 0
+        base_props = props[self.base_mass_body_index]
+        self.default_body_mass = base_props.mass
 
         if env_id == 0:
             assert len(props) == len(self.body_names), "props length is not equal to body_names length"
             for name, item in zip(self.body_names, props):
                 print(f"{name}: {item.mass}")
 
-        props[0].mass = self.default_body_mass + self.payloads[env_id]
+        base_props.mass = self.default_body_mass + float(self.payloads[env_id])
+        if base_props.mass <= 0:
+            raise ValueError("domain_rand.added_mass_range produces nonpositive chassis mass")
 
-        props[0].com = gymapi.Vec3(
+        base_props.com = gymapi.Vec3(
             self.com_displacements[env_id, 0], self.com_displacements[env_id, 1], self.com_displacements[env_id, 2]
         )
         props[self.ee_idx].mass += 100.0 / 1000  # camera
@@ -1620,6 +1671,7 @@ class LeggedRobot(BaseTask):
         if self.cfg.domain_rand.randomize_rigids_after_start:
             self._randomize_rigid_body_props(env_ids, self.cfg)
             self.refresh_actor_rigid_shape_props(env_ids, self.cfg)
+            self.refresh_actor_rigid_body_props(env_ids, self.cfg)
 
     def _reset_dofs(self, env_ids, cfg):
         """Resets DOF position and velocities of selected environmments
@@ -2487,6 +2539,7 @@ class LeggedRobot(BaseTask):
         self.default_friction = rigid_shape_props_asset[1].friction
         self.default_restitution = rigid_shape_props_asset[1].restitution
         self._init_custom_buffers__()
+        self._assign_terrain_tiers(torch.arange(self.num_envs, device=self.device))
         self._randomize_rigid_body_props(torch.arange(self.num_envs, device=self.device), self.cfg)
         self._randomize_gravity()
 
@@ -2524,6 +2577,9 @@ class LeggedRobot(BaseTask):
             self.arm_mount_tfs[i] = to_torch(
                 self.arm_mount_bucket_tfs[bucket_id], device=self.device, dtype=torch.float
             )
+
+        # Past this point the actors exist and their CoM is fixed for the run.
+        self._body_props_locked = True
 
         self.feet_indices = torch.zeros(len(feet_names), dtype=torch.long, device=self.device, requires_grad=False)
         for i in range(len(feet_names)):

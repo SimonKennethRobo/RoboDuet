@@ -11,6 +11,7 @@ from dataclasses import dataclass, fields, is_dataclass
 from typing import Any, Mapping
 
 from .legged_robot import LeggedRobotDefaults
+from .domain_randomization import domain_randomization_mode
 
 # Arm action interface selector (cfg.arm.action_mode). Defined here rather
 # than in wbc.py because both the CLI plumbing and validate_roboduet_cfg need
@@ -117,6 +118,28 @@ def apply_config_snapshot(cfg, snapshot, *, strict=True, drop_unknown=False):
             cfg.terrain.reset_mode = "legacy"
         if "robustness_metrics" not in snapshot["terrain"]:
             cfg.terrain.robustness_metrics = False
+    # Migrate the removed master flag without mutating the checkpoint data.
+    # A disabled legacy flag took precedence even when a mode was present.
+    if "domain_rand" in snapshot:
+        snapshot = dict(snapshot)
+        dr = dict(snapshot["domain_rand"])
+        legacy_enabled = dr.pop("enabled", None)
+        if legacy_enabled is False:
+            dr["mode"] = "none"
+        elif "mode" not in dr and (legacy_enabled is not None or "env" in snapshot):
+            dr["mode"] = "sim2real"
+        if "env" in snapshot:
+            # Full pre-feature snapshots keep their original sensing/load model.
+            dr.setdefault("randomize_dog_obs_latency", False)
+            dr.setdefault("dog_obs_latency_steps_range", [0, 0])
+            dr.setdefault("dog_obs_latency_jitter_steps", 0)
+            if "stage1_arm" in dr:
+                dr["stage1_arm"] = dict(dr["stage1_arm"])
+                dr["stage1_arm"].setdefault("ee_payload_com_offset_range", [0.0, 0.0, 0.0])
+        snapshot["domain_rand"] = dr
+    if "env" in snapshot and "terrain" in snapshot and "roughness_tiers" not in snapshot["terrain"]:
+        snapshot = dict(snapshot)
+        snapshot["terrain"] = dict(snapshot["terrain"], roughness_tiers=[])
     for key, value in snapshot.items():
         if not hasattr(cfg, key):
             if drop_unknown:
@@ -201,10 +224,12 @@ class RoboDuetRuntimeOptions:
     # 'quadratic', the legacy multiplicative cost). 'exp' makes
     # raibert_heuristic a bounded additive reward -- see set_raibert_form.
     raibert_form: str = None
+    domain_rand_mode: str = None
 
     @classmethod
     def from_args(cls, args):
         return cls(
+            domain_rand_mode=getattr(args, "domain_rand_mode", None),
             num_envs=args.num_envs,
             robot=args.robot,
             use_rot6d=getattr(args, "use_rot6d", True),
@@ -920,6 +945,10 @@ def configure_robot_asset(cfg, robot):
 
 
 def validate_roboduet_cfg(cfg):
+    domain_randomization_mode(cfg)
+    for name in ("priv_observe_ground_friction", "priv_observe_ground_friction_per_foot"):
+        if getattr(cfg.env, name, False):
+            raise ValueError(f"env.{name} is unsupported; use env.priv_observe_friction for actor friction.")
     validate_reset_mixture(cfg.terrain)
     required_fields = (
         ("env.num_observations", cfg.env.num_observations),
@@ -969,6 +998,8 @@ def build_roboduet_config(args=None, *, options=None, debug=False):
     if options is None:
         options = RoboDuetRuntimeOptions.from_args(args) if args is not None else RoboDuetRuntimeOptions(4096, "go2")
     cfg = build_config(GO1_PROFILE, WTW_PROFILE, ROBODUET_PROFILE)
+    if options.domain_rand_mode is not None:
+        cfg.domain_rand.mode = options.domain_rand_mode
     _derive_wbc_rewards(cfg, WBC_REWARD_FACTORS)
     derive_privileged_normalization_ranges(cfg)
     cfg.env.num_envs = options.num_envs

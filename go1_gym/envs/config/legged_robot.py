@@ -67,6 +67,15 @@ class LeggedRobotDefaults:
         dynamic_friction = 1.0
         restitution = 0.0
         terrain_noise_magnitude = 0.1
+        # Mild-rough-ground mode: a list of roughness amplitudes in metres,
+        # one per tier, laid out as column bands (see utils/terrain.py).
+        # Tier 0 must be 0.0 -- it is the flat ground the R5 twins stand on.
+        # None keeps the stock terrain_proportions behaviour.
+        roughness_tiers = None
+        # Share of the columns each tier gets. The flat tier needs the
+        # largest share: it has to be wide enough that a twin cannot walk
+        # out of it in one episode. None means equal shares.
+        roughness_tier_weights = None
         # rough terrain only:
         terrain_smoothness = 0.005
         measure_heights = True
@@ -257,6 +266,7 @@ class LeggedRobotDefaults:
         thickness = 0.01
 
     class domain_rand:
+        mode = "sim2real"  # Legacy/base behavior; RoboDuet selects benchmark.
         rand_interval_s = 10
         randomize_rigids_after_start = True
         randomize_friction = True
@@ -302,6 +312,12 @@ class LeggedRobotDefaults:
         # the previous step's (already-noised) observation instead of a fresh
         # one -- simulates a dropped sensor/comms frame. 0 = disabled.
         dog_obs_frame_drop_prob = 0.0
+        # Sensing latency on the measured half of the dog observation, in
+        # policy steps of dt (0.02 s).  The range is a per-episode draw --
+        # a robot's constant transport delay. Jitter is redrawn every step.
+        randomize_dog_obs_latency = False
+        dog_obs_latency_steps_range = [0, 0]
+        dog_obs_latency_jitter_steps = 0
 
     class rewards:
         only_positive_rewards = False  # if true negative total rewards are clipped at zero (avoids early termination problems)
@@ -427,7 +443,6 @@ class LeggedRobotDefaults:
         clip_actions = 100.
 
         friction_range = [0.05, 4.5]
-        ground_friction_range = [0.05, 4.5]
         restitution_range = [0, 1.0]
         added_mass_range = [-1., 3.]
         com_displacement_range = [-0.1, 0.1]

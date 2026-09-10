@@ -11,6 +11,7 @@ from isaacgym import gymapi, gymtorch, gymutil
 from isaacgym.torch_utils import quat_apply, quat_from_euler_xyz, quat_mul, quat_rotate, to_torch, torch_rand_float
 
 from go1_gym.envs.config import ARM_ACTION_MODES, ConfigNode, dog_obs_term_present
+from go1_gym.utils.latency import LatencyBuffer
 from go1_gym.utils.global_switch import global_switch
 from go1_gym.utils.math_utils import (
     ee_twist_body_6d,
@@ -668,6 +669,7 @@ class WBCEnv(LeggedRobot):
             and getattr(stage1_arm_cfg, "randomize_ee_payload", False)
         ):
             self.stage1_ee_payload_mass[env_ids] = 0.0
+            self.stage1_ee_payload_com[env_ids] = 0.0
             return
         intensity = self._get_stage1_arm_curriculum_intensity()
         lo, hi = getattr(stage1_arm_cfg, "ee_payload_mass_range", [0.0, 0.0])
@@ -675,6 +677,17 @@ class WBCEnv(LeggedRobot):
         self.stage1_ee_payload_mass[env_ids] = torch_rand_float(
             lo, hi, (len(env_ids), 1), device=self.device
         ).squeeze(-1)
+        # Global invariant 12: a carried object's mass is not concentrated at
+        # the grasp point.  The offset is what turns the payload from a pure
+        # force into a force *and* a wrench about the wrist, which is the part
+        # the arm's own controller has to fight and the part that reaches the
+        # base through the mount.  Without it, every payload in training is a
+        # point mass at the tool centre -- a load case that does not exist.
+        com_range = getattr(stage1_arm_cfg, "ee_payload_com_offset_range", [0.0, 0.0, 0.0])
+        offset = torch.tensor(com_range, dtype=torch.float, device=self.device) * intensity
+        self.stage1_ee_payload_com[env_ids] = (
+            torch.rand(len(env_ids), 3, device=self.device) * 2.0 - 1.0
+        ) * offset
 
     def _apply_stage1_ee_payload_force(self):
         """Applies the sampled EE payload as a sustained downward force at
@@ -692,6 +705,15 @@ class WBCEnv(LeggedRobot):
             return
         self.stage1_payload_forces[:, self.ee_idx, 2] = -self.stage1_ee_payload_mass * 9.81
         self.stage1_payload_force_positions[:] = self.rigid_body_state[..., :3].clone().reshape(self.num_envs, -1, 3)
+        # Apply the weight at the payload's centre of mass rather than at the
+        # end-effector origin.  Same force, moved along a lever arm fixed in
+        # the EE frame, so the wrist torque it produces rotates with the wrist
+        # -- which is what makes a badly balanced load harder to carry in some
+        # arm configurations than in others.
+        self.stage1_payload_force_positions[:, self.ee_idx] += quat_apply(
+            self.rigid_body_state.view(self.num_envs, -1, 13)[:, self.ee_idx, 3:7],
+            self.stage1_ee_payload_com,
+        )
         assert self.gym.apply_rigid_body_force_at_pos_tensors(
             self.sim,
             gymtorch.unwrap_tensor(self.stage1_payload_forces.reshape(-1, 3)),
@@ -876,6 +898,11 @@ class WBCEnv(LeggedRobot):
         # episode in _resample_stage1_ee_payload, applied as a sustained
         # downward force at the EE body in _apply_stage1_ee_payload_force.
         self.stage1_ee_payload_mass = torch.zeros(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
+        # Offset, in the EE frame, from the grasp point to the payload's centre
+        # of mass (see _resample_stage1_ee_payload).
+        self.stage1_ee_payload_com = torch.zeros(
+            self.num_envs, 3, dtype=torch.float, device=self.device, requires_grad=False
+        )
         self.stage1_payload_forces = torch.zeros_like(self.rigid_body_state[:, :3]).reshape(self.num_envs, -1, 3)
         self.stage1_payload_force_positions = torch.zeros_like(self.rigid_body_state[:, :3]).reshape(self.num_envs, -1, 3)
 
@@ -925,6 +952,31 @@ class WBCEnv(LeggedRobot):
         self.dog_last_delivered_obs = torch.zeros(
             self.num_envs, self.cfg.dog.dog_num_observations, dtype=torch.float, device=self.device
         )
+
+        # Sensing latency. Applied to the measured quantities rather than to
+        # the finished observation vector: commands, the reference state and
+        # the policy's own last action are known onboard without going through
+        # a sensor, so delaying them would model a latency the robot does not
+        # have -- and delaying a tracking error would delay the command inside
+        # it, which is worse still.  See go1_gym/utils/latency.py.
+        self.dog_measurement_slices = {}
+        cursor = 0
+        for name, width in self._dog_measurement_layout():
+            self.dog_measurement_slices[name] = slice(cursor, cursor + width)
+            cursor += width
+        latency_range = getattr(self.cfg.domain_rand, "dog_obs_latency_steps_range", [0, 0])
+        self.dog_obs_latency = LatencyBuffer(
+            self.num_envs,
+            cursor,
+            int(round(float(max(latency_range)))),
+            device=self.device,
+        )
+        # Envs whose ring still holds the previous episode, cleared on the next
+        # snapshot (which is the first one taken with the new state).
+        self.dog_obs_latency_fill = torch.ones(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
+        self._dog_latency_step = -1
 
         self._traj_tracking_init_hook()
 
@@ -1161,8 +1213,26 @@ class WBCEnv(LeggedRobot):
         # stage1_arm_target_offset / vel / accel are re-initialised in
         # _arm_post_reset_refresh_hook (after the randomised dof_pos is known).
         self._resample_stage1_ee_payload(env_ids)
+        self._resample_dog_obs_latency(env_ids)
         self.dog_last_delivered_obs[env_ids] = 0.0
         self.prev_ee_twist_body[env_ids] = 0.0
+
+    def _resample_dog_obs_latency(self, env_ids):
+        """Draw this episode's sensing latency and drop the stale history.
+
+        Per episode rather than per step because the constant part of a
+        robot's sensing delay is a property of that robot and its link, not
+        something that resamples underneath it; the fast component is
+        dog_obs_latency_jitter_steps, applied at read time.
+        """
+        if not hasattr(self, "dog_obs_latency"):
+            return
+        if getattr(self.cfg.domain_rand, "randomize_dog_obs_latency", False):
+            lo, hi = self.cfg.domain_rand.dog_obs_latency_steps_range
+            self.dog_obs_latency.sample_delays(env_ids, lo, hi)
+        else:
+            self.dog_obs_latency.delays[env_ids] = 0
+        self.dog_obs_latency_fill[env_ids] = True
 
     def _ensure_arm_rigid_body_rand_buffers(self, props):
         if hasattr(self, "arm_link_mass_scales"):
@@ -2620,14 +2690,105 @@ class WBCEnv(LeggedRobot):
         layout.append(("arm_dof_vel", self.num_actions_arm, ns.dof_vel * level * s.dof_vel, True))
         return layout
 
+    def _dog_measurement_layout(self):
+        """(name, width) of every sensor-derived quantity get_dog_observations
+        reads, in snapshot order.
+
+        Separate from _dog_obs_layout because the two answer different
+        questions.  That one describes the finished observation vector, where
+        a tracking error is one segment; this one describes what a *sensor*
+        delivers, and a tracking error is not something any sensor delivers --
+        it is a command minus a measurement, formed onboard from a fresh
+        command and a late measurement.  Delaying the measurements here and
+        forming the errors afterwards reproduces that; delaying the finished
+        vector would not.
+        """
+        layout = [
+            ("projected_gravity", 3),
+            ("dog_dof_pos", self.num_actions_loco),
+            ("dog_dof_vel", self.num_actions_loco),
+            ("base_ang_vel", 3),
+            ("base_lin_vel", 3),
+            ("body_pose", 3),                      # height, pitch, roll
+            ("arm_dof_pos", self.num_actions_arm),
+            ("arm_dof_vel", self.num_actions_arm),
+        ]
+        if self.cfg.commands.global_reference:
+            layout.append(("base_lin_vel_world", 3))
+        if self.cfg.env.observe_contact_states:
+            layout.append(("contact_states", 4))
+        return layout
+
+    def _dog_measurement_snapshot(self):
+        """This step's measurements, raw and unscaled, in layout order.
+
+        Unscaled on purpose: the observation scales are affine and constant,
+        so scaling before or after the delay is identical, and keeping the
+        buffer in physical units makes it directly comparable with the same
+        quantities logged elsewhere.
+        """
+        arm_slice = slice(self.num_actions_loco, self.num_actions_loco + self.num_actions_arm)
+        parts = [
+            self.projected_gravity,
+            self.dof_pos[:, : self.num_actions_loco],
+            self.dof_vel[:, : self.num_actions_loco],
+            self.base_ang_vel,
+            self.base_lin_vel,
+            torch.stack((self.base_pos[:, 2], self.pitch, self.roll), dim=-1),
+            self.dof_pos[:, arm_slice],
+            self.dof_vel[:, arm_slice],
+        ]
+        if self.cfg.commands.global_reference:
+            parts.append(self.root_states[: self.num_envs, 7:10])
+        if self.cfg.env.observe_contact_states:
+            parts.append((self.contact_forces[:, self.feet_indices, 2] > 1.0).float())
+        return torch.cat(parts, dim=-1)
+
+    def _dog_measurements(self):
+        """The measurements this step's observation is allowed to see.
+
+        The ring advances once per policy step, not once per call: the play and
+        benchmark paths call get_dog_observations more than once for the same
+        step, and a ring that advanced per call would turn a 1-step latency
+        into a 2-step one there and nowhere else.
+        """
+        snapshot = self._dog_measurement_snapshot()
+        latency_on = getattr(self.cfg.domain_rand, "randomize_dog_obs_latency", False)
+        if not latency_on or self.dog_obs_latency.max_steps == 0:
+            return snapshot
+        advanced = self._dog_latency_step != self.common_step_counter
+        refilled = bool(torch.any(self.dog_obs_latency_fill))
+        if advanced:
+            self._dog_latency_step = self.common_step_counter
+            self.dog_obs_latency.push(snapshot)
+        if refilled:
+            self.dog_obs_latency.reset_idx(
+                self.dog_obs_latency_fill.nonzero(as_tuple=False).flatten(), snapshot
+            )
+            self.dog_obs_latency_fill[:] = False
+        if advanced or refilled:
+            jitter = int(getattr(self.cfg.domain_rand, "dog_obs_latency_jitter_steps", 0))
+            self._dog_delayed_measurements = self.dog_obs_latency.read(jitter_steps=jitter)
+        return self._dog_delayed_measurements
+
+
     def get_dog_observations(self):
         """Computes observations"""
+        # Everything the policy learns about the world's *state* comes through
+        # here, late by this env's sampled sensing latency.  Commands, the
+        # reference state and self.actions bypass it -- they never crossed a
+        # sensor.  See _dog_measurement_layout.
+        measured = self._dog_measurements()
+
+        def sensed(name):
+            return measured[:, self.dog_measurement_slices[name]]
+
         obs_buf = torch.cat(
             (
-                self.projected_gravity,
-                (self.dof_pos[:, : self.num_actions_loco] - self.default_dof_pos[:, : self.num_actions_loco])
+                sensed("projected_gravity"),
+                (sensed("dog_dof_pos") - self.default_dof_pos[:, : self.num_actions_loco])
                 * self.obs_scales.dof_pos,
-                self.dof_vel[:, : self.num_actions_loco] * self.obs_scales.dof_vel,
+                sensed("dog_dof_vel") * self.obs_scales.dof_vel,
                 self.actions[:, : self.num_actions_loco],
             ),
             dim=-1,
@@ -2673,20 +2834,21 @@ class WBCEnv(LeggedRobot):
         # Generate each measured actual once, then reuse it in the associated
         # tracking error. This keeps actual + error == command even with noise.
         lin_vel_actual = (
-            self.root_states[: self.num_envs, 7:10]
+            sensed("base_lin_vel_world")
             if self.cfg.commands.global_reference
-            else self.base_lin_vel
+            else sensed("base_lin_vel")
         )
-        ang_vel_measured = self.base_ang_vel * self.obs_scales.ang_vel
+        ang_vel_measured = sensed("base_ang_vel") * self.obs_scales.ang_vel
         lin_vel_measured = lin_vel_actual * self.obs_scales.lin_vel
-        tracking_lin_vel_measured = self.base_lin_vel * self.obs_scales.lin_vel
-        pose_measured = torch.stack(
-            (
-                self.base_pos[:, 2] * self.obs_scales.body_height_cmd,
-                self.pitch * self.obs_scales.body_pitch_cmd,
-                self.roll * self.obs_scales.body_roll_cmd,
-            ),
-            dim=-1,
+        tracking_lin_vel_measured = sensed("base_lin_vel") * self.obs_scales.lin_vel
+        # body_pose is snapshotted raw (height [m], pitch, roll [rad]); the
+        # observation scales are applied here, after the delay.
+        pose_measured = sensed("body_pose") * measured.new_tensor(
+            [
+                self.obs_scales.body_height_cmd,
+                self.obs_scales.body_pitch_cmd,
+                self.obs_scales.body_roll_cmd,
+            ]
         )
         # getattr keeps configs restored from checkpoints created before this
         # dog-specific switch compatible with the previous noise-on behavior.
@@ -2753,12 +2915,12 @@ class WBCEnv(LeggedRobot):
 
         if self.cfg.env.observe_contact_states:
             obs_buf = torch.cat(
-                (obs_buf, (self.contact_forces[:, self.feet_indices, 2] > 1.0).view(self.num_envs, -1) * 1.0), dim=1
+                (obs_buf, sensed("contact_states")), dim=1
             )
 
         arm_slice = slice(self.num_actions_loco, self.num_actions_loco + self.num_actions_arm)
-        arm_pos = (self.dof_pos[:, arm_slice] - self.default_dof_pos[:, arm_slice]) * self.obs_scales.dof_pos
-        arm_vel = self.dof_vel[:, arm_slice] * self.obs_scales.dof_vel
+        arm_pos = (sensed("arm_dof_pos") - self.default_dof_pos[:, arm_slice]) * self.obs_scales.dof_pos
+        arm_vel = sensed("arm_dof_vel") * self.obs_scales.dof_vel
         obs_buf = torch.cat((obs_buf, arm_pos, arm_vel), dim=-1)
 
         if dog_obs_noise_enabled:

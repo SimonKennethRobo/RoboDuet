@@ -21,6 +21,7 @@ from go1_gym.envs.config import (
     restore_dog_observation_layout,
 )
 from go1_gym.envs.config.wbc import ROBODUET_OVERRIDES
+from go1_gym.envs.config.domain_randomization import configure_benchmark_domain_randomization
 from go1_gym.utils.global_switch import global_switch
 from go1_gym.utils.math_utils import quat_apply_yaw
 from go1_gym_learn.ppo_cse_automatic.dog_ac import DogActorCritic
@@ -779,6 +780,9 @@ def _load_cfg_from_pkl(logdir: str, robot: Optional[str] = None) -> ConfigNode:
 
 
 def _apply_benchmark_env_overrides(cfg, total_envs: int, envs_per_policy: int):
+    # Evaluation owns DR, never the first candidate's training snapshot. The
+    # existing scenario overrides below still decide which dynamics vary.
+    configure_benchmark_domain_randomization(cfg, DEFAULT_CFG)
     # Benchmark scenarios own initialization difficulty, not the checkpoint's
     # training cohort. Also let scenario E's existing zero-range override work.
     if cfg.terrain.reset_mode == "fixed_mixture":
