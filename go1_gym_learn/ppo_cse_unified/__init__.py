@@ -1,3 +1,4 @@
+from go1_gym.file_io import atomic_output, optional_output
 # License: see [LICENSE, LICENSES/rsl_rl/LICENSE]
 
 import copy
@@ -271,7 +272,8 @@ class Runner:
                         wandb_dict['Episode/Shared/return_mean_100ep'] = statistics.mean(rewbuffer)
                         wandb_dict['Episode/Shared/length_steps_mean_100ep'] = statistics.mean(lenbuffer)
 
-                    wandb.log(wandb_dict, step=it)
+                    with optional_output("wandb.log"):
+                        wandb.log(wandb_dict, step=it)
                 str = f" \033[1m Learning iteration {it}/{tot_iter} \033[0m "
 
                 log_string = (f"""{'#' * width}\n"""
@@ -314,7 +316,7 @@ class Runner:
                             f"""{'ETA:':>{pad}} {mins:.0f} mins {secs:.1f} s\n""")
                 print(log_string)
 
-                with open(osp.join(self.log_dir, "log.txt"), "a") as f:
+                with optional_output("log.txt"), open(osp.join(self.log_dir, "log.txt"), "a") as f:
                     f.write(log_string)
 
             if UnifiedRunnerArgs.save_video_interval and UnifiedRunnerArgs.log_video:
@@ -328,42 +330,48 @@ class Runner:
         self.save(it)
 
     def save(self, it):
-        torch.save(self.alg.actor_critic.state_dict(), osp.join(self.log_dir, f"checkpoints_unified/ac_weights_{it:06d}.pt"))
-        shutil.copyfile(osp.join(self.log_dir, f"checkpoints_unified/ac_weights_{it:06d}.pt"),
-            osp.join(self.log_dir, f"checkpoints_unified/ac_weights_last.pt"))
+        with optional_output("ppo_cse_unified/save"):
+            atomic_output(osp.join(self.log_dir, f'checkpoints_unified/ac_weights_{it:06d}.pt'), lambda target: torch.save(self.alg.actor_critic.state_dict(), target))
+            atomic_output(osp.join(self.log_dir, f'checkpoints_unified/ac_weights_last.pt'), lambda target: shutil.copyfile(osp.join(self.log_dir, f'checkpoints_unified/ac_weights_{it:06d}.pt'), target))
 
-        if it in [44800, 44400, 44000]:
-            torch.save(self.alg.actor_critic.state_dict(), osp.join(self.log_dir, f"checkpoints_unified/ac_weights_{it:06d}.pt"))
-            wandb.save(osp.join(self.log_dir, f"checkpoints_unified/ac_weights_{it:06d}.pt"))
+            if it in [44800, 44400, 44000]:
+                atomic_output(osp.join(self.log_dir, f'checkpoints_unified/ac_weights_{it:06d}.pt'), lambda target: torch.save(self.alg.actor_critic.state_dict(), target))
+                wandb.save(osp.join(self.log_dir, f"checkpoints_unified/ac_weights_{it:06d}.pt"))
 
-        path = osp.join(self.log_dir, f"deploy_model")
-        adaptation_module_path = f'{path}/adaptation_module_latest.jit'
-        adaptation_module = copy.deepcopy(self.alg.actor_critic.adaptation_module).to('cpu')
-        traced_script_adaptation_module_dog = torch.jit.script(adaptation_module)
-        traced_script_adaptation_module_dog.save(adaptation_module_path)
-        body_path = f'{path}/body_latest.jit'
-        body_model = copy.deepcopy(self.alg.actor_critic.actor_body).to('cpu')
-        traced_script_body_module = torch.jit.script(body_model)
-        traced_script_body_module.save(body_path)
+            path = osp.join(self.log_dir, f"deploy_model")
+            adaptation_module_path = f'{path}/adaptation_module_latest.jit'
+            adaptation_module = copy.deepcopy(self.alg.actor_critic.adaptation_module).to('cpu')
+            traced_script_adaptation_module_dog = torch.jit.script(adaptation_module)
+            atomic_output(adaptation_module_path, traced_script_adaptation_module_dog.save)
+            body_path = f'{path}/body_latest.jit'
+            body_model = copy.deepcopy(self.alg.actor_critic.actor_body).to('cpu')
+            traced_script_body_module = torch.jit.script(body_model)
+            atomic_output(body_path, traced_script_body_module.save)
 
-        # save to wandb
-        wandb.save(adaptation_module_path)
-        wandb.save(body_path)
-        wandb.save(osp.join(self.log_dir, f"checkpoints_unified/ac_weights_last.pt"))
+            # save to wandb
+            wandb.save(adaptation_module_path)
+            wandb.save(body_path)
+            wandb.save(osp.join(self.log_dir, f"checkpoints_unified/ac_weights_last.pt"))
 
     def save_cv(self, frames, it):
         # fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        fourcc = cv2.VideoWriter_fourcc(*'X264')
-        out = cv2.VideoWriter(osp.join(self.log_dir, f'videos/{it:06d}.mp4'), fourcc, int(1 / self.env.dt), (self.env.camera_props.width, self.env.camera_props.height))
-        for frame in frames:
-            out.write(frame[..., :3])
-        out.release()
+        with optional_output("ppo_cse_unified/save_cv"):
+            fourcc = cv2.VideoWriter_fourcc(*'X264')
+            out = cv2.VideoWriter(osp.join(self.log_dir, f'videos/{it:06d}.mp4'), fourcc, int(1 / self.env.dt), (self.env.camera_props.width, self.env.camera_props.height))
+            try:
+                for frame in frames:
+                    out.write(frame[..., :3])
+            finally:
+                out.release()
 
     def save_io(self, frames, it):
-        writer = imageio.get_writer(osp.join(self.log_dir, f'videos/{it:06d}.mp4'), fps=int(1 / self.env.dt))
-        for frame in frames:
-            writer.append_data(frame[..., :3])
-        writer.close()
+        with optional_output("ppo_cse_unified/save_io"):
+            writer = imageio.get_writer(osp.join(self.log_dir, f'videos/{it:06d}.mp4'), fps=int(1 / self.env.dt))
+            try:
+                for frame in frames:
+                    writer.append_data(frame[..., :3])
+            finally:
+                writer.close()
 
     def log_video(self, it):
         if it - self.last_recording_it >= UnifiedRunnerArgs.save_video_interval:

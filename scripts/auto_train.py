@@ -9,6 +9,7 @@ import shutil
 from datetime import datetime
 
 import wandb
+from go1_gym.file_io import atomic_output, optional_output
 from go1_gym.envs.config.domain_randomization import DOMAIN_RAND_MODES, domain_randomization_mode
 from go1_gym import MINI_GYM_ROOT_DIR
 from go1_gym.envs.config import ARM_ACTION_MODES, build_roboduet_config, cfg_to_dict, restore_dog_observation_layout
@@ -209,36 +210,42 @@ def main(args):
     print(f"Logging to {args.log_dir}")
     # args.log_dir += f"_seed{args.seed}"
 
-    os.makedirs(osp.join(args.log_dir, "checkpoints_arm"), exist_ok=True)
-    os.makedirs(osp.join(args.log_dir, "checkpoints_dog"), exist_ok=True)
-    os.makedirs(osp.join(args.log_dir, "videos"), exist_ok=True)
-    os.makedirs(osp.join(args.log_dir, "deploy_model"), exist_ok=True)
-    os.makedirs(f"{MINI_GYM_ROOT_DIR}/tmp/deploy_model", exist_ok=True)
+    with optional_output("training output directories"):
+        os.makedirs(osp.join(args.log_dir, "checkpoints_arm"), exist_ok=True)
+    with optional_output("training output directories"):
+        os.makedirs(osp.join(args.log_dir, "checkpoints_dog"), exist_ok=True)
+    with optional_output("training output directories"):
+        os.makedirs(osp.join(args.log_dir, "videos"), exist_ok=True)
+    with optional_output("training output directories"):
+        os.makedirs(osp.join(args.log_dir, "deploy_model"), exist_ok=True)
+    with optional_output("training output directories"):
+        os.makedirs(f"{MINI_GYM_ROOT_DIR}/tmp/deploy_model", exist_ok=True)
 
     if not args.debug:
-        os.makedirs(osp.join(args.log_dir, "scripts"), exist_ok=True)
-        shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/scripts/auto_train.py", f"{args.log_dir}/scripts/auto_train.py")
-        for root, dirs, files in os.walk(f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet"):
-            rel_root = osp.relpath(root, f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet")
-            target_root = (
-                osp.join(args.log_dir, "scripts", rel_root) if rel_root != "." else osp.join(args.log_dir, "scripts")
+        with optional_output("source snapshot"):
+            os.makedirs(osp.join(args.log_dir, "scripts"), exist_ok=True)
+            shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/scripts/auto_train.py", f"{args.log_dir}/scripts/auto_train.py")
+            for root, dirs, files in os.walk(f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet"):
+                rel_root = osp.relpath(root, f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet")
+                target_root = (
+                    osp.join(args.log_dir, "scripts", rel_root) if rel_root != "." else osp.join(args.log_dir, "scripts")
+                )
+                os.makedirs(target_root, exist_ok=True)
+                for filename in files:
+                    if filename.endswith(".py"):
+                        shutil.copyfile(osp.join(root, filename), osp.join(target_root, filename))
+            shutil.copytree(
+                f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/config",
+                f"{args.log_dir}/scripts/config",
+                dirs_exist_ok=True,
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
             )
-            os.makedirs(target_root, exist_ok=True)
-            for filename in files:
-                if filename.endswith(".py"):
-                    shutil.copyfile(osp.join(root, filename), osp.join(target_root, filename))
-        shutil.copytree(
-            f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/config",
-            f"{args.log_dir}/scripts/config",
-            dirs_exist_ok=True,
-            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
-        )
-        shutil.copyfile(
-            f"{MINI_GYM_ROOT_DIR}/go1_gym_learn/ppo_cse_automatic/arm_ac.py", f"{args.log_dir}/scripts/arm_ac.py"
-        )
-        shutil.copyfile(
-            f"{MINI_GYM_ROOT_DIR}/go1_gym_learn/ppo_cse_automatic/dog_ac.py", f"{args.log_dir}/scripts/dog_ac.py"
-        )
+            shutil.copyfile(
+                f"{MINI_GYM_ROOT_DIR}/go1_gym_learn/ppo_cse_automatic/arm_ac.py", f"{args.log_dir}/scripts/arm_ac.py"
+            )
+            shutil.copyfile(
+                f"{MINI_GYM_ROOT_DIR}/go1_gym_learn/ppo_cse_automatic/dog_ac.py", f"{args.log_dir}/scripts/dog_ac.py"
+            )
 
         temp_dict = {
             "Cfg": _cfg_snapshot_with_command_limits(cfg),
@@ -248,21 +255,26 @@ def main(args):
             "PPO_Args": vars(PPO_Args),
         }
 
-        with open(f"{args.log_dir}/params.txt", "w", encoding="utf-8") as f:
+        with optional_output("params.txt"), open(f"{args.log_dir}/params.txt", "w", encoding="utf-8") as f:
             format_temp_dict = format_code(str(temp_dict))
             f.write(format_temp_dict)
 
-        with open(osp.join(args.log_dir, "parameters.pkl"), "wb") as f:
-            pickle.dump(temp_dict, f)
-        wandb.save(osp.join(args.log_dir, "parameters.pkl"), policy="now")
+        def write_parameters(path):
+            with open(path, "wb") as f:
+                pickle.dump(temp_dict, f)
 
-        wandb.log(
-            {
-                "Global_Switch/start": global_switch.pretrained_to_wbc_start,
-                "Global_Switch/end": global_switch.pretrained_to_wbc_end,
-            },
-            step=0,
-        )
+        with optional_output("parameters.pkl"):
+            atomic_output(osp.join(args.log_dir, "parameters.pkl"), write_parameters)
+            wandb.save(osp.join(args.log_dir, "parameters.pkl"), policy="now")
+
+        with optional_output("wandb.log"):
+            wandb.log(
+                {
+                    "Global_Switch/start": global_switch.pretrained_to_wbc_start,
+                    "Global_Switch/end": global_switch.pretrained_to_wbc_end,
+                },
+                step=0,
+            )
 
     env = WBCEnv(
         sim_device=args.sim_device,

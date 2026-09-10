@@ -1,3 +1,4 @@
+from go1_gym.file_io import atomic_output, optional_output
 # License: see [LICENSE, LICENSES/rsl_rl/LICENSE]
 
 import copy
@@ -492,7 +493,8 @@ class Runner:
                         wandb_dict["Episode/Shared/return_mean_100ep"] = statistics.mean(rewbuffer)
                         wandb_dict["Episode/Shared/length_steps_mean_100ep"] = statistics.mean(lenbuffer)
 
-                    wandb.log(wandb_dict, step=it)
+                    with optional_output("wandb.log"):
+                        wandb.log(wandb_dict, step=it)
                 str = f" \033[1m Learning iteration {it}/{tot_iter} \033[0m "
 
                 log_string = (
@@ -544,7 +546,7 @@ class Runner:
                 )
                 print(log_string)
 
-                with open(osp.join(self.log_dir, "log.txt"), "a") as f:
+                with optional_output("log.txt"), open(osp.join(self.log_dir, "log.txt"), "a") as f:
                     f.write(log_string)
 
             if RunnerArgs.save_video_interval and RunnerArgs.log_video:
@@ -562,73 +564,71 @@ class Runner:
         self.save_dog(it)
 
     def save_dog(self, it):
-        torch.save(
-            self.alg_dog.actor_critic.state_dict(), osp.join(self.log_dir, f"checkpoints_dog/ac_weights_{it:06d}.pt")
-        )
-        shutil.copyfile(
-            osp.join(self.log_dir, f"checkpoints_dog/ac_weights_{it:06d}.pt"),
-            osp.join(self.log_dir, f"checkpoints_dog/ac_weights_last_dog.pt"),
-        )
+        with optional_output("ppo_cse_automatic/save_dog"):
+            atomic_output(osp.join(self.log_dir, f'checkpoints_dog/ac_weights_{it:06d}.pt'), lambda target: torch.save(self.alg_dog.actor_critic.state_dict(), target))
+            atomic_output(osp.join(self.log_dir, f'checkpoints_dog/ac_weights_last_dog.pt'), lambda target: shutil.copyfile(osp.join(self.log_dir, f'checkpoints_dog/ac_weights_{it:06d}.pt'), target))
 
-        path = osp.join(self.log_dir, f"deploy_model")
-        if self.alg_dog.actor_critic.adaptation_module is not None:
-            adaptation_module_dog_path = f"{path}/adaptation_module_latest_dog.jit"
-            adaptation_module_dog = copy.deepcopy(self.alg_dog.actor_critic.adaptation_module).to("cpu")
-            traced_script_adaptation_module_dog = torch.jit.script(adaptation_module_dog)
-            traced_script_adaptation_module_dog.save(adaptation_module_dog_path)
-        body_dog_path = f"{path}/body_latest_dog.jit"
-        body_model_dog = copy.deepcopy(self.alg_dog.actor_critic.actor_body).to("cpu")
-        traced_script_body_module_dog = torch.jit.script(body_model_dog)
-        traced_script_body_module_dog.save(body_dog_path)
+            path = osp.join(self.log_dir, f"deploy_model")
+            if self.alg_dog.actor_critic.adaptation_module is not None:
+                adaptation_module_dog_path = f"{path}/adaptation_module_latest_dog.jit"
+                adaptation_module_dog = copy.deepcopy(self.alg_dog.actor_critic.adaptation_module).to("cpu")
+                traced_script_adaptation_module_dog = torch.jit.script(adaptation_module_dog)
+                atomic_output(adaptation_module_dog_path, traced_script_adaptation_module_dog.save)
+            body_dog_path = f"{path}/body_latest_dog.jit"
+            body_model_dog = copy.deepcopy(self.alg_dog.actor_critic.actor_body).to("cpu")
+            traced_script_body_module_dog = torch.jit.script(body_model_dog)
+            atomic_output(body_dog_path, traced_script_body_module_dog.save)
 
     def save_arm(self, it):
-        if not self.arm_policy_enabled:
-            return
-        torch.save(
-            self.alg_arm.actor_critic.state_dict(), osp.join(self.log_dir, f"checkpoints_arm/ac_weights_{it:06d}.pt")
-        )
-        shutil.copyfile(
-            osp.join(self.log_dir, f"checkpoints_arm/ac_weights_{it:06d}.pt"),
-            osp.join(self.log_dir, f"checkpoints_arm/ac_weights_last_arm.pt"),
-        )
+        with optional_output("ppo_cse_automatic/save_arm"):
+            if not self.arm_policy_enabled:
+                return
+            atomic_output(osp.join(self.log_dir, f'checkpoints_arm/ac_weights_{it:06d}.pt'), lambda target: torch.save(self.alg_arm.actor_critic.state_dict(), target))
+            atomic_output(osp.join(self.log_dir, f'checkpoints_arm/ac_weights_last_arm.pt'), lambda target: shutil.copyfile(osp.join(self.log_dir, f'checkpoints_arm/ac_weights_{it:06d}.pt'), target))
 
-        path = osp.join(self.log_dir, f"deploy_model")
-        if self.alg_arm.actor_critic.adaptation_module is not None:
-            adaptation_module_path = f"{path}/adaptation_module_latest_arm.jit"
-            adaptation_module = copy.deepcopy(self.alg_arm.actor_critic.adaptation_module).to("cpu")
-            traced_script_adaptation_module = torch.jit.script(adaptation_module)
-            traced_script_adaptation_module.save(adaptation_module_path)
-        body_path = f"{path}/body_latest_arm.jit"
-        body_model = copy.deepcopy(self.alg_arm.actor_critic.actor_body).to("cpu")
-        traced_script_body_module = torch.jit.script(body_model)
-        traced_script_body_module.save(body_path)
-        history_arm_path = f"{path}/history_latest_arm.jit"
-        history_model_arm = copy.deepcopy(self.alg_arm.actor_critic.actor_history_encoder).to("cpu")
-        traced_script_history_module_arm = torch.jit.script(history_model_arm)
-        traced_script_history_module_arm.save(history_arm_path)
+            path = osp.join(self.log_dir, f"deploy_model")
+            if self.alg_arm.actor_critic.adaptation_module is not None:
+                adaptation_module_path = f"{path}/adaptation_module_latest_arm.jit"
+                adaptation_module = copy.deepcopy(self.alg_arm.actor_critic.adaptation_module).to("cpu")
+                traced_script_adaptation_module = torch.jit.script(adaptation_module)
+                atomic_output(adaptation_module_path, traced_script_adaptation_module.save)
+            body_path = f"{path}/body_latest_arm.jit"
+            body_model = copy.deepcopy(self.alg_arm.actor_critic.actor_body).to("cpu")
+            traced_script_body_module = torch.jit.script(body_model)
+            atomic_output(body_path, traced_script_body_module.save)
+            history_arm_path = f"{path}/history_latest_arm.jit"
+            history_model_arm = copy.deepcopy(self.alg_arm.actor_critic.actor_history_encoder).to("cpu")
+            traced_script_history_module_arm = torch.jit.script(history_model_arm)
+            atomic_output(history_arm_path, traced_script_history_module_arm.save)
 
     def save_cv(self, frames, it):
         # fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        fourcc = cv2.VideoWriter_fourcc(*"X264")
-        out = cv2.VideoWriter(
-            osp.join(self.log_dir, f"videos/{it:06d}.mp4"),
-            fourcc,
-            int(1 / self.env.dt),
-            (self.env.camera_props.width, self.env.camera_props.height),
-        )
+        with optional_output("ppo_cse_automatic/save_cv"):
+            fourcc = cv2.VideoWriter_fourcc(*"X264")
+            out = cv2.VideoWriter(
+                osp.join(self.log_dir, f"videos/{it:06d}.mp4"),
+                fourcc,
+                int(1 / self.env.dt),
+                (self.env.camera_props.width, self.env.camera_props.height),
+            )
 
-        for frame in frames:
-            out.write(frame[..., :3])
-        out.release()
+            try:
+                for frame in frames:
+                    out.write(frame[..., :3])
+            finally:
+                out.release()
 
     def save_io(self, frames, it):
-        frame_stride = max(1, int(getattr(self.env.cfg.env, "recording_frame_stride", 1)))
-        writer = imageio.get_writer(
-            osp.join(self.log_dir, f"videos/{it:06d}.mp4"), fps=max(1, int(1 / (self.env.dt * frame_stride)))
-        )
-        for frame in frames:
-            writer.append_data(frame[..., :3])
-        writer.close()
+        with optional_output("ppo_cse_automatic/save_io"):
+            frame_stride = max(1, int(getattr(self.env.cfg.env, "recording_frame_stride", 1)))
+            writer = imageio.get_writer(
+                osp.join(self.log_dir, f"videos/{it:06d}.mp4"), fps=max(1, int(1 / (self.env.dt * frame_stride)))
+            )
+            try:
+                for frame in frames:
+                    writer.append_data(frame[..., :3])
+            finally:
+                writer.close()
 
     def log_video(self, it):
         if it - self.last_recording_it >= RunnerArgs.save_video_interval:
