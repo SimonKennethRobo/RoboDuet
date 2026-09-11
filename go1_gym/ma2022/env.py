@@ -318,8 +318,9 @@ class MaLocomotionEnv(LeggedRobot):
         scan = scan * self.recipe.scan_scale
         contacts = self.contact_forces[:, self.feet_indices].flatten(1) * 0.01
         contacts = torch.where((self.episode_length_buf > 0)[:, None], contacts, torch.zeros_like(contacts))
-        privileged = torch.cat((self.friction_coeffs[:, :1], contacts,
-                                self.motor_strengths, self.Kp_factors, self.Kd_factors), dim=-1)
+        # Actuator factors are fixed at nominal in this recipe, so they carry
+        # no information and are not privileged inputs or decoder targets.
+        privileged = torch.cat((self.friction_coeffs[:, :1], contacts), dim=-1)
         clean_wrench = torch.cat((self.wrench.prediction(q), self.commands_dog[:, :3], linear, angular), dim=-1)
         student_proprio = proprio.clone()
         # Commands, own past actions and phase clocks are known internal

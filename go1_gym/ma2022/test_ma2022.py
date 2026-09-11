@@ -12,7 +12,7 @@ from go1_gym.ma2022.wrench import WrenchSequence, world_to_body
 
 def fixture():
     cfg = replace(MaTrainingConfig(), hidden_dim=16, embedding_dim=8)
-    dims = dict(proprio=76, wrench=39, scan=25, privileged=49)
+    dims = dict(proprio=76, wrench=39, scan=25, privileged=13)
     obs = {key: torch.randn(3, dim) for key, dim in dims.items()}
     obs["applied_wrench"], obs["gain"] = torch.randn(3, 6), torch.randn(3, 2)
     return cfg, dims, obs
@@ -26,6 +26,19 @@ def test_quadratic_interpolation_and_shift():
     sequence.advance()
     torch.testing.assert_close(sequence.knots[:, :2], shifted)
     assert ((sequence.knots[:, 2] >= sequence.low) & (sequence.knots[:, 2] <= sequence.high)).all()
+
+
+def test_terminal_random_walk_is_zero_mean_for_asymmetric_bounds():
+    # Fz in [-60, 0]: a one-sided increment pins every env at -60 N within
+    # ~10 s. A zero-mean walk keeps the terminal knot spread over the range.
+    torch.manual_seed(0)
+    sequence = WrenchSequence(2000, replace(MaTrainingConfig(), beta_range=(0.01, 0.01)))
+    start = sequence.knots[:, 2, 2].clone()
+    for _ in range(1000):
+        sequence.advance()
+    fz = sequence.knots[:, 2, 2]
+    assert (fz < sequence.low[2] + 1).float().mean() < 0.1
+    assert abs(fz.mean() - start.mean()) < 5.
 
 
 def test_wrench_prediction_body_frame_and_no_privileged_leak():
@@ -187,6 +200,6 @@ def test_old_mdp_checkpoint_is_rejected(tmp_path):
     from go1_gym.ma2022.training import load_checkpoint
     import pytest
     path = tmp_path / 'old.pt'
-    torch.save({'format': 'ma2022-locomotion-v1'}, path)
-    with pytest.raises(ValueError, match='v2'):
+    torch.save({'format': 'ma2022-locomotion-v2'}, path)
+    with pytest.raises(ValueError, match='v3'):
         load_checkpoint(path)

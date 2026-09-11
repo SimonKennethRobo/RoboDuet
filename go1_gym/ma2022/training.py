@@ -11,7 +11,7 @@ from torch.distributions import Normal
 from .models import Teacher, Student, DeployedStudent, distillation_losses
 
 
-FORMAT = "ma2022-locomotion-v2"
+FORMAT = "ma2022-locomotion-v3"
 
 
 def physical_metrics(env):
@@ -51,7 +51,7 @@ def save_checkpoint(path, model, optimizer, iteration, stage, env, cfg):
 def load_checkpoint(path, device="cpu"):
     checkpoint = torch.load(path, map_location=device)
     if checkpoint.get("format") != FORMAT:
-        raise ValueError("Expected a Ma2022 v2 checkpoint; v1 and RoboDuet checkpoints use a different MDP")
+        raise ValueError("Expected a Ma2022 v3 checkpoint; v1/v2 and RoboDuet checkpoints use a different MDP")
     return checkpoint
 
 

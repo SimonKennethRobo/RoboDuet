@@ -8,6 +8,24 @@ parameters still contain adaptations; see the remaining limitations below.
 Run it through `scripts/train_ma2022.py`. It trains the checked-in **bare Go2**
 asset: there is no arm in the training simulator.
 
+## V3 corrections
+
+V3 fixes three issues from an independent review against the paper:
+
+- **Eq. (7) drift.** The terminal-knot random walk is now zero-mean (see
+  "Reproduction boundaries"). Under v2, Fz drifted to and stayed at -60 N.
+- **Constant privileged inputs.** Actuator factors are nominal in this recipe,
+  so the 36 motor-strength/Kp/Kd entries were constant. They are removed from
+  the privileged observation and the `privileged` decoder target (49 → 13).
+- **Phase authority.** `phase_increment_scale` drops from 1.0 to 0.1 rad per
+  action. At 1.0, a clipped action moved the phase ±0.48 cycles per 20-ms step,
+  12× the nominal 0.04-cycle advance, so the phase no longer acted as a gait
+  clock. At 0.1 the bound is ±0.048 cycles.
+
+Observation widths and the dynamics changed, so v2 checkpoints are rejected.
+The v2 cloud teacher (below) was trained with the Eq. (7) drift and should not
+be used as the baseline.
+
 ## V2 alignment changes
 
 V2 uses an independent reward kernel in `go1_gym/ma2022/rewards.py`, based on
@@ -167,7 +185,7 @@ Teacher inputs:
 | `proprio` | 76 | Projected gravity (3), body linear velocity (3), body angular velocity (3), velocity commands (3), joint position offsets (12), joint velocities × .05 (12), previous policy action (16), action before that (16), sine/cosine of four leg phases (8) |
 | `wrench` | 39 | Five normalized six-axis predictions (30), velocity commands (3), body linear/angular velocity (6) |
 | `scan` | 25 | 5×5 base-height-relative ground samples, centered on target base height, clipped to ±1 m and multiplied by `scan_scale` |
-| `privileged` | 49 | Friction (1), four foot contact forces × .01 (12), motor-strength/Kp/Kd factors (12 each) |
+| `privileged` | 13 | Friction (1), four foot contact forces × .01 (12) |
 
 The student substitutes noisy measured gravity/twist/joints, wrench prediction
 and height scan. Its command, previous-action and phase entries stay exact.
@@ -203,7 +221,7 @@ The policy returns 16 actions:
   `residual_scale`, and add to the cyclic IK target in `env._joint_targets`.
   Use the configured PD controller, not direct torque interpretation.
 
-These are format-versioned `ma2022-locomotion-v2` checkpoints. They are not
+These are format-versioned `ma2022-locomotion-v3` checkpoints. They are not
 compatible with `auto_train.py`, `load_policy.py`, `export_rl_sar`, or existing
 12-action RoboDuet dog checkpoints. Deployment needs a matching phase/IK
 adapter, sensors/height scan, and externally supplied wrench predictions. The
@@ -222,13 +240,16 @@ implementation choices. Reward definitions now follow reference [10] S7,
 with the interpretation and Ma-specific choices described above. Orientation, vertical velocity
 and roll/pitch-rate penalties are increased as described in III-D1.
 
-For Eq. (7), signed configured bounds are converted to lower/upper *magnitudes*
-for the terminal-knot random-walk interval, then the terminal knot is clipped
-to the signed bounds. Only the terminal knot is clipped; the intervening
-quadratic can overshoot. This sign convention is explicit because the printed
-equation does not disambiguate signed bounds from magnitudes. For a
-downward-only force range the terminal increment is also downward-only;
-adjust signed ranges if bidirectional terminal variation is desired.
+For Eq. (7), the terminal-knot increment is zero-mean in every dimension:
+`beta * Uniform(-(wmax-wmin)/2, +(wmax-wmin)/2)`, then the terminal knot is
+clipped to the signed bounds. Only the terminal knot is clipped; the
+intervening quadratic can overshoot. The printed equation does not
+disambiguate signed bounds from magnitudes. v2 read them as one-sided
+magnitudes, which for Fz in [-60, 0] made every increment nonpositive: the
+applied Fz averaged -57 N by 10 s and 95% of environments were pinned at
+-60 N by 19 s, so the z prediction was nearly constant for most of each
+episode. v3 uses the zero-mean walk so the wrench keeps varying across the
+configured range.
 
 The existing response-consistency rewards, grouping/excitation curricula,
 arm disturbance curriculum, reset mixtures and random velocity pushes are

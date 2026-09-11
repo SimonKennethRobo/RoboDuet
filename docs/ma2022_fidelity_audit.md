@@ -105,3 +105,25 @@ geometry/lift, policy observation history/scan and network settings remain
 explicit adaptations or unresolved fidelity details. Wrench Eq. (7) retains
 the documented signed-bound interpretation. This update does not establish
 strict full-paper equivalence. See `ma2022_locomotion.md` for the v2 contract.
+
+## V3 corrections (independent review, 2026-09-11)
+
+A review against the PDF and [10] S5/S7 confirmed the S7 coefficients,
+the curriculum exponent d = 0.98 (it is the reference value, not a local
+choice), the 52-point foot scan, Eq. (6)/(8) and decoder-stream isolation.
+It found three problems, now fixed:
+
+1. **Eq. (7) interpretation had a large side effect.** Gap 4 above noted that
+   all Fz increments were nonpositive but not the consequence: in a
+   2000-environment simulation of the sampler, the applied Fz averaged -57 N
+   at 10 s and 95.5% of environments were at the -60 N bound at 19 s. The
+   observed-wrench mechanism was therefore inactive on the dominant axis for
+   most of each episode. The increment is now zero-mean.
+2. **36 of 49 privileged entries were constant** after v2 fixed the actuators
+   at nominal. They are removed.
+3. **Phase increments dominated the clock** (±0.48 cycles/step vs 0.04 nominal).
+   The scale is now 0.1 rad per action.
+
+Still open, not changed here: near-flat training terrain (roughness ≤ 4 cm,
+no terrain curriculum) leaves the scan/belief stream little to encode, and
+`force_gain_radius = 1.0` corresponds to at most ~1 kg of unmodelled inertia.

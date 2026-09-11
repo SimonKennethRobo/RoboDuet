@@ -35,7 +35,10 @@ class MaTrainingConfig:
     stability_multiplier: float = 2.0  # Ma III-D1: higher weight; factor not published
     knee_limit: float = -0.1  # Go2 calf convention; prevents knee reversal
     gait_frequency: float = 2.0
-    phase_increment_scale: float = 1.0  # radians per policy action
+    # Radians per policy action. With actions clipped to +-3 this bounds the
+    # per-step phase change to ~0.05 cycles, comparable to the nominal
+    # 0.04-cycle advance, so the phase remains a gait clock.
+    phase_increment_scale: float = 0.1
     swing_height: float = 0.06
     residual_scale: float = 0.25
     hidden_dim: int = 128

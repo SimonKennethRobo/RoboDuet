@@ -50,10 +50,12 @@ class WrenchSequence:
 
     def advance(self, dt=0.02):
         shifted = self.evaluate([dt, 1 + dt])
-        # Eq. (7) uses lower/upper magnitudes. For signed bounds, use abs
-        # so its random-walk interval is ordered even for downward-only Fz.
-        delta = -self.low.abs() + torch.rand_like(self.knots[:, 2]) * (
-            self.low.abs() + self.high.abs())
+        # Eq. (7) random walk, zero-mean in every dimension: the increment
+        # spans beta * half the configured range on either side. Reading the
+        # bounds as one-sided magnitudes makes asymmetric ranges (Fz in
+        # [-60, 0]) drift monotonically and pin at the bound within seconds.
+        half_range = (self.high - self.low) / 2
+        delta = (2 * torch.rand_like(self.knots[:, 2]) - 1) * half_range
         terminal = (self.knots[:, 2] + self.beta * delta).clamp(self.low, self.high)
         self.knots = torch.cat((shifted, terminal[:, None]), dim=1)
 
