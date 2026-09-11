@@ -10,6 +10,7 @@ from typing import Callable, Dict, List, NamedTuple, Optional, Tuple
 
 import isaacgym  # noqa: F401 - must precede torch
 import torch
+from go1_gym.envs.roboduet.legged_robot import quaternion_to_rpy
 from go1_gym.envs.roboduet.wbc_env_wrapper import HistoryWrapper
 from go1_gym.envs.roboduet.wbc_env import WBCEnv
 from go1_gym.envs.config import (
@@ -281,6 +282,9 @@ class BenchmarkHistoryWrapper(HistoryWrapper):
         self._runtime_dog_obs_dim = int(env.cfg.dog.dog_num_observations)
         self._dog_obs_mode = self._detect_dog_obs_mode()
         self.benchmark_observation_mode = self._dog_obs_mode
+        # The supported pre-response 90D policies learned negative-RPY commands.
+        # Public benchmark commands and reported targets use physical +RPY.
+        self.benchmark_pose_command_sign = -1.0 if self._dog_obs_mode == "legacy_no_response" else 1.0
         self.dog_obs_history = torch.zeros(
             env.num_envs,
             dims["dog_num_obs_history"],
@@ -300,6 +304,13 @@ class BenchmarkHistoryWrapper(HistoryWrapper):
         wbc_trajectory = bool(
             self._checkpoint_cfg.get("wbc", {}).get("trajectory", {}).get("enabled", False)
         )
+        legacy_no_response = (
+            not wbc_trajectory
+            and "response" not in self._checkpoint_cfg
+            and saved + 22 == self._runtime_dog_obs_dim
+        )
+        if legacy_no_response:
+            return "legacy_no_response"
         if wbc_trajectory and saved == self._runtime_dog_obs_dim + 9:
             return "native_plus_ee_pose"
         if legacy_arm_trajectory:
@@ -310,9 +321,22 @@ class BenchmarkHistoryWrapper(HistoryWrapper):
             "No known legacy observation adapter matches this parameters.pkl."
         )
 
+    def _legacy_body_roll_pitch(self) -> Tuple[torch.Tensor, torch.Tensor]:
+        b = self.env
+        roll = getattr(b, "roll", None)
+        pitch = getattr(b, "pitch", None)
+        if torch.is_tensor(roll) and torch.is_tensor(pitch):
+            return roll, pitch
+        if torch.is_tensor(getattr(b, "base_quat", None)):
+            rpy = quaternion_to_rpy(b.base_quat)
+            return rpy[:, 0], rpy[:, 1]
+        zeros = torch.zeros(b.num_envs, device=b.device, dtype=torch.float32)
+        return zeros, zeros
+
     def _legacy_pre_v3_observation(self) -> torch.Tensor:
         b = self.env
         cfg = b.cfg
+        roll, pitch = self._legacy_body_roll_pitch()
         obs = torch.cat(
             (
                 b.projected_gravity,
@@ -347,7 +371,7 @@ class BenchmarkHistoryWrapper(HistoryWrapper):
                 else torch.zeros_like(arm_commands)
             )
         obs = torch.cat(
-            (obs, dog_commands, arm_task, b.roll.unsqueeze(1), b.pitch.unsqueeze(1)),
+            (obs, dog_commands, arm_task, roll.unsqueeze(1), pitch.unsqueeze(1)),
             dim=-1,
         )
         if cfg.env.observe_two_prev_actions:
@@ -386,6 +410,16 @@ class BenchmarkHistoryWrapper(HistoryWrapper):
         arm_vel = b.dof_vel[:, arm_slice] * b.obs_scales.dof_vel
         return torch.cat((obs, arm_pos, arm_vel), dim=-1)
 
+    def _legacy_no_response_observation(self) -> torch.Tensor:
+        """Old checkpoints without response blocks keep only the leading legacy segment."""
+        obs, _ = self.env.get_dog_observations()
+        target = int(self.benchmark_dog_dims["dog_num_observations"])
+        if obs.shape[1] < target:
+            raise AssertionError(
+                f"legacy_no_response mode expects {target} obs, but runtime returns {obs.shape[1]}"
+            )
+        return obs[:, :target]
+
     def get_dog_observations(self):
         if self._dog_obs_mode == "native":
             obs, privileged_obs = self.env.get_dog_observations()
@@ -395,6 +429,14 @@ class BenchmarkHistoryWrapper(HistoryWrapper):
             obs = torch.cat(
                 (obs[:, :-arm_state_width], self.env.get_ee_pose_body_9d(), obs[:, -arm_state_width:]),
                 dim=-1,
+            )
+        elif self._dog_obs_mode == "legacy_no_response":
+            obs = self._legacy_no_response_observation()
+            privileged_obs = torch.zeros(
+                self.env.num_envs,
+                self.benchmark_dog_dims["dog_num_privileged_obs"],
+                dtype=torch.float,
+                device=self.env.device,
             )
         else:
             obs = self._legacy_pre_v3_observation()
@@ -591,6 +633,18 @@ class AccumulatorView:
 # ---------------------------------------------------------------------------
 
 CRITICAL_COMPAT_CFG_PATHS = [
+    "response.omega_n.vx",
+    "response.omega_n.vy",
+    "response.omega_n.wyaw",
+    "response.omega_n.height",
+    "response.omega_n.pitch",
+    "response.rate_limit.vx",
+    "response.rate_limit.vy",
+    "response.rate_limit.wyaw",
+    "response.rate_limit.height",
+    "response.rate_limit.pitch",
+    "dog.observe_pose_actual",
+    "dog.observe_track_error",
     "dog.dog_num_commands",
     "dog.dog_num_observations",
     "dog.dog_num_observation_history",
@@ -760,6 +814,9 @@ def _apply_benchmark_env_overrides(cfg, total_envs: int, envs_per_policy: int):
         if hasattr(cfg.domain_rand, attr):
             setattr(cfg.domain_rand, attr, False)
     cfg.env.num_envs = total_envs
+    # A training snapshot may enable video even for a headless benchmark.
+    # num_recording_envs alone does not prevent camera creation in WBCEnv.
+    cfg.env.record_video = False
     cfg.env.num_recording_envs = 0
     cfg.env.asset_bucket_cycle_length = envs_per_policy
     side = max(5, int(math.ceil(math.sqrt(total_envs))) + 1)
@@ -771,6 +828,11 @@ def _apply_benchmark_env_overrides(cfg, total_envs: int, envs_per_policy: int):
     cfg.asset.render_sphere = False
     cfg.env.episode_length_s = 20.0
     cfg.commands.resampling_time = 1e9
+    # Reset still resamples commands, regardless of resampling_time. Do not
+    # expand a training curriculum from benchmark outcomes: besides changing
+    # the sampling distribution, legacy grids can require enormous temporary
+    # neighborhood arrays when many successful environments reset together.
+    cfg.commands.command_curriculum = False
     # Each benchmark cell owns its command. Training's group resampling and
     # PRBS/chirp writers would overwrite it inside the physics callback.
     cfg.response.grouping.enabled = False
@@ -797,7 +859,12 @@ def load_env_benchmark(
     cfg = _load_cfg_from_pkl(logdir, robot=robot)
     _apply_benchmark_env_overrides(cfg, total_envs, envs_per_policy)
     configure_privileged_obs_dims(cfg)
-    env = WBCEnv(sim_device=device, headless=headless, cfg=cfg)
+    env = WBCEnv(
+        sim_device=device,
+        headless=headless,
+        cfg=cfg,
+        graphics_device_id=-1 if headless else None,
+    )
     env = BenchmarkHistoryWrapper(env, checkpoint_cfg)
     return env, cfg
 
@@ -866,8 +933,9 @@ def set_vel_cmd(env: HistoryWrapper, x: float, y: float, yaw: float):
 
 
 def set_pose_cmd(env: HistoryWrapper, pitch: float, roll: float, height_delta: float):
-    _set_cmd(env, 3, pitch)
-    _set_cmd(env, 4, roll)
+    sign = getattr(env, "benchmark_pose_command_sign", 1.0)
+    _set_cmd(env, 3, sign * pitch)
+    _set_cmd(env, 4, sign * roll)
     _set_cmd(env, 5, height_delta)
 
 
@@ -902,12 +970,12 @@ def _actual_height(env: HistoryWrapper) -> torch.Tensor:
 
 
 def _orientation_control_sq(env: HistoryWrapper, cmd: torch.Tensor) -> torch.Tensor:
-    """Mirror Rewards._reward_orientation_control before reward scaling."""
+    """Projected-gravity error for physical +RPY targets on both axes."""
     b = env.env
     axis_x = torch.tensor([1, 0, 0], device=b.device, dtype=torch.float)
     axis_y = torch.tensor([0, 1, 0], device=b.device, dtype=torch.float)
-    quat_roll = quat_from_angle_axis(-cmd[:, 4], axis_x)
-    quat_pitch = quat_from_angle_axis(-cmd[:, 3], axis_y)
+    quat_roll = quat_from_angle_axis(cmd[:, 4], axis_x)
+    quat_pitch = quat_from_angle_axis(cmd[:, 3], axis_y)
     desired_quat = quat_mul(quat_roll, quat_pitch)
     desired_gravity = quat_rotate_inverse(desired_quat, b.gravity_vec)
     return torch.sum(torch.square(b.projected_gravity[:, :2] - desired_gravity[:, :2]), dim=1)
@@ -1139,6 +1207,9 @@ def _eval_loop_parallel(
         vel = base.base_lin_vel  # [total_envs, 3]
         ang = base.base_ang_vel  # [total_envs, 3]
         cmd = base.commands_dog  # [total_envs, D]
+        if getattr(env, "benchmark_pose_command_sign", 1.0) < 0:
+            cmd = cmd.clone()
+            cmd[:, 3:5] *= -1.0
         # R2 prescribed reference: [total_envs, 5] in response-channel order
         # (vx, vy, wyaw, height, pitch). None on checkpoints predating it.
         ref_model = getattr(base, "response_ref", None)

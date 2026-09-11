@@ -56,6 +56,7 @@ import argparse
 import json
 import os
 import pickle
+import random
 import sys
 from pathlib import Path
 
@@ -134,7 +135,7 @@ def infer_iteration(policy_path, snapshot):
     return None, None
 
 
-def build_env(num_envs, sim_device, robot, snapshot=None, iteration=0):
+def build_env(num_envs, sim_device, robot, snapshot=None, iteration=0, evaluation_options=None):
     args = argparse.Namespace(
         robot=robot, num_envs=num_envs, dyna_gait=True, goal_reaching=False,
         traj_tracking=False, arm_action_mode=None, no_reach_table=False,
@@ -150,6 +151,17 @@ def build_env(num_envs, sim_device, robot, snapshot=None, iteration=0):
                 f"--robot {robot} expects asset {expected!r}, but the checkpoint "
                 f"was trained on {cfg.asset.file!r}. Pass the matching --robot."
             )
+    if evaluation_options is not None:
+        if evaluation_options.identification_fraction is not None:
+            cfg.response.excitation.env_fraction = evaluation_options.identification_fraction
+        if evaluation_options.balanced_excitation:
+            cfg.response.excitation.enabled = True
+            cfg.response.excitation.channel_weights = {name: 1.0 for name in DECISION_CHANNEL_NAMES}
+            cfg.response.excitation.signal_weights = {"prbs": 0.2, "chirp": 0.6, "ramp": 0.2}
+        if evaluation_options.neutral_roll:
+            cfg.commands.body_roll_range = [0.0, 0.0]
+            cfg.commands.limit_body_roll = [0.0, 0.0]
+            cfg.commands.num_bins_body_roll = 1
     # These three describe *this* export, not the training run, so they are
     # restored after the snapshot rather than taken from it.
     cfg.env.num_envs = num_envs
@@ -171,19 +183,153 @@ def build_env(num_envs, sim_device, robot, snapshot=None, iteration=0):
     return HistoryWrapper(WBCEnv(sim_device=sim_device, headless=True, cfg=cfg)), cfg
 
 
-def load_policy(path, cfg, device):
+def _checkpoint_cfg_block(snapshot_cfg, key):
+    if snapshot_cfg is None:
+        return None
+    if isinstance(snapshot_cfg, dict):
+        return snapshot_cfg.get(key, None)
+    return getattr(snapshot_cfg, key, None)
+
+
+def _cfg_value(cfg_obj, key, default=None):
+    if cfg_obj is None:
+        return default
+    if hasattr(cfg_obj, "get"):
+        return cfg_obj.get(key, default)
+    return getattr(cfg_obj, key, default)
+
+
+def _compatible_history(
+    obs_history: torch.Tensor, src_obs_dim: int, dst_obs_dim: int, dst_history: int
+) -> torch.Tensor:
+    if src_obs_dim <= 0 or dst_obs_dim <= 0 or dst_history <= 0:
+        raise ValueError("Observation and history dimensions must be positive")
+    if obs_history.shape[1] % src_obs_dim or dst_history % dst_obs_dim:
+        raise ValueError("History must contain complete observation frames")
+    if src_obs_dim != dst_obs_dim and (src_obs_dim, dst_obs_dim) != (112, 90):
+        raise ValueError("Only the documented 112D to legacy 90D layout is supported")
+    if obs_history.shape[1] // src_obs_dim < dst_history // dst_obs_dim:
+        raise ValueError("Runtime history is shorter than the trained policy history")
+    if src_obs_dim == dst_obs_dim:
+        if obs_history.shape[1] == dst_history:
+            return obs_history
+        if obs_history.shape[1] > dst_history:
+            return obs_history[:, -dst_history:]
+        pad = torch.zeros(
+            obs_history.shape[0], dst_history - obs_history.shape[1], device=obs_history.device, dtype=obs_history.dtype
+        )
+        return torch.cat((pad, obs_history), dim=-1)
+    if dst_obs_dim > src_obs_dim:
+        raise ValueError(
+            f"Checkpoint dog obs ({dst_obs_dim}) wider than runtime ({src_obs_dim}); "
+            "runtime observations cannot be up-projected without re-training."
+        )
+    history_steps, remainder = divmod(obs_history.shape[1], src_obs_dim)
+    if remainder != 0:
+        usable = obs_history.shape[1] - remainder
+        if usable <= 0:
+            raise ValueError(
+                f"obs_history width {obs_history.shape[1]} is not aligned to runtime obs dim {src_obs_dim}"
+            )
+        obs_history = obs_history[:, -usable:]
+        history_steps = usable // src_obs_dim
+    converted = obs_history.view(-1, history_steps, src_obs_dim)[..., :dst_obs_dim].reshape(
+        -1, history_steps * dst_obs_dim
+    )
+    if converted.shape[1] == dst_history:
+        return converted
+    if converted.shape[1] > dst_history:
+        return converted[:, -dst_history:]
+    pad = torch.zeros(
+        obs_history.shape[0], dst_history - converted.shape[1], device=obs_history.device, dtype=obs_history.dtype
+    )
+    return torch.cat((pad, converted), dim=-1)
+
+
+def load_policy(path, cfg, device, checkpoint_cfg=None):
     from go1_gym_learn.ppo_cse_automatic.dog_ac import DogActorCritic
 
+    ckpt = DogActorCritic.compatible_state_dict(torch.load(path, map_location=device))
+
+    # Prefer the checkpoint's own dog layout when available.
+    ckpt_cfg = _checkpoint_cfg_block(checkpoint_cfg, "dog") if checkpoint_cfg is not None else None
+    if ckpt_cfg is None:
+        ckpt_cfg = _checkpoint_cfg_block(getattr(cfg, "__dict__", None), "dog")
+
+    runtime_obs_dim = int(cfg.dog.dog_num_observations)
+    if ckpt_cfg is not None:
+        ckpt_obs = int(_cfg_value(ckpt_cfg, "dog_num_observations", runtime_obs_dim))
+        ckpt_priv = int(
+            _cfg_value(ckpt_cfg, "dog_num_privileged_obs", int(cfg.dog.dog_num_privileged_obs))
+        )
+        default_history = ckpt_obs * int(cfg.dog.dog_num_observation_history)
+        ckpt_history = int(_cfg_value(ckpt_cfg, "dog_num_obs_history", default_history))
+    else:
+        ckpt_obs = runtime_obs_dim
+        ckpt_priv = int(cfg.dog.dog_num_privileged_obs)
+        ckpt_history = int(cfg.dog.dog_num_obs_history)
+
+    use_adaptation = bool(any(key.startswith("adaptation_module.") for key in ckpt.keys()))
     model = DogActorCritic(
-        num_obs=cfg.dog.dog_num_observations,
-        num_privileged_obs=cfg.dog.dog_num_privileged_obs,
-        num_obs_history=cfg.dog.dog_num_obs_history,
-        num_actions=cfg.dog.dog_actions,
-        use_adaptation_module=cfg.dog.use_adaptation_module,
+        num_obs=ckpt_obs,
+        num_privileged_obs=ckpt_priv,
+        num_obs_history=ckpt_history,
+        num_actions=int(cfg.dog.dog_actions),
+        use_adaptation_module=use_adaptation,
     ).to(device)
-    model.load_state_dict(torch.load(path, map_location=device))
+
+    # Load only inference path tensors.  A checkpoint with a different
+    # observation layout gets a dedicated wrapper, not a partially loaded model.
+    expected = model.state_dict()
+    loadable = {}
+    required_prefixes = ["actor_body."]
+    if use_adaptation:
+        required_prefixes.append("adaptation_module.")
+    for key, value in ckpt.items():
+        if key not in expected or key.startswith("critic_body."):
+            continue
+        if expected[key].shape != value.shape:
+            raise RuntimeError(
+                f"checkpoint tensor shape mismatch for {key}: "
+                f"checkpoint={tuple(value.shape)} runtime={tuple(expected[key].shape)}"
+            )
+        loadable[key] = value
+    required = [key for key in expected if any(key.startswith(prefix) for prefix in required_prefixes)]
+    missing = sorted(key for key in required if key not in loadable)
+    if missing:
+        raise RuntimeError(
+            "Checkpoint is missing required inference tensors: "
+            + ", ".join(missing[:5])
+        )
+    model.load_state_dict(loadable, strict=False)
     model.eval()
-    return model
+
+    history_src_dim = runtime_obs_dim
+
+    class CompatPolicy:
+        def __init__(self, model, source_obs_dim, target_obs_dim, target_history):
+            self._model = model
+            self._source_obs_dim = source_obs_dim
+            self._target_obs_dim = target_obs_dim
+            self._target_history = target_history
+
+        def act_inference(self, obs, info=None):
+            history = obs["obs_history"].to(device)
+            history = _compatible_history(
+                history,
+                self._source_obs_dim,
+                self._target_obs_dim,
+                self._target_history,
+            )
+            return self._model.act_inference({"obs_history": history}, {} if info is None else info)
+
+    policy = CompatPolicy(model, history_src_dim, ckpt_obs, ckpt_history)
+
+    print(
+        f"  policy dims: obs={ckpt_obs} hist={ckpt_history} acts={cfg.dog.dog_actions} "
+        f"adapt={'on' if use_adaptation else 'off'}"
+    )
+    return policy
 
 
 def metadata(cfg, base, args, steps, provenance):
@@ -337,7 +483,20 @@ def main():
     parser.add_argument("--sim_device", type=str, default="cuda:0")
     parser.add_argument("--robot", type=str, default="go2_x5")
     parser.add_argument("--out", default="data/identification.npz")
+    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--identification_fraction", type=float, default=None)
+    parser.add_argument("--balanced_excitation", action="store_true",
+                        help="Equal channel weights and 60 percent chirp plans for evaluation")
+    parser.add_argument("--neutral_roll", action="store_true",
+                        help="Hold roll command at the common supported zero")
     args = parser.parse_args()
+    if args.identification_fraction is not None and not 0 < args.identification_fraction < 1:
+        parser.error("--identification_fraction must be strictly between zero and one")
+    if args.seed is not None:
+        random.seed(args.seed)
+        np.random.seed(args.seed)
+        torch.manual_seed(args.seed)
+        torch.cuda.manual_seed_all(args.seed)
 
     if not os.path.exists(args.policy):
         raise SystemExit(f"checkpoint not found: {args.policy}")
@@ -366,18 +525,24 @@ def main():
         "curriculum_iteration": int(iteration),
         "curriculum_iteration_source": iteration_source,
     }
-    env, cfg = build_env(args.num_envs, args.sim_device, args.robot, snapshot, iteration)
+    env, cfg = build_env(args.num_envs, args.sim_device, args.robot, snapshot, iteration,
+                         evaluation_options=args)
     base = env.env
     print(f"  domain randomisation intensity "
           f"{float(getattr(base, 'domain_randomization_intensity', 1.0)):.2f}")
-    policy = load_policy(args.policy, cfg, base.device)
+    policy = load_policy(
+        args.policy,
+        cfg,
+        base.device,
+        checkpoint_cfg=snapshot["Cfg"] if snapshot is not None else None,
+    )
     steps = int(args.seconds / base.dt)
     arm_actions = torch.zeros(base.num_envs, base.num_actions_arm, device=base.device)
     sampler = base.response_excitation
     arm_slice = slice(base.num_actions_loco, base.num_actions_loco + base.num_actions_arm)
 
     series = {name: [] for name in (
-        "command", "reference_state", "reference_rate", "measured",
+        "command", "command_full", "reference_state", "reference_rate", "measured",
         "measured_detrended", "gait_phase", "gait_frequency_hz", "is_standing",
         "base_position", "base_quaternion", "base_linear_velocity",
         "base_angular_velocity", "arm_dof_pos", "arm_dof_vel", "ee_pos_in_base",
@@ -441,6 +606,7 @@ def main():
     def record():
         reference = base.response_ref
         series["command"].append(reference.gather_commands(base.commands_dog).cpu())
+        series["command_full"].append(base.commands_dog.cpu())
         series["reference_state"].append(reference.xi.cpu())
         series["reference_rate"].append(reference.xi_dot.cpu())
         series["measured"].append(base.response_measured.cpu())
@@ -489,13 +655,23 @@ def main():
 
     base.response_export_dof_columns = dof_columns
 
+    if args.seed is not None:
+        # Network construction consumes random numbers depending on actor size.
+        # Restart the rollout stream after loading; this is reproducible, but
+        # differing checkpoint DR recipes still prevent matched-domain claims.
+        random.seed(args.seed)
+        np.random.seed(args.seed)
+        torch.manual_seed(args.seed)
+        torch.cuda.manual_seed_all(args.seed)
     env.reset()
     with torch.no_grad():
-        for _ in range(steps):
+        for step in range(steps):
             observations = env.get_dog_observations()
             actions = policy.act_inference({"obs_history": observations["obs_history"]})
             env.step(actions, arm_actions)
             record()
+            if (step + 1) % 500 == 0 or step + 1 == steps:
+                print(f"  collected {step + 1}/{steps} steps x {base.num_envs} envs", flush=True)
 
     payload = {name: torch.stack(values).numpy() for name, values in series.items()}
     payload["is_identification"] = sampler.is_identification.cpu().numpy()
@@ -534,7 +710,18 @@ def main():
     np.savez_compressed(args.out, **payload)
     sidecar = os.path.splitext(args.out)[0] + ".json"
     with open(sidecar, "w", encoding="utf-8") as handle:
-        json.dump(metadata(cfg, base, args, steps, provenance), handle, indent=2)
+        sidecar_data = metadata(cfg, base, args, steps, provenance)
+        sidecar_data["evaluation_overrides"] = {
+            "seed": args.seed,
+            "identification_fraction": args.identification_fraction,
+            "balanced_excitation": args.balanced_excitation,
+            "neutral_roll": args.neutral_roll,
+            "domain_recipe": "checkpoint-specific, not matched across policies",
+        }
+        sidecar_data["fields"]["command_full"] = "(T, E, D) complete policy command vector, including roll"
+        sidecar_data["frames"]["height"] = "terrain-relative base height minus rewards.base_height_target"
+        sidecar_data["nominal_height_m"] = float(cfg.rewards.base_height_target)
+        json.dump(sidecar_data, handle, indent=2)
         handle.write("\n")
 
     size_mb = os.path.getsize(args.out) / 1e6

@@ -1,0 +1,6 @@
+{
+  "description": "P0 physical +RPY command benchmark; roll fixed to common supported zero; checkpoint-specific reference observations.",
+  "scenario_config": {
+    "body_pose": {"roll": [0.0]}
+  }
+}

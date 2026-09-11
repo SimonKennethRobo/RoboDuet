@@ -1195,6 +1195,8 @@ def main(argv: Optional[List[str]] = None):
                     "total_envs": group_total_envs,
                     "points_per_rollout": points_per_batch,
                     "observation_adapter": env.benchmark_observation_mode,
+                    "pose_command_sign": env.benchmark_pose_command_sign,
+                    "pose_metric_convention": "physical positive RPY; legacy policy command signs adapted",
                     "layout": describe_shared_env_group(args.logdirs[base_index]),
                 }
             )
