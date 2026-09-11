@@ -33,7 +33,7 @@ def reward_terms(*, command, linear, angular, gravity, dof_pos, dof_vel,
                  previous_dof_vel, target, last_target, previous_target,
                  torque, feet_velocity, feet_contact, leg_collision,
                  foot_heights, phase, knee_indices, knee_limit, dt,
-                 curriculum, stability_multiplier):
+                 curriculum, stability_multiplier, joint_acceleration_coef, terminated):
     lv, av, lateral = command_rewards(command[:, :2], linear[:, :2], command[:, 2], angular[:, 2])
     return dict(
         tracking_lin_vel=lv,
@@ -45,10 +45,12 @@ def reward_terms(*, command, linear, angular, gravity, dof_pos, dof_vel,
         orientation=-stability_multiplier*curriculum*gravity[:, :2].square().sum(-1),
         foot_clearance=-((foot_heights.amax(-1) < -.2) & (phase < .5)).float().sum(-1),
         collision=-curriculum*leg_collision.any(-1).float(),
-        joint_motion=-curriculum*(.01*dof_vel.square() + ((dof_vel-previous_dof_vel)/dt).square()).sum(-1),
+        joint_motion=-curriculum*(.01*dof_vel.square() + joint_acceleration_coef*(
+            (dof_vel-previous_dof_vel)/dt).square()).sum(-1),
         knee_limit=-torch.clamp(dof_pos[:, knee_indices]-knee_limit, min=0.).square().sum(-1),
         target_smoothness=-curriculum*((target-last_target).square() +
                                       (target-2*last_target+previous_target).square()).sum(-1),
         torques=-curriculum*torque.square().sum(-1),
         foot_slip=-curriculum*(feet_velocity.square().sum(-1)*feet_contact).sum(-1),
+        termination=-terminated.float(),
     )

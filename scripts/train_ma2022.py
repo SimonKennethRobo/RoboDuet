@@ -131,6 +131,7 @@ def main():
         print(f"Ma2022 {args.stage}: dims={dims}, actions=16, log_dir={log_dir}", flush=True)
         for iteration in range(start + 1, args.iterations + 1):
             global_switch.count = iteration
+            env.set_reward_curriculum(iteration - 1)
             if recorder is not None:
                 recorder.start(iteration, first=iteration == start + 1)
             if args.stage == "teacher":

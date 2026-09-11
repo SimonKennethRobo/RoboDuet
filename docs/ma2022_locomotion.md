@@ -8,6 +8,33 @@ parameters still contain adaptations; see the remaining limitations below.
 Run it through `scripts/train_ma2022.py`. It trains the checked-in **bare Go2**
 asset: there is no arm in the training simulator.
 
+## V3.2 reward-scale corrections
+
+The first v3 teacher (`teacher_ma2022_v3_1`) learned to fall: by iteration
+1000 about 10% of robots fell per control step (0.07% at iteration 1).
+Evaluating its 10500-iteration checkpoint gave `joint_motion` = -1022/step
+against +1.6/step of tracking reward; with zero actions the nominal gait
+alone scored -70/step and almost never fell. With no fall penalty and no
+bootstrap after a fall, an all-negative return makes falling optimal.
+The S7 formula was transcribed correctly; its q-ddot magnitude depends on
+details [10] does not state. V3.2 changes:
+
+- `joint_acceleration_coef = 0.01` scales the q-ddot² part of `joint_motion`.
+- A `termination` term (weight 10) penalises non-timeout terminations.
+- The penalty curriculum advances once per iteration (see below), not per
+  episode, so falls no longer accelerate it.
+- The per-step reward (all terms except `termination`) is clipped at zero
+  (`only_positive_rewards`), and the fall penalty is added after clipping.
+  The three changes above alone were not enough: a 400-iteration check still
+  reached 13-15% falls per step. The nominal gait scored +0.22/step and almost
+  never fell, but the noisy early policy earned about -5/step (a value near
+  -500), so falling for -10 remained the best option.
+- The action std is capped at 1.0 (`max_action_std`). Actions are clipped to
+  ±3, so a larger std has no effect in the env but still earns the entropy
+  bonus; v3_1 hit the old e² = 7.39 bound on 10 of 16 action dimensions.
+
+Observation/action layout is unchanged (format `ma2022-locomotion-v3`).
+
 ## V3 corrections
 
 V3 fixes three issues from an independent review against the paper:
@@ -41,9 +68,10 @@ explicitly documented in the kernel and tested for mirrored commands.
 Ma III-D1 increases orientation, vertical velocity and roll/pitch-rate costs.
 The multiplier 2 and squared-horizontal-gravity orientation term are explicit
 local choices because the Ma-specific formula/coefficients are not provided.
-The reference curriculum `c <- c**0.98` advances independently at each completed
-episode, using a locally chosen initial value 0.1. It scales only the documented
-penalty terms, not wrench magnitudes or reset difficulty.
+The penalty curriculum is `c = 0.1 ** (0.997 ** iteration)`, set once per
+training iteration (reaches 0.9 near 1000 iterations). [10] updates
+`c <- c**0.98` per episode; that couples the ramp to episode length. It scales
+only the documented penalty terms, not wrench magnitudes or reset difficulty.
 
 All inherited dynamics randomization flags are cleared before enabling the
 explicit friction recipe. Kp, Kd, strength and zero offsets are nominal, even

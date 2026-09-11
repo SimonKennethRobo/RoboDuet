@@ -1,5 +1,6 @@
 """PPO teacher and on-policy truncated-BPTT student distillation."""
 
+import math
 import os
 from copy import deepcopy
 from dataclasses import asdict
@@ -61,7 +62,7 @@ def teacher_iteration(env, model, optimizer, cfg, obs):
     for _ in range(cfg.rollout_steps):
         with torch.no_grad():
             mean, value, _, _ = model(obs)
-            distribution = Normal(mean, model.log_std.clamp(-5, 2).exp())
+            distribution = Normal(mean, model.log_std.clamp(-5, math.log(cfg.max_action_std)).exp())
             action = distribution.sample()
             log_prob = distribution.log_prob(action).sum(-1)
             next_obs, reward, done, _ = env.step(action)
@@ -84,7 +85,7 @@ def teacher_iteration(env, model, optimizer, cfg, obs):
     for _ in range(cfg.ppo_epochs):
         for ids in torch.randperm(count, device=actions.device).tensor_split(min(cfg.minibatches, count)):
             mean, value, _, _ = model({k: v[ids] for k, v in observations.items()})
-            distribution = Normal(mean, model.log_std.clamp(-5, 2).exp())
+            distribution = Normal(mean, model.log_std.clamp(-5, math.log(cfg.max_action_std)).exp())
             log_prob = distribution.log_prob(actions[ids]).sum(-1)
             ratio = torch.exp(log_prob - old_log_prob[ids])
             policy_loss = -torch.minimum(ratio * advantages[ids],

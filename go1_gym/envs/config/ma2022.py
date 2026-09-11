@@ -30,8 +30,25 @@ class MaTrainingConfig:
     scan_scale: float = 5.0
     # Phase increments and cubic foot lift follow reference [10] S5.
     # Go2 lift height, joint residual scale and IK geometry are adaptations.
+    # c = initial ** (exponent ** iteration), set once per training iteration.
+    # [10] updates c <- c**0.98 per episode; a per-episode update couples the
+    # penalty ramp to episode length (falls shorten episodes, which raises c,
+    # which rewards falling). 0.997/iteration reaches c = 0.9 near 1000 iters.
     reward_curriculum_initial: float = 0.1
-    reward_curriculum_exponent: float = 0.98
+    reward_curriculum_exponent: float = 0.997
+    # Weight on the q-ddot**2 part of joint_motion, relative to [10] S7 (1.0).
+    # Here q-ddot is a 20-ms finite difference: at 1.0 the nominal gait alone
+    # costs ~-70/step against <= +2.25 of tracking reward, and the policy
+    # learns to fall. 0.01 puts the nominal gait near -0.7/step.
+    joint_acceleration_coef: float = 0.01
+    # Clip the per-step reward (all terms except termination) at zero, as in
+    # this repository's only_positive_rewards. Otherwise a noisy early policy
+    # earns ~-5/step (value ~-500), and falling (-10 once) is the best option.
+    only_positive_rewards: bool = True
+    # Upper bound on the Gaussian action std. Actions are clipped to +-3, so a
+    # larger std changes nothing in the env while the entropy bonus rewards it
+    # (v3_1 saturated at the old e**2 = 7.39 bound).
+    max_action_std: float = 1.0
     stability_multiplier: float = 2.0  # Ma III-D1: higher weight; factor not published
     knee_limit: float = -0.1  # Go2 calf convention; prevents knee reversal
     gait_frequency: float = 2.0
@@ -161,7 +178,10 @@ def build_ma_config(num_envs=4096, robot="go2", terrain="trimesh"):
                   orthogonal_velocity=0.75, body_motion=1., orientation=1.,
                   foot_clearance=0.003, collision=0.1, joint_motion=0.001,
                   knee_limit=0.08, target_smoothness=0.003,
-                  torques=1e-6, foot_slip=0.003)
+                  torques=1e-6, foot_slip=0.003,
+                  # Not in [10] S7: falls end the episode, and without a
+                  # penalty an all-negative return makes falling optimal.
+                  termination=10.)
     cfg.reward_scales = ConfigNode()
     cfg.wbc.reward_scales = ConfigNode()
     for name, value in scales.items():

@@ -185,12 +185,18 @@ def test_reward_terms_penalize_slip_and_second_target_difference():
                 leg_collision=torch.zeros(2, 8, dtype=torch.bool),
                 foot_heights=torch.zeros(2, 4, 52), phase=torch.zeros(2, 4),
                 knee_indices=[2, 5, 8, 11], knee_limit=-.1, dt=.02,
-                curriculum=torch.ones(2), stability_multiplier=2.)
+                curriculum=torch.ones(2), stability_multiplier=2.,
+                joint_acceleration_coef=.01, terminated=torch.tensor([True, False]))
     args['previous_target'][0] = 1.
     terms = reward_terms(**args)
     torch.testing.assert_close(terms['foot_slip'], torch.tensor([-12., 0.]))
     torch.testing.assert_close(terms['target_smoothness'], torch.tensor([-12., 0.]))
     torch.testing.assert_close(terms['knee_limit'], torch.zeros(2))
+    torch.testing.assert_close(terms['termination'], torch.tensor([-1., 0.]))
+    args['previous_dof_vel'] = torch.ones(2, 12)
+    # q-ddot = -1/.02 = -50 per joint; 12 joints * 2500 * .01 = 300.
+    torch.testing.assert_close(reward_terms(**args)['joint_motion'], torch.full((2,), -300.))
+    args['previous_dof_vel'] = z12
     args['foot_heights'].fill_(-.3)
     args['phase'][1] = .75
     torch.testing.assert_close(reward_terms(**args)['foot_clearance'], torch.tensor([-4., 0.]))

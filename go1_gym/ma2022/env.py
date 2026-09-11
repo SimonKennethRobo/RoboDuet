@@ -87,6 +87,11 @@ class MaLocomotionEnv(LeggedRobot):
                               ("Kp_factors", 1.), ("Kd_factors", 1.)):
             getattr(self, name)[env_ids] = nominal
 
+    def set_reward_curriculum(self, iteration):
+        """Closed form of c <- c**d applied once per completed iteration."""
+        self.reward_curriculum.fill_(self.recipe.reward_curriculum_initial ** (
+            self.recipe.reward_curriculum_exponent ** iteration))
+
     def _prepare_reward_function(self):
         # Keep parent reset/log bookkeeping buffers, but never register its
         # reward container or consult global_switch for the learning objective.
@@ -125,16 +130,23 @@ class MaLocomotionEnv(LeggedRobot):
             leg_collision=self.contact_forces[:, self.leg_collision_indices].norm(dim=-1)>1.,
             foot_heights=self._foot_heights(), phase=self.phase, knee_indices=self.leg_joint_indices[:, 2],
             knee_limit=self.recipe.knee_limit, dt=self.dt, curriculum=self.reward_curriculum,
-            stability_multiplier=self.recipe.stability_multiplier)
+            stability_multiplier=self.recipe.stability_multiplier,
+            joint_acceleration_coef=self.recipe.joint_acceleration_coef,
+            terminated=self.reset_buf & ~self.terminal_timeout)
         if set(terms) != set(self.reward_names):
             raise ValueError("Ma reward recipe does not match the task reward kernel")
         self.rew_buf_dog.zero_()
         self.rew_buf_arm.zero_()
         for name, term in terms.items():
             weighted = self.pretrained_reward_scales[name]*term
-            self.rew_buf_dog += weighted
+            if name != "termination":
+                self.rew_buf_dog += weighted
             self.episode_sums[name] += weighted
             self.command_sums[name] += weighted
+        if self.recipe.only_positive_rewards:
+            self.rew_buf_dog.clamp_(min=0.)
+        # The fall penalty is added after clipping so it is never absorbed.
+        self.rew_buf_dog += self.pretrained_reward_scales["termination"]*terms["termination"]
         self.episode_sums["total"] += self.rew_buf_dog
 
     def _prepare_asset(self, cfg):
@@ -212,10 +224,6 @@ class MaLocomotionEnv(LeggedRobot):
     def _arm_post_reset_refresh_hook(self, ids):
         if not hasattr(self, "wrench"):
             return
-        if hasattr(self, "reward_curriculum"):
-            completed = ids[self.episode_length_buf[ids] > 0]
-            self.reward_curriculum[completed] = self.reward_curriculum[completed].pow(
-                self.recipe.reward_curriculum_exponent)
         self.wrench.reset(ids)
         self.previous_twist[ids] = self.root_states[ids, 7:13]
         self.applied_wrench[ids] = 0
