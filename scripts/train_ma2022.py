@@ -48,6 +48,8 @@ def main():
     parser.add_argument("--offline", action="store_true", help="Save W&B data locally for later sync")
     parser.add_argument("--no_wandb", action="store_true", help="Disable W&B (takes precedence over --offline)")
     parser.add_argument("--rollout_steps", type=int, help="Override Python recipe for bounded validation")
+    parser.add_argument("--no_wrench_prediction", action="store_true",
+                        help="Ma Fig. 5 ablation: zero the wrench-prediction observation (new teacher only)")
     args = parser.parse_args()
     if args.video_interval < 1 or args.video_stride < 1 or not 0 < args.video_length < float("inf"):
         parser.error("Video interval, stride and finite duration must be positive")
@@ -77,6 +79,10 @@ def main():
         cfg.terrain.mesh_type = args.terrain
     if args.rollout_steps:
         recipe.rollout_steps = args.rollout_steps
+    if args.no_wrench_prediction:
+        if source:
+            parser.error("--no_wrench_prediction only applies to a new teacher; the checkpoint recipe decides")
+        recipe.observe_wrench_prediction = False
     cfg.env.record_video = not args.no_video
     cfg.env.recording_width_px = 640
     cfg.env.recording_height_px = 480

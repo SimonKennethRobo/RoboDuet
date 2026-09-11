@@ -49,6 +49,10 @@ class MaTrainingConfig:
     # larger std changes nothing in the env while the entropy bonus rewards it
     # (v3_1 saturated at the old e**2 = 7.39 bound).
     max_action_std: float = 1.0
+    # Ma Fig. 5 ablation switch. False zeroes the 30 wrench-prediction entries
+    # of the teacher and student wrench observations; the wrench is still
+    # applied and the commands/base twist entries are unchanged.
+    observe_wrench_prediction: bool = True
     stability_multiplier: float = 2.0  # Ma III-D1: higher weight; factor not published
     knee_limit: float = -0.1  # Go2 calf convention; prevents knee reversal
     gait_frequency: float = 2.0
@@ -170,7 +174,9 @@ def build_ma_config(num_envs=4096, robot="go2", terrain="trimesh"):
     cfg.rewards.use_terminal_body_height = True
     cfg.rewards.terminal_body_height = 0.16
     cfg.rewards.use_terminal_roll_pitch = True
-    cfg.rewards.terminal_body_ori = 1.0
+    # v3.2 teachers settled into a crouch leaning ~0.56 rad in roll, which a
+    # 1.0-rad limit never terminates. 0.5 rad ends that posture as a fall.
+    cfg.rewards.terminal_body_ori = 0.5
     cfg.rewards.terminal_roll_pitch_grace_s = 0.
     # Signed terms are computed by the task-owned reward kernel. Positive
     # coefficients from [10] S7; orientation is the extra Ma III-D1 term.

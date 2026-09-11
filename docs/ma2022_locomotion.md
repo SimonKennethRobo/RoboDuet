@@ -8,6 +8,20 @@ parameters still contain adaptations; see the remaining limitations below.
 Run it through `scripts/train_ma2022.py`. It trains the checked-in **bare Go2**
 asset: there is no arm in the training simulator.
 
+## V3.3 posture limit and wrench-prediction ablation
+
+A 400-iteration v3.2 check no longer fell, but it settled into a crouch:
+roll -0.55 rad, base 0.21 m against a 0.30 m target, all hips splayed
+0.55-0.99 rad to one side. The 1.0-rad roll/pitch termination never ends
+that posture. V3.3 sets `cfg.rewards.terminal_body_ori = 0.5`; with the
+fall penalty, such a lean is now a fall.
+
+`--no_wrench_prediction` (recipe `observe_wrench_prediction=False`) zeroes
+the 30 prediction entries of both teacher and student wrench observations,
+for the Ma Fig. 5 comparison. The wrench process is still applied, and the
+observation widths are unchanged. It applies to new teachers only; students
+and resumed runs follow the checkpoint recipe.
+
 ## V3.2 reward-scale corrections
 
 The first v3 teacher (`teacher_ma2022_v3_1`) learned to fall: by iteration

@@ -329,14 +329,19 @@ class MaLocomotionEnv(LeggedRobot):
         # Actuator factors are fixed at nominal in this recipe, so they carry
         # no information and are not privileged inputs or decoder targets.
         privileged = torch.cat((self.friction_coeffs[:, :1], contacts), dim=-1)
-        clean_wrench = torch.cat((self.wrench.prediction(q), self.commands_dog[:, :3], linear, angular), dim=-1)
+        predicted = self.wrench.prediction(q)
+        noisy_predicted = self.wrench.prediction(q, noisy=True)
+        if not self.recipe.observe_wrench_prediction:
+            predicted = torch.zeros_like(predicted)
+            noisy_predicted = torch.zeros_like(noisy_predicted)
+        clean_wrench = torch.cat((predicted, self.commands_dog[:, :3], linear, angular), dim=-1)
         student_proprio = proprio.clone()
         # Commands, own past actions and phase clocks are known internal
         # states. Noise belongs only on the measured gravity/twist/joints.
         student_proprio[:, :9] += torch.randn_like(proprio[:, :9]) * self.recipe.proprio_noise_std
         student_proprio[:, 12:36] += torch.randn_like(proprio[:, 12:36]) * self.recipe.proprio_noise_std
         # No privileged labels are passed through either student RNN input.
-        student_wrench = torch.cat((self.wrench.prediction(q, noisy=True),
+        student_wrench = torch.cat((noisy_predicted,
                                     student_proprio[:, 9:12], student_proprio[:, 3:9]), dim=-1)
         applied = torch.cat((world_to_body(q, self.applied_wrench[:, :3]),
                              world_to_body(q, self.applied_wrench[:, 3:])), dim=-1) * self.wrench.scale
