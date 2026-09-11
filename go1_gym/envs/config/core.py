@@ -114,6 +114,16 @@ def apply_config_snapshot(cfg, snapshot, *, strict=True, drop_unknown=False):
     # Full pre-mixture checkpoint snapshots must not inherit a newly enabled
     # reset mode from today's wbc.py. Partial config updates keep their meaning.
     if "env" in snapshot and "terrain" in snapshot and hasattr(cfg, "terrain"):
+        # Reusing a config that had a coordination recipe enabled must not
+        # change an older checkpoint's sampler or attitude convention.
+        if hasattr(cfg.commands, "coordination"):
+            cfg.commands.coordination.enabled = snapshot.get("commands", {}).get("coordination", {}).get("enabled", False)
+        if hasattr(cfg.env, "coordination_arm"):
+            cfg.env.coordination_arm.enabled = snapshot["env"].get("coordination_arm", {}).get("enabled", False)
+        if hasattr(cfg.rewards, "attitude_command_convention"):
+            cfg.rewards.attitude_command_convention = snapshot.get("rewards", {}).get("attitude_command_convention", "legacy")
+        if hasattr(cfg, "coordination_experiment"):
+            cfg.coordination_experiment = {}
         cfg.terrain.height_reference = snapshot["terrain"].get("height_reference", "world")
         if "reset_mode" not in snapshot["terrain"]:
             cfg.terrain.reset_mode = "legacy"
@@ -1008,6 +1018,8 @@ def build_roboduet_config(args=None, *, options=None, debug=False):
     if options is None:
         options = RoboDuetRuntimeOptions.from_args(args) if args is not None else RoboDuetRuntimeOptions(4096, "go2")
     cfg = build_config(GO1_PROFILE, WTW_PROFILE, ROBODUET_PROFILE)
+    from .coordination import configure_experiment, validate_coordination
+    configure_experiment(cfg, args)
     if options.domain_rand_mode is not None:
         cfg.domain_rand.mode = options.domain_rand_mode
     _derive_wbc_rewards(cfg, WBC_REWARD_FACTORS)
@@ -1040,6 +1052,7 @@ def build_roboduet_config(args=None, *, options=None, debug=False):
     configure_privileged_obs_dims(cfg)
     configure_robot_asset(cfg, options.robot)
     validate_roboduet_cfg(cfg)
+    validate_coordination(cfg)
 
     if debug:
         cfg.domain_rand.randomize_mount_position = False

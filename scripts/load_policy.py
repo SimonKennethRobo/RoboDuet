@@ -293,6 +293,9 @@ def load_env(logdir, wrapper, headless=False, device='cuda:0', robot=None):
     snapshot = pkl_cfg["Cfg"]
     checkpoint_asset_file = snapshot.get("asset", {}).get("file")
     apply_config_snapshot(cfg, snapshot, drop_unknown=True)
+    # Interactive commands belong to the operator. Keep the saved reward and
+    # observation semantics, but do not run the training command scheduler.
+    cfg.commands.coordination.enabled = False
 
     _ensure_asset_file(cfg, robot=robot, checkpoint_asset_file=checkpoint_asset_file)
     restore_dog_observation_layout(cfg, snapshot)

@@ -379,6 +379,8 @@ class LeggedRobot(BaseTask):
         self._update_foot_contact_times()
 
         self._arm_post_physics_hook()
+        if getattr(self, "coordination_arm", None) is not None:
+            self.coordination_arm.after_physics(self)
 
         self._post_physics_step_callback()
 
@@ -387,6 +389,8 @@ class LeggedRobot(BaseTask):
         self._update_performance_metrics()
         self._update_dog_vel_ref()
         self.compute_reward()
+        if getattr(self, "coordination_commands", None) is not None:
+            self.coordination_commands.after_reward(self, global_switch.count)
         env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
         self.reset_idx(env_ids)
 
@@ -1405,6 +1409,9 @@ class LeggedRobot(BaseTask):
     def _resample_commands(self, env_ids):
         if len(env_ids) == 0:
             return
+        if getattr(self, "coordination_commands", None) is not None:
+            self.coordination_commands.reset(self, env_ids, global_switch.count)
+            return
         arm_controls_commands = bool(self._arm_resample_commands_train_hook(env_ids))
 
         timesteps = int(self.cfg.commands.resampling_time / self.dt)
@@ -1500,6 +1507,15 @@ class LeggedRobot(BaseTask):
             self.command_sums[key][env_ids] = 0.0
 
     def _init_command_distribution(self, env_ids):
+        self.coordination_commands = None
+        if getattr(getattr(self.cfg.commands, "coordination", None), "enabled", False):
+            from .coordination_sampling import CoordinationCommands
+            self.coordination_commands = CoordinationCommands(self.cfg, self.num_envs, self.device, self.dt)
+            self.category_names = ["trot"]
+            self.curricula = [self.coordination_commands.curriculum]
+            self.env_command_bins = self.coordination_commands.bins
+            self.env_command_categories = np.zeros(self.num_envs, dtype=np.int64)
+            return
         # new style curriculum
         self.category_names = ["trot"]
 
@@ -1643,9 +1659,10 @@ class LeggedRobot(BaseTask):
         self._arm_post_callback_hook()
 
         # resample commands
-        sample_interval = int(self.cfg.commands.resampling_time / self.dt)
-        env_ids = (self.episode_length_buf % sample_interval == 0).nonzero(as_tuple=False).flatten()
-        self._resample_commands(env_ids)
+        if self.coordination_commands is None:
+            sample_interval = int(self.cfg.commands.resampling_time / self.dt)
+            env_ids = (self.episode_length_buf % sample_interval == 0).nonzero(as_tuple=False).flatten()
+            self._resample_commands(env_ids)
         self._step_contact_targets()
 
         # measure terrain heights

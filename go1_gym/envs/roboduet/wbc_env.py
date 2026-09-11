@@ -610,6 +610,9 @@ class WBCEnv(LeggedRobot):
             return
         intensity = self._get_stage1_arm_curriculum_intensity()
         self.stage1_arm_curriculum_intensity = intensity
+        if getattr(self, "coordination_arm", None) is not None:
+            self.coordination_arm.step(self, intensity)
+            return
         arm_slice = slice(self.num_actions_loco, self.num_actions_loco + self.num_actions_arm)
         arm_default = self.default_dof_pos[:, arm_slice]
 
@@ -779,6 +782,10 @@ class WBCEnv(LeggedRobot):
         self.stage1_arm_target_vel = torch.zeros_like(self.stage1_arm_target_offset)
         self.stage1_arm_target_accel = torch.zeros_like(self.stage1_arm_target_offset)
         self.stage1_arm_curriculum_intensity = 0.0
+        self.coordination_arm = None
+        if getattr(getattr(self.cfg.env, "coordination_arm", None), "enabled", False):
+            from .coordination_arm import CoordinationArm
+            self.coordination_arm = CoordinationArm(self.cfg, self.num_envs, self.device, self.dt)
 
         self.end_effector_state = self.rigid_body_state.view(self.num_envs, self.num_bodies, 13)[:, self.ee_idx]
 
@@ -1313,6 +1320,8 @@ class WBCEnv(LeggedRobot):
         self.stage1_arm_target_offset[env_ids] = self.stage1_arm_fixed_dof_pos[env_ids] - arm_default
         self.stage1_arm_target_vel[env_ids] = 0.0
         self.stage1_arm_target_accel[env_ids] = 0.0
+        if getattr(self, "coordination_arm", None) is not None:
+            self.coordination_arm.reset(self, env_ids)
         if self._goal_reaching_enabled():
             if self._traj_tracking_enabled():
                 self._reset_trajectories(env_ids)

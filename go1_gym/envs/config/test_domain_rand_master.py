@@ -105,7 +105,8 @@ def test_mode_snapshot_roundtrip(mode):
 
 
 def test_default_and_invalid_modes():
-    assert build().domain_rand.mode == "benchmark"
+    from go1_gym.envs.config.wbc import ROBODUET_PROFILE
+    assert build().domain_rand.mode == ROBODUET_PROFILE.overrides["domain_rand.mode"]
     with pytest.raises(ValueError, match="domain_rand.mode"):
         build(domain_rand_mode="typo")
 

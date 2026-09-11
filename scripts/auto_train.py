@@ -13,6 +13,7 @@ from go1_gym.file_io import atomic_output, optional_output
 from go1_gym.envs.config.domain_randomization import DOMAIN_RAND_MODES, domain_randomization_mode
 from go1_gym import MINI_GYM_ROOT_DIR
 from go1_gym.envs.config import ARM_ACTION_MODES, build_roboduet_config, cfg_to_dict, restore_dog_observation_layout
+from go1_gym.envs.config.coordination import read_experiment
 from go1_gym.envs.roboduet.utils import StageSchedule, apply_wbc_reward_settings
 from go1_gym.envs.roboduet.wbc_env import WBCEnv
 from go1_gym.envs.roboduet.wbc_env_wrapper import HistoryWrapper
@@ -138,11 +139,31 @@ def main(args):
                                        if k.startswith("reset_mix")}), flush=True)
         print(f"[push] max angular velocity per world axis: {cfg.domain_rand.max_push_ang_vel} rad/s", flush=True)
     cfg.env.arm_policy_enabled = args.train_stage != "stage1"
-    cfg.env.record_video = args.video
+    cfg.env.record_video = bool(args.video and not args.no_video)
     if not cfg.env.record_video:
         RunnerArgs.log_video = False
+        RunnerArgs.save_video_interval = 0
+        if args.headless:
+            args.graphics_device_id = -1
+            cfg.asset.render_sphere = False
     RunnerArgs.num_steps_per_env = args.num_steps_per_env
     PPO_Args.num_mini_batches = args.num_mini_batches
+    RunnerArgs.save_interval = args.save_interval
+    PPO_Args.learning_rate = args.learning_rate
+    PPO_Args.schedule = args.lr_schedule
+    PPO_Args.desired_kl = args.desired_kl
+    PPO_Args.entropy_coef = args.entropy_coef
+    if args.experiment:
+        cfg.coordination_experiment["training"] = {
+            key: getattr(args, "lr_schedule" if key == "schedule" else key)
+            for key in cfg.coordination_experiment["training"]
+        }
+        print(f"[coordination] {args.experiment}: {cfg.coordination_experiment['description']}", flush=True)
+        print(f"[coordination] {cfg.coordination_experiment['source']}; "
+              f"obs={cfg.dog.dog_num_observations} x {cfg.dog.dog_num_observation_history}, "
+              f"pitch={cfg.commands.limit_body_pitch}, roll={cfg.commands.limit_body_roll}, "
+              f"moving gait={cfg.commands.limit_gait_frequency}, "
+              f"arm mixture={cfg.env.coordination_arm.fractions}", flush=True)
 
     stage2_freeze_loco_policy = not args.stage2_unfreeze_loco_policy
     DogRunnerArgs.ckpt_path = args.stage1_ckpt_path
@@ -225,6 +246,9 @@ def main(args):
         with optional_output("source snapshot"):
             os.makedirs(osp.join(args.log_dir, "scripts"), exist_ok=True)
             shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/scripts/auto_train.py", f"{args.log_dir}/scripts/auto_train.py")
+            shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/rewards/rewards.py", f"{args.log_dir}/scripts/rewards.py")
+            if args.experiment:
+                shutil.copyfile(cfg.coordination_experiment["source"], f"{args.log_dir}/coordination_recipe.json")
             for root, dirs, files in os.walk(f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet"):
                 rel_root = osp.relpath(root, f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet")
                 target_root = (
@@ -292,12 +316,12 @@ def main(args):
     )
 
 
-if __name__ == "__main__":
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Go1")
     parser.add_argument("--headless", action="store_true", default=False)
     parser.add_argument("--sim_device", type=str, default="cuda:0")
     parser.add_argument("--graphics_device_id", type=int, default=None)
-    parser.add_argument("--num_learning_iterations", type=int, default=100000)
+    parser.add_argument("--num_learning_iterations", type=int, default=None)
     parser.add_argument("--eval_freq", type=int, default=100)
     parser.add_argument("--run_name", type=str, default="test")
     parser.add_argument("--debug", action="store_true")
@@ -306,15 +330,25 @@ if __name__ == "__main__":
     parser.add_argument("--resume", action="store_true")  # for two_stage
     parser.add_argument("--tags", nargs="+", default=[])
     parser.add_argument("--notes", type=str, default=None)
-    parser.add_argument("--seed", type=int, default=-1)
+    parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--robot", type=str, default="go2_x5", choices=["go1", "go2", "go2_x5"])
     parser.add_argument("--video", action="store_true", default=False)
+    parser.add_argument("--no_video", action="store_true", default=False,
+                        help="Disable video even if a launcher supplies --video; headless runs also disable graphics")
 
-    parser.add_argument("--num_envs", type=int, default=4096)
+    parser.add_argument("--num_envs", type=int, default=None)
+    parser.add_argument("--experiment", choices=list("ABCDEF"), default=None,
+                        help="Opt-in Stage-1 coordination recipe from configs/coordination_6gpu.json")
+    parser.add_argument("--experiment_config", default=None, help="Alternate coordination JSON tuning file")
+    parser.add_argument("--save_interval", type=int, default=None)
+    parser.add_argument("--learning_rate", type=float, default=None)
+    parser.add_argument("--lr_schedule", choices=["adaptive", "fixed"], default=None)
+    parser.add_argument("--desired_kl", type=float, default=None)
+    parser.add_argument("--entropy_coef", type=float, default=None)
     parser.add_argument("--domain_rand_mode", choices=DOMAIN_RAND_MODES, default=None,
                         help="Training DR recipe: benchmark (profile default), sim2real, or none.")
-    parser.add_argument("--num_steps_per_env", type=int, default=RunnerArgs.num_steps_per_env)
-    parser.add_argument("--num_mini_batches", type=int, default=PPO_Args.num_mini_batches)
+    parser.add_argument("--num_steps_per_env", type=int, default=None)
+    parser.add_argument("--num_mini_batches", type=int, default=None)
 
     parser.add_argument("--train_stage", type=str, default="two_stage", choices=["stage1", "stage2", "two_stage"])
     stage2_loco_group = parser.add_mutually_exclusive_group()
@@ -374,6 +408,28 @@ if __name__ == "__main__":
         help="Score raibert_heuristic as exp(-err/raibert_sigma), a bounded reward in [0,1] with a positive scale, instead of the legacy unbounded squared-error cost. Removes its multiplicative effect: under rewards.only_positive_rewards_ji22_style the cost form gates the whole reward by exp(scale*err), which is what collapsed stage1_sim2real_abl_4/7/9/11.",
     )
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    defaults = dict(seed=-1, num_envs=4096, num_learning_iterations=100000,
+                    num_steps_per_env=RunnerArgs.num_steps_per_env, num_mini_batches=PPO_Args.num_mini_batches,
+                    save_interval=RunnerArgs.save_interval, learning_rate=PPO_Args.learning_rate,
+                    schedule=PPO_Args.schedule, desired_kl=PPO_Args.desired_kl, entropy_coef=PPO_Args.entropy_coef)
+    if args.experiment:
+        defaults.update(read_experiment(args.experiment, args.experiment_config)["training"])
+        if args.run_name == "test":
+            args.run_name = f"stage1_coord6_{args.experiment}"
+    elif args.experiment_config:
+        parser.error("--experiment_config requires --experiment")
+    for key, value in defaults.items():
+        dest = "lr_schedule" if key == "schedule" else key
+        if getattr(args, dest, None) is None:
+            setattr(args, dest, value)
+    for key in ("num_envs", "num_learning_iterations", "num_steps_per_env", "num_mini_batches", "save_interval"):
+        if getattr(args, key) <= 0:
+            parser.error(f"--{key} must be positive")
+    if args.learning_rate <= 0 or args.desired_kl <= 0 or args.entropy_coef < 0:
+        parser.error("learning_rate and desired_kl must be positive; entropy_coef must be nonnegative")
+    return args
 
-    main(args)
+
+if __name__ == "__main__":
+    main(parse_args())

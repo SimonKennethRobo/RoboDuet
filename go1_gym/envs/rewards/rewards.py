@@ -325,6 +325,16 @@ class Rewards:
         return torch.exp(-impact_sq / self.env.cfg.rewards.feet_impact_vel_sigma)
 
     def _reward_orientation_control(self):
+        if getattr(self.env.cfg.rewards, "attitude_command_convention", "legacy") == "rpy":
+            # R = Rz(yaw) Ry(pitch) Rx(roll). Yaw cancels in R.T @ gravity.
+            pitch, roll = self.env.commands_dog[:, 3], self.env.commands_dog[:, 4]
+            gravity = self.env.gravity_vec
+            desired = torch.stack((
+                torch.cos(pitch) * gravity[:, 0] - torch.sin(pitch) * gravity[:, 2],
+                torch.sin(roll) * torch.sin(pitch) * gravity[:, 0] + torch.cos(roll) * gravity[:, 1]
+                + torch.sin(roll) * torch.cos(pitch) * gravity[:, 2],
+            ), dim=1)
+            return torch.sum(torch.square(self.env.projected_gravity[:, :2] - desired), dim=1)
         # Penalize non flat base orientation
         # import ipdb; ipdb.set_trace()
         roll_pitch_commands = self.env.commands_dog[:, 3:5]
