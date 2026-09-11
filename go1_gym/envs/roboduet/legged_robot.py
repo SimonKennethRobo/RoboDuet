@@ -2253,7 +2253,7 @@ class LeggedRobot(BaseTask):
         # range down for every environment, identification or not.
         scores = ~self.is_identification_env[env_ids]
         scored = scores.cpu().numpy()
-        if len(success_thresholds) > 0 and bool(scored.any()):
+        if self.cfg.commands.command_curriculum and len(success_thresholds) > 0 and bool(scored.any()):
             local_range = command_curriculum_local_range(self.cfg)
             curriculum.update(
                 old_bins[scored],

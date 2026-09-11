@@ -33,6 +33,32 @@ class DogAC_Args(PrefixProto, cli=False):
 class DogActorCritic(nn.Module):
     is_recurrent = False
 
+    @staticmethod
+    def compatible_state_dict(state_dict):
+        """Rename the pre-TemporalEncoder flat MLP without changing tensors."""
+        if "actor_body.0.weight" not in state_dict:
+            return state_dict
+        if DogAC_Args.temporal_encoder != "flat":
+            raise ValueError("A legacy flat actor cannot be loaded into a TCN")
+        converted = {}
+        for key, value in state_dict.items():
+            if key.startswith("actor_body."):
+                _, index, suffix = key.split(".", 2)
+                index = int(index)
+                if index % 2 or index > 2 * len(DogAC_Args.actor_hidden_dims):
+                    raise ValueError(f"Unsupported legacy actor tensor: {key}")
+                layer = "0.body.0" if index == 0 else str(index - 1)
+                key = f"actor_body.{layer}.{suffix}"
+            if key in converted:
+                raise ValueError(f"Mixed legacy and current actor layout: {key}")
+            converted[key] = value
+        return converted
+
+    def load_state_dict(self, state_dict, strict=True, **kwargs):
+        return super().load_state_dict(
+            self.compatible_state_dict(state_dict), strict=strict, **kwargs
+        )
+
     def __init__(self, num_obs, num_privileged_obs, num_obs_history, num_actions, **kwargs):
         use_adaptation_module = kwargs.pop("use_adaptation_module", True)
         if kwargs:

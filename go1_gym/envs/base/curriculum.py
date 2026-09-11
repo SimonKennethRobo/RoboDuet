@@ -121,15 +121,19 @@ class RewardThresholdCurriculum(Curriculum):
         self.episode_duration = np.zeros(len(self))
 
     def get_local_bins(self, bin_inds, ranges=0.1):
-        if isinstance(ranges, float):
-            ranges = np.ones(self.grid.shape[0]) * ranges
+        ranges = np.broadcast_to(np.asarray(ranges), (self.grid.shape[0],))
         bin_inds = bin_inds.reshape(-1)
-
-        adjacent_inds = np.logical_and(
-            self.grid[:, None, :].repeat(bin_inds.shape[0], axis=1) >= self.grid[:, bin_inds, None] - ranges.reshape(-1, 1, 1),
-            self.grid[:, None, :].repeat(bin_inds.shape[0], axis=1) <= self.grid[:, bin_inds, None] + ranges.reshape(-1, 1, 1)
-        ).all(axis=0)
-
+        # Reduce one coordinate at a time. Repeating the float64 grid across
+        # every successful environment creates a D x successes x bins array;
+        # legacy dynamic-gait grids have almost two million bins.
+        adjacent_inds = np.ones((bin_inds.size, self.grid.shape[1]), dtype=bool)
+        scratch = np.empty_like(adjacent_inds)
+        for axis, values in enumerate(self.grid):
+            centers = values[bin_inds]
+            np.greater_equal(values[None, :], (centers - ranges[axis])[:, None], out=scratch)
+            np.logical_and(adjacent_inds, scratch, out=adjacent_inds)
+            np.less_equal(values[None, :], (centers + ranges[axis])[:, None], out=scratch)
+            np.logical_and(adjacent_inds, scratch, out=adjacent_inds)
         return adjacent_inds
 
     def update(self, bin_inds, task_rewards, success_thresholds, local_range=0.5):
@@ -145,13 +149,20 @@ class RewardThresholdCurriculum(Curriculum):
         # if len(is_success) > 0 and is_success.any():
         #     print("successes")
 
-        self.weights[bin_inds[is_success]] = np.clip(self.weights[bin_inds[is_success]] + 0.2, 0, 1)
-        adjacents = self.get_local_bins(bin_inds[is_success], ranges=local_range)
-        for adjacent in adjacents:
-            #print(adjacent)
-            #print(self.grid[:, adjacent])
-            adjacent_inds = np.array(adjacent.nonzero()[0])
-            self.weights[adjacent_inds] = np.clip(self.weights[adjacent_inds] + 0.2, 0, 1)
+        successful_bins = bin_inds[is_success]
+        if successful_bins.size == 0:
+            return
+        self.weights[successful_bins] = np.clip(self.weights[successful_bins] + 0.2, 0, 1)
+        # Bound each boolean mask to 8 MiB (or one row for a larger grid).
+        # Preserve sample order and duplicate bins: every successful episode
+        # still contributes its own clipped +0.2 neighborhood update.
+        chunk_size = max(1, (8 * 1024 * 1024) // max(len(self), 1))
+        for start in range(0, successful_bins.size, chunk_size):
+            adjacents = self.get_local_bins(successful_bins[start:start + chunk_size], ranges=local_range)
+            for adjacent in adjacents:
+                adjacent_inds = np.flatnonzero(adjacent)
+                self.weights[adjacent_inds] = np.clip(self.weights[adjacent_inds] + 0.2, 0, 1)
+            del adjacents
 
     def log(self, bin_inds, lin_vel_raw=None, ang_vel_raw=None, episode_duration=None):
         self.episode_lin_vel_raw[bin_inds] = lin_vel_raw.cpu().numpy()
