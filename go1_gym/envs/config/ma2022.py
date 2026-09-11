@@ -1,0 +1,144 @@
+"""Ma et al., RA-L 2022 locomotion recipe (editable, robot-specific defaults).
+
+The paper specifies the algorithm, not numerical wrench/noise/network/reward
+hyperparameters. Values below are Go2 starting points, not reported results.
+"""
+
+from dataclasses import dataclass, field
+
+from .core import ConfigNode, RoboDuetRuntimeOptions, build_roboduet_config
+
+
+@dataclass
+class MaTrainingConfig:
+    # World-frame [Fx,Fy,Fz,Tx,Ty,Tz], N and Nm. Negative z models arm weight.
+    wrench_min: tuple = (-20., -20., -60., -6., -6., -4.)
+    wrench_max: tuple = (20., 20., 0., 6., 6., 4.)
+    beta_range: tuple = (0.001, 0.01)
+    prediction_times: tuple = (0., 0.2, 0.4, 0.6, 0.8)
+    wrench_scale: tuple = (0.05, 0.05, 0.02, 0.2, 0.2, 0.25)
+    # Radii of uniformly sampled 3-D balls; componentwise acceleration gains.
+    force_gain_radius: float = 1.0
+    torque_gain_radius: float = 0.05
+    disturbance_std: tuple = (1., 1., 1., 0.1, 0.1, 0.1)
+    # Student-only normalized input noise. Offset/scale are per episode.
+    prediction_noise_std: float = 0.05
+    prediction_bias_std: float = 0.05
+    prediction_scale_std: float = 0.05
+    proprio_noise_std: float = 0.01
+    scan_noise_std: float = 0.02  # metres, before scan normalization
+    scan_scale: float = 5.0
+    # Paper outputs four leg phases and twelve joint residuals. Here phase
+    # actions modulate frequency, and sagittal IK supplies the cyclic target.
+    gait_frequency: float = 2.0
+    phase_frequency_scale: float = 1.0
+    swing_height: float = 0.06
+    residual_scale: float = 0.25
+    hidden_dim: int = 128
+    embedding_dim: int = 32
+    learning_rate: float = 3e-4
+    rollout_steps: int = 24
+    ppo_epochs: int = 5
+    minibatches: int = 4
+    gamma: float = 0.99
+    gae_lambda: float = 0.95
+    clip_ratio: float = 0.2
+    entropy_coef: float = 0.01
+    value_coef: float = 1.0
+    max_grad_norm: float = 1.0
+    save_interval: int = 500
+    loss_weights: dict = field(default_factory=lambda: {
+        "action": 1., "embedding": 1., "privileged": 1.,
+        "scan": 1., "w1": 1., "w2": 1.,
+    })
+
+
+def build_ma_config(num_envs=4096, robot="go2", terrain="trimesh"):
+    if robot != "go2":
+        raise ValueError("The available bare robot asset for Ma training is Go2")
+    cfg = build_roboduet_config(options=RoboDuetRuntimeOptions(num_envs, robot))
+    cfg.asset.file = "{MINI_GYM_ROOT_DIR}/resources/robots/go2/urdf/go2_description.urdf"
+    cfg.asset.render_sphere = False
+    cfg.asset.arm_contact_bodies = []
+    cfg.asset.terminate_after_contacts_on = ["base", "trunk"]
+    cfg.env.num_actions = cfg.dog.num_actions_loco = 12
+    cfg.arm.num_actions_arm = 0
+    cfg.env.arm_policy_enabled = False
+    cfg.env.stage1_arm_curriculum = False
+    cfg.env.record_video = False
+    cfg.env.episode_length_s = 20.
+    cfg.control.control_type = "P"
+    cfg.control.action_scale = 1.
+    cfg.control.hip_scale_reduction = 1.
+    cfg.control.decimation = 4
+    cfg.sim.dt = 0.005
+    cfg.dog.control.stiffness_leg = {"joint": 40.}
+    cfg.dog.control.damping_leg = {"joint": 1.}
+    cfg.init_state.pos = [0., 0., 0.34]
+    cfg.init_state.default_joint_angles = {
+        f"{leg}_{joint}_joint": angle
+        for leg in ("FL", "FR", "RL", "RR")
+        for joint, angle in (("hip", 0.1 if leg.endswith("L") else -0.1),
+                             ("thigh", 0.8), ("calf", -1.5))
+    }
+    cfg.terrain.mesh_type = terrain
+    cfg.terrain.measure_heights = True
+    cfg.terrain.measured_points_x = [-0.6, -0.3, 0., 0.3, 0.6]
+    cfg.terrain.measured_points_y = [-0.4, -0.2, 0., 0.2, 0.4]
+    cfg.terrain.roughness_tiers = [0., 0.02, 0.04]
+    cfg.terrain.roughness_tier_weights = [0.4, 0.3, 0.3]
+    cfg.terrain.curriculum = False
+    cfg.terrain.reset_curriculum = False
+    cfg.terrain.reset_mode = "legacy"
+    cfg.terrain.robustness_metrics = False
+    cfg.terrain.z_init_range = 0.
+    cfg.terrain.roll_init_range = cfg.terrain.pitch_init_range = 0.
+    cfg.terrain.yaw_init_range = 3.14
+    cfg.terrain.num_rows = 3
+    cfg.terrain.num_cols = 10
+    cfg.terrain.max_init_terrain_level = 2
+    cfg.response.grouping.enabled = False
+    cfg.response.excitation.enabled = False
+    cfg.response.curriculum.enabled = False
+    cfg.domain_rand.mode = "sim2real"
+    for name in ("randomize_mount_position", "randomize_mount_rotation", "push_robots",
+                 "randomize_end_effector_force", "randomize_gravity",
+                 "randomize_rigids_after_start", "randomize_action_delay"):
+        setattr(cfg.domain_rand, name, False)
+    cfg.domain_rand.randomize_base_mass = False
+    cfg.domain_rand.randomize_com_displacement = False
+    cfg.domain_rand.randomize_friction = True
+    cfg.domain_rand.friction_range = [0.4, 1.5]
+    cfg.domain_rand.randomize_restitution = False
+    cfg.domain_rand.randomize_motor_strength = True
+    cfg.domain_rand.motor_strength_range = [0.9, 1.1]
+    cfg.commands.use_dynamic_gait = False
+    cfg.commands.command_curriculum = False
+    # Parent physical metrics read the full command buffer; only [:3] enters
+    # the Ma policy. Remaining slots carry fixed posture/gait defaults.
+    cfg.dog.dog_num_commands = 11
+    cfg.commands.resampling_time = 5.
+    cfg.commands.lin_vel_x = [-0.5, 0.5]
+    cfg.commands.lin_vel_y = [-0.3, 0.3]
+    cfg.commands.ang_vel_yaw = [-1., 1.]
+    cfg.rewards.only_positive_rewards = False
+    cfg.rewards.only_positive_rewards_ji22_style = False
+    cfg.rewards.base_height_target = 0.30
+    cfg.rewards.use_terminal_body_height = True
+    cfg.rewards.terminal_body_height = 0.16
+    cfg.rewards.use_terminal_roll_pitch = True
+    cfg.rewards.terminal_body_ori = 1.0
+    cfg.rewards.terminal_roll_pitch_grace_s = 0.
+    # Local locomotion reward implementation reused; stronger stability costs
+    # follow III-D1, but the paper does not publish exact coefficients.
+    scales = dict(tracking_lin_vel=1.5, tracking_ang_vel=0.75,
+                  orientation=-5., lin_vel_z=-4., ang_vel_xy=-0.5,
+                  torques=-0.0001, dof_acc=-2.5e-7, action_rate=-0.01,
+                  dof_pos_limits=-5., collision=-1.)
+    cfg.reward_scales = ConfigNode()
+    cfg.wbc.reward_scales = ConfigNode()
+    for name, value in scales.items():
+        setattr(cfg.reward_scales, name, value)
+        setattr(cfg.wbc.reward_scales, name, value)
+    cfg.asset.ee_body_name = None
+    return cfg
