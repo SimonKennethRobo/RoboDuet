@@ -204,6 +204,7 @@ class RoboDuetRuntimeOptions:
     robot: str
     use_rot6d: bool = True
     dyna_gait: bool = False
+    # Legacy compatibility input; gait-frequency bounds belong to the profile.
     dyna_gait_min_frequency: float = 0.0
     stage1_arm_curriculum: bool = True
     goal_reaching: bool = False
@@ -618,12 +619,12 @@ def enable_rot6d(cfg, layout):
     layout.arm_cmd += FEATURE_LAYOUT["rot6d_command_dims"]
 
 
-def enable_dyna_gait(cfg, layout, min_frequency=0.0):
+def enable_dyna_gait(cfg, layout):
     from .wbc import DYNAMIC_GAIT_BIN_CONFIG, FEATURE_LAYOUT
 
     cfg.commands.use_dynamic_gait = True
-    cfg.commands.gait_frequency_cmd_range = [min_frequency, cfg.commands.gait_frequency_cmd_range[1]]
-    cfg.commands.limit_gait_frequency = deepcopy(cfg.commands.gait_frequency_cmd_range)
+    # Keep the profile's sampling range and curriculum limits independent.
+    # A layout toggle must not reset the configured frequency lower bound.
     cfg.commands.limit_footswing_height = deepcopy(cfg.commands.footswing_height_range)
     cfg.commands.limit_gait_duration = deepcopy(cfg.commands.gait_duration_cmd_range)
     cfg.commands.limit_stance_width = deepcopy(cfg.commands.stance_width_range)
@@ -1022,7 +1023,7 @@ def build_roboduet_config(args=None, *, options=None, debug=False):
 
     goal_reaching = options.goal_reaching or options.traj_tracking
     if options.dyna_gait or goal_reaching:
-        enable_dyna_gait(cfg, layout, min_frequency=options.dyna_gait_min_frequency)
+        enable_dyna_gait(cfg, layout)
     if goal_reaching:
         enable_goal_reaching(cfg, layout)
     if options.traj_tracking:
