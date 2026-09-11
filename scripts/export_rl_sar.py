@@ -194,8 +194,8 @@ def dog_command_layout(cfg):
 
     The first six dog commands are operator-driven in rl_sar
     (x/y/yaw/body_pitch/body_roll/body_height). With dynamic gait the policy
-    also observes five gait commands; those are not exposed as operator inputs,
-    so they are frozen at the midpoint of the range they were trained over.
+    also observes five gait commands. Export walking defaults within the
+    checkpoint ranges; deployment gates dynamic frequency to zero at stand.
     """
     obs_scales = cfg.obs_scales
     scale = [
@@ -214,7 +214,7 @@ def dog_command_layout(cfg):
             return float(lo + hi) / 2.0
         extra = [
             midpoint("limit_gait_frequency"),
-            0.06,  # footswing_height: the constant WBCEnv.plan() sends
+            midpoint("limit_footswing_height"),  # Stage-1 sampling, not Stage-2 plan()'s constant
             midpoint("limit_stance_width"),
             midpoint("limit_stance_length"),
             0.49,  # gait_duration: the constant WBCEnv.plan() sends
@@ -470,9 +470,10 @@ def write_config_yaml(path, robot, config_name, cfg, ctx):
   num_arm_dofs: {ctx['num_arm']}
   arm_num_commands: {int(cfg.arm.arm_num_commands)}
 {float_entry('dog_commands_scale', ctx['dog_commands_scale'], 6)}
-  # Gait command slots the operator does not drive, frozen at their trained
-  # midpoints. Empty unless the run used dynamic gait.
+  # Walking gait defaults; dynamic frequency is zeroed at stand by rl_sar.
+  # Swing height comes from this checkpoint's training range.
 {float_entry('dog_commands_extra', ctx['dog_commands_extra'], 5)}
+  use_dynamic_gait: {str(bool(cfg.commands.use_dynamic_gait)).lower()}
   gait_frequency: {ctx['gait_frequency']:g}
   gait_duration: {ctx['gait_duration']:g}
   # Stage 1 always trains trotting (see LeggedRobot._step_contact_targets()'s

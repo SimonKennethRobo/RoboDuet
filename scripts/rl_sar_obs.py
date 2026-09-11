@@ -15,6 +15,21 @@ simulation. Keep it free of IsaacGym imports: sim2sim must run without it.
 import numpy as np
 
 
+def effective_gait_frequency(params, velocity_command):
+    """Match the deployment's dynamic-gait stand rule; preserve fixed gait."""
+    dynamic = params.get("use_dynamic_gait", len(params["dog_commands_scale"]) > 6)
+    if dynamic and np.linalg.norm(velocity_command) < 0.1:
+        return 0.0
+    return float(params["gait_frequency"])
+
+
+def dog_command_values(params, command):
+    extra = np.array(params["dog_commands_extra"], dtype=np.float64, copy=True)
+    if extra.size:
+        extra[0] = effective_gait_frequency(params, command[:3])
+    return np.concatenate([command, extra])
+
+
 def quat_rotate_inverse_np(quat_xyzw, vec):
     """IsaacGym's quat_rotate_inverse, matching rl_sar's QuatRotateInverse."""
     x, y, z, w = quat_xyzw
@@ -108,11 +123,8 @@ class RlSarObservation:
         if name == "roboduet/arm_dof_vel":
             return s["dof_vel"][num_leg:num_leg + num_arm] * p["dof_vel_scale"]
         if name == "roboduet/dog_commands":
-            cmd = np.concatenate([
-                [s["cmd_x"], s["cmd_y"], s["cmd_yaw"],
-                 s["cmd_pitch"], s["cmd_roll"], s["cmd_height"]],
-                np.array(p["dog_commands_extra"], dtype=np.float64),
-            ])
+            cmd = dog_command_values(p, [s["cmd_x"], s["cmd_y"], s["cmd_yaw"],
+                                        s["cmd_pitch"], s["cmd_roll"], s["cmd_height"]])
             return cmd * np.array(p["dog_commands_scale"], dtype=np.float64)
         if name == "roboduet/arm_commands":
             return np.zeros(int(p["arm_num_commands"]))
