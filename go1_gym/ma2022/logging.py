@@ -1,6 +1,7 @@
 """Optional W&B telemetry; failures must not terminate training."""
 
 from dataclasses import asdict
+from datetime import datetime
 from pathlib import Path
 
 from go1_gym.envs.config import cfg_to_dict
@@ -16,10 +17,15 @@ class WandbLogger:
         try:
             import wandb
 
+            now = datetime.now()
+            group = args.run_name or Path(log_dir).name
             self.run = wandb.init(
                 project=args.wandb_project,
                 entity=args.wandb_entity,
-                name=args.run_name or Path(log_dir).name,
+                group=group,
+                name=f"{now:%Y-%m-%d}/{group}_{now:%H%M%S}",
+                notes=getattr(args, "notes", ""),
+                settings=wandb.Settings(console="off"),
                 job_type=args.stage,
                 tags=["ma2022", args.stage, f"seed{args.seed}"],
                 mode="offline" if args.offline else "online",

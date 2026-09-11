@@ -1,7 +1,7 @@
 """Ma et al., RA-L 2022 locomotion recipe (editable, robot-specific defaults).
 
-The paper specifies the algorithm, not numerical wrench/noise/network/reward
-hyperparameters. Values below are Go2 starting points, not reported results.
+Ma-specific wrench/noise/network settings remain Go2 adaptations. Reward
+terms follow reference [10], Supplement S7; Ma stability multipliers are local.
 """
 
 from dataclasses import dataclass, field
@@ -28,10 +28,14 @@ class MaTrainingConfig:
     proprio_noise_std: float = 0.01
     scan_noise_std: float = 0.02  # metres, before scan normalization
     scan_scale: float = 5.0
-    # Paper outputs four leg phases and twelve joint residuals. Here phase
-    # actions modulate frequency, and sagittal IK supplies the cyclic target.
+    # Phase increments and cubic foot lift follow reference [10] S5.
+    # Go2 lift height, joint residual scale and IK geometry are adaptations.
+    reward_curriculum_initial: float = 0.1
+    reward_curriculum_exponent: float = 0.98
+    stability_multiplier: float = 2.0  # Ma III-D1: higher weight; factor not published
+    knee_limit: float = -0.1  # Go2 calf convention; prevents knee reversal
     gait_frequency: float = 2.0
-    phase_frequency_scale: float = 1.0
+    phase_increment_scale: float = 1.0  # radians per policy action
     swing_height: float = 0.06
     residual_scale: float = 0.25
     hidden_dim: int = 128
@@ -72,6 +76,9 @@ def build_ma_config(num_envs=4096, robot="go2", terrain="trimesh"):
     cfg.control.hip_scale_reduction = 1.
     cfg.control.decimation = 4
     cfg.sim.dt = 0.005
+    # Thousands of independent robots share terrain tiles. Give PhysX's
+    # broadphase sufficient pair buffers for their overlapping AABBs.
+    cfg.sim.physx["default_buffer_size_multiplier"] = 32
     cfg.dog.control.stiffness_leg = {"joint": 40.}
     cfg.dog.control.damping_leg = {"joint": 1.}
     cfg.init_state.pos = [0., 0., 0.34]
@@ -94,12 +101,25 @@ def build_ma_config(num_envs=4096, robot="go2", terrain="trimesh"):
     cfg.terrain.z_init_range = 0.
     cfg.terrain.roll_init_range = cfg.terrain.pitch_init_range = 0.
     cfg.terrain.yaw_init_range = 3.14
-    cfg.terrain.num_rows = 3
-    cfg.terrain.num_cols = 10
+    # Distribute large batches over 200 tiles rather than crowding 4096
+    # actors onto 30 tiles (which overflowed GPU aggregate-pair buffers).
+    cfg.terrain.num_rows = 10
+    cfg.terrain.num_cols = 20
     cfg.terrain.max_init_terrain_level = 2
     cfg.response.grouping.enabled = False
     cfg.response.excitation.enabled = False
     cfg.response.curriculum.enabled = False
+    # Start from an explicit dynamics allowlist, including nested arm flags.
+    # The parent builder supplies simulator schema, not the Ma DR recipe.
+    def disable_randomization(node):
+        for key, value in vars(node).items():
+            if isinstance(value, ConfigNode):
+                disable_randomization(value)
+            elif key.startswith("randomize_") or key in ("push_robots", "push_curriculum"):
+                setattr(node, key, False)
+    disable_randomization(cfg.domain_rand)
+    cfg.domain_rand.dog_obs_frame_drop_prob = 0.
+    cfg.domain_rand.dog_obs_latency_jitter_steps = 0
     cfg.domain_rand.mode = "sim2real"
     for name in ("randomize_mount_position", "randomize_mount_rotation", "push_robots",
                  "randomize_end_effector_force", "randomize_gravity",
@@ -110,8 +130,11 @@ def build_ma_config(num_envs=4096, robot="go2", terrain="trimesh"):
     cfg.domain_rand.randomize_friction = True
     cfg.domain_rand.friction_range = [0.4, 1.5]
     cfg.domain_rand.randomize_restitution = False
-    cfg.domain_rand.randomize_motor_strength = True
-    cfg.domain_rand.motor_strength_range = [0.9, 1.1]
+    cfg.domain_rand.randomize_motor_strength = False
+    cfg.domain_rand.motor_strength_range = [1., 1.]
+    cfg.domain_rand.Kp_factor_range = [1., 1.]
+    cfg.domain_rand.Kd_factor_range = [1., 1.]
+    cfg.domain_rand.motor_offset_range = [0., 0.]
     cfg.commands.use_dynamic_gait = False
     cfg.commands.command_curriculum = False
     # Parent physical metrics read the full command buffer; only [:3] enters
@@ -129,12 +152,13 @@ def build_ma_config(num_envs=4096, robot="go2", terrain="trimesh"):
     cfg.rewards.use_terminal_roll_pitch = True
     cfg.rewards.terminal_body_ori = 1.0
     cfg.rewards.terminal_roll_pitch_grace_s = 0.
-    # Local locomotion reward implementation reused; stronger stability costs
-    # follow III-D1, but the paper does not publish exact coefficients.
-    scales = dict(tracking_lin_vel=1.5, tracking_ang_vel=0.75,
-                  orientation=-5., lin_vel_z=-4., ang_vel_xy=-0.5,
-                  torques=-0.0001, dof_acc=-2.5e-7, action_rate=-0.01,
-                  dof_pos_limits=-5., collision=-1.)
+    # Signed terms are computed by the task-owned reward kernel. Positive
+    # coefficients from [10] S7; orientation is the extra Ma III-D1 term.
+    scales = dict(tracking_lin_vel=0.75, tracking_ang_vel=0.75,
+                  orthogonal_velocity=0.75, body_motion=1., orientation=1.,
+                  foot_clearance=0.003, collision=0.1, joint_motion=0.001,
+                  knee_limit=0.08, target_smoothness=0.003,
+                  torques=1e-6, foot_slip=0.003)
     cfg.reward_scales = ConfigNode()
     cfg.wbc.reward_scales = ConfigNode()
     for name, value in scales.items():

@@ -1,9 +1,50 @@
 # Ma et al. (2022) locomotion training
 
-This implementation adds the locomotion training pipeline from Sections III-C
+This implementation adapts the locomotion training pipeline from Sections III-C
 and III-D and Figure 4 of [the supplied paper](<Ma et al_2022_Combining Learning-Based Locomotion Policy With Model-Based Manipulation for.pdf>).
+It is not a verified faithful reproduction: the [fidelity audit](ma2022_fidelity_audit.md)
+records the original gaps and the v2 corrections. Observations and robot-specific
+parameters still contain adaptations; see the remaining limitations below.
 Run it through `scripts/train_ma2022.py`. It trains the checked-in **bare Go2**
 asset: there is no arm in the training simulator.
+
+## V2 alignment changes
+
+V2 uses an independent reward kernel in `go1_gym/ma2022/rewards.py`, based on
+[Ma reference 10, Supplement S7](https://arxiv.org/html/2201.08117v1#S7).
+It includes directional command tracking, orthogonal velocity, body motion,
+clearance, collision, joint motion, knee constraints, first/second target
+smoothness, torque and contact-foot slip. Coefficients are the S7 coefficients;
+terms are per control step, without the repository's dt multiplier or positive
+reward clipping. The printed direction/sign notation is interpreted using a
+unit command direction and absolute commanded yaw speed; this convention is
+explicitly documented in the kernel and tested for mirrored commands.
+
+Ma III-D1 increases orientation, vertical velocity and roll/pitch-rate costs.
+The multiplier 2 and squared-horizontal-gravity orientation term are explicit
+local choices because the Ma-specific formula/coefficients are not provided.
+The reference curriculum `c <- c**0.98` advances independently at each completed
+episode, using a locally chosen initial value 0.1. It scales only the documented
+penalty terms, not wrench magnitudes or reset difficulty.
+
+All inherited dynamics randomization flags are cleared before enabling the
+explicit friction recipe. Kp, Kd, strength and zero offsets are nominal, even
+if the parent periodically calls its DOF sampler. Parent configuration is
+still used for the simulator schema; this is not a claim of complete schema
+independence. WBC latency/drop flags and push curriculum are explicitly off.
+
+The lift shape now follows the cubic Hermite trajectory in reference 10 S5;
+phase actions are per-step radians rather than frequency perturbations.
+Go2 geometry, 0.06 m lift and residual amplitude remain robot adaptations.
+The reward samples 52 heights around each foot for clearance. The policy's
+25-point base scan and 76-D proprioception remain the earlier adaptations;
+these have not been replaced with the full referenced observation history.
+The actuator-factor privileged entries are now constant nominal values.
+
+V1 checkpoints are deliberately rejected because reward and action semantics
+changed. New training requires a fresh teacher and a student distilled from
+that v2 teacher. The cloud run documented below was launched with v1 and is
+not automatically converted by editing local source.
 
 ## Training
 
@@ -55,7 +96,9 @@ termination fraction per control step. Checkpoints publish with atomic
 replacement; failed checkpoint writes stop the run. Noncritical metrics-write
 errors skip that record with a rate-limited warning.
 
-W&B logging is enabled by default in project `roboduet`. Use `--run_name`,
+W&B logging is online by default in `simon00715/roboduet`, matching
+`auto_train.py`. Runs use `group=run_name` and names of the form
+`YYYY-MM-DD/<run_name>_HHMMSS`; `--notes` sets run notes. Use `--run_name`,
 `--wandb_project` and `--wandb_entity` to choose the run name and destination.
 `--offline` records W&B data locally under `<log_dir>/wandb` for later
 `wandb sync`; `--no_wandb` disables W&B and takes precedence over `--offline`.
@@ -92,7 +135,7 @@ the affected clip. Headless recording needs a working GPU graphics device;
 | Figure 4(b): two recurrent student streams | `Student.wrench_rnn` and `Student.belief_rnn` |
 | Eq. (9): action and embedding imitation | `distillation_losses`: `action`, `embedding` |
 | Eq. (10): privileged, scan, total applied wrench, load-gain decoding | `privileged`, `scan`, `w1`, `w2` losses |
-| Phase and joint-residual actions with joint PD control | Four phase-rate actions, cyclic sagittal IK, twelve joint residuals |
+| Phase and joint-residual actions with joint PD control | Four phase increments, cubic Hermite lift and sagittal IK, twelve joint residuals |
 
 The belief recurrent stream sees proprioception and a noisy height scan. It
 never receives the wrench prediction, and **all four decoders read only this
@@ -152,15 +195,15 @@ Carry both returned states into the next call.
 
 The policy returns 16 actions:
 
-- `0:4`: per-leg frequency offsets in FL, FR, RL, RR order. Clip to ±1 and
-  integrate `phase += .02 * (gait_frequency + phase_frequency_scale * action)`
+- `0:4`: per-leg phase increments in FL, FR, RL, RR order. Clip to ±3 and
+  integrate `phase += .02 * gait_frequency + phase_increment_scale * action / (2*pi)`
   modulo 1. Reset phases are `[0, .5, .5, 0]`.
 - `4:16`: residual joint positions in asset DOF order: FL, FR, RL, RR, with
   hip/thigh/calf in each leg. Clip policy outputs to ±3, multiply residuals by
   `residual_scale`, and add to the cyclic IK target in `env._joint_targets`.
   Use the configured PD controller, not direct torque interpretation.
 
-These are format-versioned `ma2022-locomotion-v1` checkpoints. They are not
+These are format-versioned `ma2022-locomotion-v2` checkpoints. They are not
 compatible with `auto_train.py`, `load_policy.py`, `export_rl_sar`, or existing
 12-action RoboDuet dog checkpoints. Deployment needs a matching phase/IK
 adapter, sensors/height scan, and externally supplied wrench predictions. The
@@ -174,8 +217,9 @@ ANYmal/RaiSim reproduction. The paper delegates proprioception, action
 generation and locomotion rewards to earlier work and does not give numerical
 wrench limits, beta bounds, noise magnitudes, network widths or loss weights.
 Here those use explicitly editable Go2 defaults. The cyclic sagittal IK
-template, 5×5 height scan, short action history, GRU cells and reused RoboDuet
-reward functions are implementation choices. Orientation, vertical velocity
+template, 5×5 policy height scan, short action history and GRU cells remain
+implementation choices. Reward definitions now follow reference [10] S7,
+with the interpretation and Ma-specific choices described above. Orientation, vertical velocity
 and roll/pitch-rate penalties are increased as described in III-D1.
 
 For Eq. (7), signed configured bounds are converted to lower/upper *magnitudes*
@@ -189,7 +233,45 @@ adjust signed ranges if bidirectional terminal variation is desired.
 The existing response-consistency rewards, grouping/excitation curricula,
 arm disturbance curriculum, reset mixtures and random velocity pushes are
 disabled for this task. The base simulator's state management, terrain,
-actuator randomization and common locomotion rewards are reused.
+friction sampling are reused. Actuators are nominal; task-owned rewards bypass
+the parent reward registry, global-switch weights and response curriculum.
+
+The rough-terrain grid uses 10 rows × 20 columns, with PhysX
+`default_buffer_size_multiplier=32`. The original 3×10 grid crowded 4096
+robots onto too few tiles and overflowed GPU aggregate-pair buffers on the
+cloud RTX 4090. The larger grid preserves the roughness proportions while
+reducing broadphase overlap; the larger buffers leave additional capacity.
+
+## Cloud teacher run (2026-09-11)
+
+Host: `ssh -p 30071 root@183.147.142.40`. Runtime setup follows
+[CloudGPU使用手册](CloudGPU使用手册.md). The Ma entrypoint uses `--stage` and
+`--iterations`; the manual's existing `train.sh` launches `auto_train.py` and
+is not the launcher for this task.
+
+The 4096-environment, 20000-iteration teacher run is managed by tmux session
+`rd-ma2022-teacher`, with video enabled and W&B online (`simon00715/roboduet`). Its actual command is
+saved in `/root/gpufree-data/roboduet-conda/jobs/ma2022_teacher_online-20260911-110050.sh`.
+Online run: [259o56nh](https://wandb.ai/simon00715/roboduet/runs/259o56nh).
+
+```bash
+tmux attach -t rd-ma2022-teacher
+# Detach with Ctrl+B, then D; training continues.
+
+tail -f /root/gpufree-data/roboduet-conda/logs/ma2022_teacher_online-20260911-110050.log
+```
+
+Run directory:
+`/root/gpufree-data/RoboDuet/runs/ma2022/teacher_online_20260911-110050`.
+Checkpoints, `videos/` and local `wandb/` data live there.
+The earlier offline run was stopped at the user's request; this online run
+starts from scratch. The earlier logs and videos remain in
+`runs/ma2022/teacher_20260911-104604`. The matching `.exit`
+file beside the terminal log is written when the task exits. Code is commit
+`a499222` plus the terrain-grid/PhysX-capacity adjustment above, applied to both
+local and cloud copies, plus the W&B configuration aligned with
+`scripts/auto_train.py`. A short cloud preflight verified checkpoint tensors
+and MP4 decoding before the formal run.
 
 ## Validation
 
@@ -212,3 +294,26 @@ existing command-layout expectation mismatches reproduced from an isolated
 archive of unmodified HEAD `0f02d9d` (that test file: 13 passed / 5 failed).
 Local CLI validation artifacts are under `tmp/ma2022_validation/`; those
 short-run checkpoints are execution checks, not trained locomotion policies.
+
+V2 validation: 14 CPU tests passed; bounded GPU checks on plane and trimesh
+cover reward independence from global-switch weights, nominal actuators,
+reset histories, PPO/distillation updates, checkpoint saving and JIT export.
+These are execution checks, not convergence or performance-equivalence evidence.
+
+## V2 cloud launch (2026-09-11, port 30322)
+
+Commit `f911a16` was deployed separately to
+`/root/gpufree-data/RoboDuet-ma2022-v2-f911a16` using the existing Conda runtime.
+The fresh teacher uses GPU 0, 4096 environments, 20000 iterations, online W&B
+and default training video. Bounded cloud trimesh integration passed before
+launch. [Online run](https://wandb.ai/simon00715/roboduet/runs/swa03b12).
+
+```bash
+ssh -p 30322 -t root@183.147.142.40 'tmux attach -t rd-ma2022-v2-teacher'
+```
+
+Run directory: `runs/ma2022/teacher_v2_20260911-112924` under that checkout.
+Terminal log: `/root/gpufree-data/roboduet-conda/logs/ma2022_v2_teacher-20260911-112924.log`.
+The adjacent `.exit` file is written when the job ends. The exact launcher is
+`/root/gpufree-data/roboduet-conda/jobs/ma2022_v2_teacher-20260911-112924.sh`.
+Old source and runs are retained in `/root/gpufree-data/RoboDuet`.

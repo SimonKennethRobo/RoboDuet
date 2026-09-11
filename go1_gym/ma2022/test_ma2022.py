@@ -127,4 +127,66 @@ def test_config_is_independent_and_disables_arm_and_response_training():
     assert not a.domain_rand.push_robots
     assert "arx" not in a.asset.file
     a.reward_scales.orientation = 123
-    assert b.reward_scales.orientation == -5.
+    assert b.reward_scales.orientation == 1.
+
+
+def test_command_rewards_stand_plateau_and_mirror_symmetry():
+    from go1_gym.ma2022.rewards import command_rewards
+    command = torch.tensor([[.5, 0.], [-.5, 0.], [0., 0.], [.5, 0.]])
+    velocity = torch.tensor([[.7, 0.], [-.7, 0.], [.3, .4], [.5, 1.]])
+    yaw = torch.tensor([.5, -.5, 0., .5])
+    actual = torch.tensor([.7, -.7, .5, -.5])
+    linear, angular, lateral = command_rewards(command, velocity, yaw, actual)
+    torch.testing.assert_close(linear[:2], torch.ones(2))
+    torch.testing.assert_close(angular[:2], torch.ones(2))
+    torch.testing.assert_close(linear[2], torch.exp(torch.tensor(-.25)))
+    assert lateral[3] < lateral[0] and angular[3] < angular[0]
+
+
+def test_cubic_lift_boundaries_and_zero_endpoint_slope():
+    from go1_gym.ma2022.rewards import swing_lift
+    phase = torch.tensor([0., .25, .5, .75, 1.], requires_grad=True)
+    lift = swing_lift(phase)
+    torch.testing.assert_close(lift, torch.tensor([0., 1., 0., 0., 0.]))
+    lift.sum().backward()
+    torch.testing.assert_close(phase.grad, torch.zeros(5))
+
+
+def test_ma_dynamics_allowlist():
+    cfg = build_ma_config(4)
+    enabled = {key for key, value in vars(cfg.domain_rand).items()
+               if key.startswith('randomize_') and value is True}
+    assert enabled == {'randomize_friction'}
+    assert cfg.domain_rand.dog_obs_frame_drop_prob == 0
+    assert not cfg.domain_rand.push_curriculum
+
+
+def test_reward_terms_penalize_slip_and_second_target_difference():
+    from go1_gym.ma2022.rewards import reward_terms
+    z3, z12 = torch.zeros(2, 3), torch.zeros(2, 12)
+    args = dict(command=z3, linear=z3, angular=z3, gravity=z3,
+                dof_pos=-torch.ones(2, 12), dof_vel=z12, previous_dof_vel=z12,
+                target=z12, last_target=z12, previous_target=z12.clone(),
+                torque=z12, feet_velocity=torch.ones(2, 4, 3),
+                feet_contact=torch.tensor([[True]*4, [False]*4]),
+                leg_collision=torch.zeros(2, 8, dtype=torch.bool),
+                foot_heights=torch.zeros(2, 4, 52), phase=torch.zeros(2, 4),
+                knee_indices=[2, 5, 8, 11], knee_limit=-.1, dt=.02,
+                curriculum=torch.ones(2), stability_multiplier=2.)
+    args['previous_target'][0] = 1.
+    terms = reward_terms(**args)
+    torch.testing.assert_close(terms['foot_slip'], torch.tensor([-12., 0.]))
+    torch.testing.assert_close(terms['target_smoothness'], torch.tensor([-12., 0.]))
+    torch.testing.assert_close(terms['knee_limit'], torch.zeros(2))
+    args['foot_heights'].fill_(-.3)
+    args['phase'][1] = .75
+    torch.testing.assert_close(reward_terms(**args)['foot_clearance'], torch.tensor([-4., 0.]))
+
+
+def test_old_mdp_checkpoint_is_rejected(tmp_path):
+    from go1_gym.ma2022.training import load_checkpoint
+    import pytest
+    path = tmp_path / 'old.pt'
+    torch.save({'format': 'ma2022-locomotion-v1'}, path)
+    with pytest.raises(ValueError, match='v2'):
+        load_checkpoint(path)

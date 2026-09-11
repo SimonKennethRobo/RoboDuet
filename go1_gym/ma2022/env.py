@@ -13,15 +13,19 @@ from go1_gym.envs.config import cfg_to_dict
 from go1_gym import MINI_GYM_ROOT_DIR
 from go1_gym.envs.roboduet.legged_robot import LeggedRobot
 from .wrench import WrenchSequence, world_to_body
+from .rewards import reward_terms, swing_lift
 
 
 class MaLocomotionEnv(LeggedRobot):
     policy_action_dim = 16
 
     def __init__(self, cfg, recipe, sim_device="cuda:0", headless=True):
+        if not 0 < recipe.reward_curriculum_initial <= 1:
+            raise ValueError("reward_curriculum_initial must be in (0,1]")
+        if not 0 < recipe.reward_curriculum_exponent <= 1:
+            raise ValueError("reward_curriculum_exponent must be in (0,1]")
         self.recipe = recipe
-        # Parent reward registration scales cfg.reward_scales by dt in place.
-        # Save unscaled source settings so resume never applies dt twice.
+        # Save the task recipe before simulator-derived values are populated.
         self.source_config = cfg_to_dict(cfg)
         cfg = deepcopy(cfg)
         self._prepare_asset(cfg)
@@ -54,8 +58,84 @@ class MaLocomotionEnv(LeggedRobot):
             for leg in ("FL", "FR", "RL", "RR")
         ], device=self.device)
         self.link_length = 0.213
+        self.leg_collision_indices = torch.tensor([
+            i for i, name in enumerate(self.body_names) if "thigh" in name or "calf" in name
+        ], device=self.device)
+        # Reference [10] S5: 52 samples around each foot.
+        offsets = []
+        for count, radius in zip((6, 8, 10, 12, 16), (.08, .16, .26, .36, .48)):
+            angle = torch.arange(count, device=self.device)*2*torch.pi/count
+            offsets.append(torch.stack((radius*angle.cos(), radius*angle.sin()), -1))
+        self.foot_scan_offsets = torch.cat(offsets)
+        self.reward_curriculum = torch.full((self.num_envs,), recipe.reward_curriculum_initial, device=self.device)
         self.reset_idx(torch.arange(self.num_envs, device=self.device))
         self.observation_dims = {k: v.shape[-1] for k, v in self.observations().items()}
+
+    def reset_idx(self, ids):
+        super().reset_idx(ids)
+        # Both explicit reset and automatic reset must start finite differences
+        # in the new episode; never compare a target against the old episode.
+        self.last_dof_vel[ids] = self.dof_vel[ids]
+        self.joint_pos_target[ids] = self.dof_pos[ids]
+        self.last_joint_pos_target[ids] = self.dof_pos[ids]
+        self.last_last_joint_pos_target[ids] = self.dof_pos[ids]
+
+    def _randomize_dof_props(self, env_ids, cfg):
+        # No inherited reset-time or periodic actuator randomization.
+        # Friction is the only enabled dynamics DR in this recipe.
+        for name, nominal in (("motor_strengths", 1.), ("motor_offsets", 0.),
+                              ("Kp_factors", 1.), ("Kd_factors", 1.)):
+            getattr(self, name)[env_ids] = nominal
+
+    def _prepare_reward_function(self):
+        # Keep parent reset/log bookkeeping buffers, but never register its
+        # reward container or consult global_switch for the learning objective.
+        self.reward_names = list(vars(self.cfg.reward_scales))
+        self.pretrained_reward_scales = dict(vars(self.cfg.reward_scales))
+        self.wbc_reward_scales = dict(self.pretrained_reward_scales)
+        def buffers(names, value=0.):
+            return {k: torch.full((self.num_envs,), value, device=self.device) for k in names}
+        names = self.reward_names + ["total"]
+        self.episode_sums = buffers(names)
+        self.episode_sums_eval = buffers(names, -1.)
+        self.command_sums = buffers(self.reward_names + ["lin_vel_raw", "ang_vel_raw",
+                                   "lin_vel_residual", "ang_vel_residual", "ep_timesteps"])
+
+    def _foot_heights(self):
+        points = self.foot_positions[:, :, None, :2] + self.foot_scan_offsets[None, None]
+        if self.cfg.terrain.mesh_type == "plane":
+            heights = torch.zeros(points.shape[:-1], device=self.device)
+        else:
+            grid = ((points + self.terrain.cfg.border_size) / self.terrain.cfg.horizontal_scale).long()
+            x = grid[..., 0].clamp(0, self.height_samples.shape[0]-2)
+            y = grid[..., 1].clamp(0, self.height_samples.shape[1]-2)
+            heights = torch.minimum(torch.minimum(self.height_samples[x, y], self.height_samples[x+1, y]),
+                                    self.height_samples[x, y+1])*self.terrain.cfg.vertical_scale
+        return heights-self.foot_positions[:, :, None, 2]
+
+    def compute_reward(self):
+        feet_state = self.rigid_body_state.view(self.num_envs, self.num_bodies, 13)[:, self.feet_indices]
+        terms = reward_terms(
+            command=self.commands_dog, linear=self.base_lin_vel, angular=self.base_ang_vel,
+            gravity=self.projected_gravity, dof_pos=self.dof_pos, dof_vel=self.dof_vel,
+            previous_dof_vel=self.last_dof_vel, target=self.joint_pos_target,
+            last_target=self.last_joint_pos_target, previous_target=self.last_last_joint_pos_target,
+            torque=self.torques, feet_velocity=feet_state[:, :, 7:10],
+            feet_contact=self.contact_forces[:, self.feet_indices].norm(dim=-1)>1.,
+            leg_collision=self.contact_forces[:, self.leg_collision_indices].norm(dim=-1)>1.,
+            foot_heights=self._foot_heights(), phase=self.phase, knee_indices=self.leg_joint_indices[:, 2],
+            knee_limit=self.recipe.knee_limit, dt=self.dt, curriculum=self.reward_curriculum,
+            stability_multiplier=self.recipe.stability_multiplier)
+        if set(terms) != set(self.reward_names):
+            raise ValueError("Ma reward recipe does not match the task reward kernel")
+        self.rew_buf_dog.zero_()
+        self.rew_buf_arm.zero_()
+        for name, term in terms.items():
+            weighted = self.pretrained_reward_scales[name]*term
+            self.rew_buf_dog += weighted
+            self.episode_sums[name] += weighted
+            self.command_sums[name] += weighted
+        self.episode_sums["total"] += self.rew_buf_dog
 
     def _prepare_asset(self, cfg):
         # The checked-in bare Go2 URDF uses ROS package:// mesh URIs. Resolve
@@ -132,6 +212,10 @@ class MaLocomotionEnv(LeggedRobot):
     def _arm_post_reset_refresh_hook(self, ids):
         if not hasattr(self, "wrench"):
             return
+        if hasattr(self, "reward_curriculum"):
+            completed = ids[self.episode_length_buf[ids] > 0]
+            self.reward_curriculum[completed] = self.reward_curriculum[completed].pow(
+                self.recipe.reward_curriculum_exponent)
         self.wrench.reset(ids)
         self.previous_twist[ids] = self.root_states[ids, 7:13]
         self.applied_wrench[ids] = 0
@@ -190,16 +274,16 @@ class MaLocomotionEnv(LeggedRobot):
             (contact > 1.).any(dim=1) | self.body_height_buf | self.roll_pitch_buf)
 
     def _joint_targets(self, action):
-        # Cyclic foot lift + residual joint position, using a 2-link sagittal
-        # IK template adapted to Unitree. Phase is observable as sin/cos.
-        self.phase = (self.phase + self.dt * (self.recipe.gait_frequency +
-                      self.recipe.phase_frequency_scale * action[:, :4].clamp(-1, 1))) % 1.
+        # Reference [10] S5 phase increment and cubic foot lift, with a
+        # two-link sagittal IK and lift amplitude adapted to Unitree.
+        self.phase = (self.phase + self.dt*self.recipe.gait_frequency +
+                      self.recipe.phase_increment_scale*action[:, :4]/(2*torch.pi)) % 1.
         nominal = self.default_dof_pos[:, self.leg_joint_indices]
         thigh, calf = nominal[..., 1], nominal[..., 2]
         length = self.link_length
         x = -length * (torch.sin(thigh) + torch.sin(thigh + calf))
         z = -length * (torch.cos(thigh) + torch.cos(thigh + calf))
-        z = z + self.recipe.swing_height * torch.sin(2 * torch.pi * self.phase).clamp_min(0)
+        z = z + self.recipe.swing_height * swing_lift(self.phase)
         knee = -torch.acos(((x*x + z*z - 2*length*length) / (2*length*length)).clamp(-0.999, 0.999))
         hip = torch.atan2(-x.expand_as(z), -z) - torch.atan2(torch.sin(knee), 1 + torch.cos(knee))
         target = self.default_dof_pos.expand(self.num_envs, -1).clone()

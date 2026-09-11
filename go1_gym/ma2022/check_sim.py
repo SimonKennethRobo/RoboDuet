@@ -36,6 +36,20 @@ def main():
         ids = torch.tensor([0, 2], device=env.device)
         other = torch.tensor([1, 3], device=env.device)
         env.step(torch.zeros(4, 16, device=env.device))
+        # Neither inherited DR flags nor global reward switching may change
+        # the Ma dynamics/reward contract.
+        env.cfg.domain_rand.randomize_Kp_factor = True
+        env._randomize_dof_props(torch.arange(4, device=env.device), env.cfg)
+        assert torch.all(env.Kp_factors == 1.) and torch.all(env.motor_offsets == 0.)
+        env.compute_reward()
+        expected_reward = env.rew_buf_dog.clone()
+        original_get_scales = global_switch.get_reward_scales
+        global_switch.get_reward_scales = lambda: {"tracking_lin_vel": 1e9}
+        try:
+            env.compute_reward()
+            torch.testing.assert_close(env.rew_buf_dog, expected_reward)
+        finally:
+            global_switch.get_reward_scales = original_get_scales
         before = env.wrench.knots.clone()
         env.reset_idx(ids)
         torch.testing.assert_close(env.wrench.knots[other], before[other])
@@ -74,7 +88,7 @@ def main():
             path = Path(directory)
             save_checkpoint(path / "student.pt", student, student_optimizer, 1, "student", env, recipe)
             checkpoint = load_checkpoint(path / "student.pt")
-            assert checkpoint["env_cfg"]["reward_scales"]["orientation"] == -5.
+            assert checkpoint["env_cfg"]["reward_scales"]["orientation"] == 1.
             assert "roboduet_ma2022_" not in checkpoint["env_cfg"]["asset"]["file"]
             export_student(student, path / "student_jit.pt")
             scripted = torch.jit.load(str(path / "student_jit.pt"), map_location=env.device)

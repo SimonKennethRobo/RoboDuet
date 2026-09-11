@@ -1,5 +1,7 @@
 # RoboDuet 云端 Stage 1 使用手册
 
+> Coding agents: use the unified English [Cloud Training Agent Guide](CLOUD_TRAINING_AGENT_GUIDE.md) for both servers, GPU allocation, isolated source copies, submission, monitoring, and handoff. This Chinese guide describes the original single-server deployment.
+
 ## 1. 登录与日常启动
 
 ```bash
