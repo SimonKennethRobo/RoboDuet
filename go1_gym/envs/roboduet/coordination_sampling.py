@@ -31,6 +31,8 @@ def log_coordination_iteration(env, log_dir, iteration, wandb_dict):
         if sampler is not None:
             values.update(sampler.metrics())
     if values:
+        if getattr(env.cfg.env, 'quarantine_invalid_physics', False):
+            values['Numerics/invalid_envs_total'] = env.numerical_fault_count
         wandb_dict.update(values)
         with optional_output("coordination.jsonl"), (Path(log_dir) / "coordination.jsonl").open("a") as stream:
             stream.write(json.dumps(dict(iteration=int(iteration), **values), allow_nan=False) + "\n")
@@ -66,6 +68,8 @@ class CoordinationCommands:
         self.short[torch.as_tensor(order[:round(num_envs * self.c.short_fraction)], device=device)] = True
         self.total_steps = 0
         self.transition_steps = torch.zeros((), device=device)
+        self.standing_steps = torch.zeros((), device=device)
+        self.low_speed_steps = torch.zeros((), device=device)
         self.duration_sum = torch.zeros(3, device=device)
         self.window_count = torch.zeros(3, device=device)
         self.change_sum = torch.zeros(3, device=device)
@@ -77,6 +81,8 @@ class CoordinationCommands:
         return bounds[:, 0] + torch.rand(count, len(bounds), device=self.device) * (bounds[:, 1] - bounds[:, 0])
 
     def _finish_velocity(self, env, ids):
+        if getattr(env, 'numerical_fault_active', False):
+            ids = ids[~env.numerical_fault_mask[ids]]
         ids = ids[self.active[ids] & (env.command_sums["ep_timesteps"][ids] > 0)]
         if ids.numel() == 0:
             return
@@ -112,7 +118,11 @@ class CoordinationCommands:
             self._finish_velocity(env, ids)
             values, bins = self.curriculum.sample(len(ids))
             values = torch.as_tensor(values, dtype=env.commands_dog.dtype, device=self.device)
-            stand = torch.rand(len(ids), device=self.device) < self.c.standing_probability
+            category = torch.rand(len(ids), device=self.device)
+            stand = category < self.c.standing_probability
+            if self.c.low_speed_probability > 0:
+                low = (category >= self.c.standing_probability) & (category < self.c.standing_probability + self.c.low_speed_probability)
+                values[low] = self._uniform(int(low.sum()), self.c.low_speed_ranges)
             values[stand] = 0.0
             # Keep indices consistent even for deliberately overridden standing commands.
             coordinates = ((values.cpu().numpy() - self.curriculum.lows) /
@@ -156,6 +166,11 @@ class CoordinationCommands:
         self.total_steps += self.num_envs
         age = env.common_step_counter - self.started_step[:, 0]
         self.transition_steps += (age * self.dt <= self.c.transition_window_s).sum()
+        moving = torch.norm(env.commands_dog[:, :3], dim=1) >= 0.1
+        bounds = torch.as_tensor(self.c.low_speed_ranges, device=self.device)
+        low = ((env.commands_dog[:, :3] >= bounds[:, 0]) & (env.commands_dog[:, :3] <= bounds[:, 1])).all(dim=1)
+        self.standing_steps += (~moving).sum()
+        self.low_speed_steps += (low & moving).sum()
         self.pitch_error_sq += ((env.pitch - env.commands_dog[:, 3]) ** 2).sum()
         self.roll_error_sq += ((env.roll - env.commands_dog[:, 4]) ** 2).sum()
         for group in range(3):
@@ -166,6 +181,8 @@ class CoordinationCommands:
         result = {
             "Commands/velocity_short_cohort_fraction": self.short.float().mean().item(),
             "Commands/velocity_transition_time_fraction": self.transition_steps.item() / max(1, self.total_steps),
+            "Commands/standing_time_fraction": self.standing_steps.item() / max(1, self.total_steps),
+            "Commands/low_speed_time_fraction": self.low_speed_steps.item() / max(1, self.total_steps),
             "Performance/Dog/pitch_command_rmse_rad": math.sqrt(self.pitch_error_sq.item() / max(1, self.total_steps)),
             "Performance/Dog/roll_command_rmse_rad": math.sqrt(self.roll_error_sq.item() / max(1, self.total_steps)),
         }
@@ -175,7 +192,7 @@ class CoordinationCommands:
             result[f"Commands/{name}_planned_window_s"] = self.window_steps[:, index].float().mean().item() * self.dt
             result[f"Commands/{name}_change_l2_mean"] = self.change_sum[index].item() / count
         self.total_steps = 0
-        for value in (self.transition_steps, self.duration_sum, self.window_count, self.change_sum,
+        for value in (self.transition_steps, self.standing_steps, self.low_speed_steps, self.duration_sum, self.window_count, self.change_sum,
                       self.pitch_error_sq, self.roll_error_sq):
             value.zero_()
         return result

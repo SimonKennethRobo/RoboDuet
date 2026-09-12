@@ -15,7 +15,7 @@ from go1_gym.utils import global_switch, set_seed
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--experiment", choices=list("ABCDEF"), default="C")
+    parser.add_argument("--experiment", default="C")
     parser.add_argument("--experiment_config", default=None)
     parser.add_argument("--num_envs", type=int, default=64)
     parser.add_argument("--steps", type=int, default=600)

@@ -29,6 +29,7 @@ from go1_gym.utils.math_utils import get_scale_shift, quat_apply_yaw
 from go1_gym.utils.terrain import Terrain
 from go1_gym.utils.height_sampling import sample_triangle_heights
 from go1_gym.envs.roboduet.robustness import FixedResetMixture, RobustnessMetrics
+from go1_gym.envs.roboduet.numerical_safety import quarantine_physics
 
 from go1_gym.envs.config.domain_randomization import resolve_domain_randomization
 
@@ -70,6 +71,10 @@ class LeggedRobot(BaseTask):
             self.set_camera(self.cfg.viewer.pos, self.cfg.viewer.lookat)
 
         self._init_buffers()
+        self.numerical_fault_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.numerical_fault_count = 0
+        self.numerical_fault_dumps = 0
+        self.numerical_fault_active = False
 
         self._prepare_reward_function()
         self.init_done = True
@@ -361,6 +366,8 @@ class LeggedRobot(BaseTask):
         self.gym.refresh_actor_root_state_tensor(self.sim)
         self.gym.refresh_net_contact_force_tensor(self.sim)
         self.gym.refresh_rigid_body_state_tensor(self.sim)
+        if getattr(self.cfg.env, 'quarantine_invalid_physics', False):
+            quarantine_physics(self)
         self.episode_length_buf += 1
         self.common_step_counter += 1
 
@@ -473,6 +480,8 @@ class LeggedRobot(BaseTask):
 
         self._arm_check_termination_hook()
         self.reset_buf |= self.reverse_buf
+        self.reset_buf |= self.numerical_fault_mask
+        self.time_out_buf &= ~self.numerical_fault_mask
 
     def reset_idx(self, env_ids):
         if len(env_ids) == 0:
@@ -856,6 +865,8 @@ class LeggedRobot(BaseTask):
                 continue
 
             rew = self.reward_functions[i]() * reward_scales[name]
+            if self.numerical_fault_active:
+                rew = torch.where(self.numerical_fault_mask, 0.0, rew)
 
             if name in ["vis_manip_commands_tracking_lpy", "vis_manip_commands_tracking_rpy"]:
                 self.episode_sums[name] += rew
@@ -902,6 +913,9 @@ class LeggedRobot(BaseTask):
                 self.episode_sums["termination"] += rew
                 self.command_sums["termination"] += rew
 
+        if self.numerical_fault_active:
+            self.rew_buf_dog[self.numerical_fault_mask] = 0
+            self.rew_buf_arm[self.numerical_fault_mask] = 0
         self.episode_sums["total"] += self.rew_buf_dog + self.rew_buf_arm
 
         self.command_sums["lin_vel_raw"] += self.base_lin_vel[:, 0]
@@ -1188,6 +1202,10 @@ class LeggedRobot(BaseTask):
 
     def _update_performance_metrics(self):
         """Accumulate one simulator-step sample in physical units, without reward functions or scales."""
+        rejected = {}
+        if self.numerical_fault_active:
+            rejected = {key: value[self.numerical_fault_mask].clone()
+                        for key, value in self.performance_metric_sums.items()}
         lin_vel_error = self.base_lin_vel[:, :2] - self.commands_dog[:, :2]
         yaw_rate_error = self.base_ang_vel[:, 2] - self.commands_dog[:, 2]
         if self.robustness_metrics is not None:
@@ -1200,6 +1218,7 @@ class LeggedRobot(BaseTask):
                 torch.cat((lin_vel_error[:n], yaw_rate_error[:n, None]), dim=1),
                 self.robustness_age_steps[:n], self.reset_buf[:n], self.time_out_buf[:n],
                 height_failure, orientation_failure, self.robustness_push_mask[:n],
+                valid=~self.numerical_fault_mask[:n] if self.numerical_fault_active else None,
             )
         sums = self.performance_metric_sums
         sums["vx_abs_error"] += torch.abs(lin_vel_error[:, 0])
@@ -1231,6 +1250,8 @@ class LeggedRobot(BaseTask):
         sums["foot_contact_samples"] += torch.sum(foot_contact, dim=-1).float()
         sums["locomotion_power_sum"] += self.step_locomotion_power
         self._arm_update_performance_metrics_hook()
+        for key, value in rejected.items():
+            self.performance_metric_sums[key][self.numerical_fault_mask] = value
 
     @staticmethod
     def _mean_valid_metric(values, valid):
@@ -1821,6 +1842,8 @@ class LeggedRobot(BaseTask):
     def _push_robots(self, env_ids, cfg):
         """Random pushes the robots. Emulates an impulse by setting a randomized base velocity."""
         self.robustness_push_mask.zero_()
+        if self.numerical_fault_active:
+            env_ids = env_ids[~self.numerical_fault_mask[env_ids]]
         if cfg.domain_rand.push_robots:
             push_env_ids = env_ids[self.episode_length_buf[env_ids] >= self.next_push_step[env_ids]]
             if len(push_env_ids) == 0:

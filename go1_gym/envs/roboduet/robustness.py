@@ -51,9 +51,11 @@ class RobustnessMetrics:
         self.counts = torch.zeros(3, len(self.events), device=hard.device)
         self.tilt_sums = torch.zeros(3, 3, device=hard.device)  # count, actual tilt, sampled limit
 
-    def update(self, error, steps, done, timeout, height_failure, orientation_failure, pushed):
+    def update(self, error, steps, done, timeout, height_failure, orientation_failure, pushed, valid=None):
         early = steps <= self.early_steps
         features = torch.cat((error.abs(), error.square(), torch.ones_like(error[:, :1])), dim=1)
+        if valid is not None:
+            features = torch.where(valid[:, None], features, 0.0)
         for i, age in enumerate((torch.ones_like(early), early, ~early)):
             self.sums[:, i] += self.weights @ (features * age[:, None])
         failed = done & ~timeout

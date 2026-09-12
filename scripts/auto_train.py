@@ -14,6 +14,7 @@ from go1_gym.envs.config.domain_randomization import DOMAIN_RAND_MODES, domain_r
 from go1_gym import MINI_GYM_ROOT_DIR
 from go1_gym.envs.config import ARM_ACTION_MODES, build_roboduet_config, cfg_to_dict, restore_dog_observation_layout
 from go1_gym.envs.config.coordination import read_experiment
+from go1_gym.envs.config.finetune import validate_finetune
 from go1_gym.envs.roboduet.utils import StageSchedule, apply_wbc_reward_settings
 from go1_gym.envs.roboduet.wbc_env import WBCEnv
 from go1_gym.envs.roboduet.wbc_env_wrapper import HistoryWrapper
@@ -98,14 +99,17 @@ def _cfg_snapshot_with_command_limits(cfg):
 
 
 def configure_train_stage(args, cfg):
+    initial_iteration = getattr(args, 'stage1_finetune_iteration', 0)
     schedule = StageSchedule(
         args.train_stage,
-        args.num_learning_iterations,
+        args.num_learning_iterations + initial_iteration,
         default_switch_iteration=2000 if args.resume else 8000,
         stage1_arm_ramp_iterations=cfg.env.stage1_arm_ramp_iterations,
         debug=args.debug,
     )
     schedule.configure(global_switch)
+    if initial_iteration:
+        global_switch.count = global_switch.stage1_count = initial_iteration
 
     if args.debug:
         RunnerArgs.save_interval = 2
@@ -133,6 +137,12 @@ def main(args):
     args.tags.append(f"seed{args.seed}")
 
     cfg = build_roboduet_config(args, debug=args.debug)
+    args.stage1_finetune_iteration = 0
+    if args.stage1_finetune_ckpt_path:
+        provenance = validate_finetune(cfg, args.stage1_finetune_ckpt_path)
+        args.stage1_finetune_iteration = provenance['source_iteration']
+        cfg.coordination_experiment['finetune'] = provenance
+        print(f'[fine-tune] {provenance}; fresh PPO optimizer and sampled environments', flush=True)
     print(f"[domain rand] training mode: {domain_randomization_mode(cfg)}", flush=True)
     if cfg.terrain.reset_mode == "fixed_mixture":
         print("[reset mixture] " + str({k: v for k, v in cfg_to_dict(cfg.terrain).items()
@@ -166,7 +176,9 @@ def main(args):
               f"arm mixture={cfg.env.coordination_arm.fractions}", flush=True)
 
     stage2_freeze_loco_policy = not args.stage2_unfreeze_loco_policy
-    DogRunnerArgs.ckpt_path = args.stage1_ckpt_path
+    DogRunnerArgs.ckpt_path = args.stage1_finetune_ckpt_path or args.stage1_ckpt_path
+    if args.stage1_finetune_ckpt_path:
+        stage2_freeze_loco_policy = False
     if args.train_stage != "stage1" and DogRunnerArgs.ckpt_path is None and stage2_freeze_loco_policy:
         if stage2_freeze_loco_policy:
             print(
@@ -175,7 +187,8 @@ def main(args):
                 flush=True,
             )
         stage2_freeze_loco_policy = False
-    apply_dog_checkpoint_command_limits(cfg, DogRunnerArgs.ckpt_path)
+    if not args.stage1_finetune_ckpt_path:
+        apply_dog_checkpoint_command_limits(cfg, DogRunnerArgs.ckpt_path)
     DogRunnerArgs.stage2_freeze_loco_policy = stage2_freeze_loco_policy
     DogRunnerArgs.stage2_loco_learning_rate = args.stage2_loco_learning_rate
     ArmRunnerArgs.ckpt_path = args.stage2_ckpt_path
@@ -307,10 +320,12 @@ def main(args):
         graphics_device_id=args.graphics_device_id,
     )
     env = HistoryWrapper(env)
+    env.env.numerical_fault_log_dir = osp.join(args.log_dir, 'numerical_faults')
     gpu_id = args.sim_device.split(":")[-1]
     runner = Runner(
         env, device=f"cuda:{gpu_id}", run_name=args.run_name, resume=args.resume, log_dir=args.log_dir, debug=args.debug
     )
+    runner.current_learning_iteration = args.stage1_finetune_iteration
     runner.learn(
         num_learning_iterations=args.num_learning_iterations, init_at_random_ep_len=True, eval_freq=args.eval_freq
     )
@@ -337,7 +352,7 @@ def parse_args(argv=None):
                         help="Disable video even if a launcher supplies --video; headless runs also disable graphics")
 
     parser.add_argument("--num_envs", type=int, default=None)
-    parser.add_argument("--experiment", choices=list("ABCDEF"), default=None,
+    parser.add_argument("--experiment", default=None,
                         help="Opt-in Stage-1 coordination recipe from configs/coordination_6gpu.json")
     parser.add_argument("--experiment_config", default=None, help="Alternate coordination JSON tuning file")
     parser.add_argument("--save_interval", type=int, default=None)
@@ -355,6 +370,8 @@ def parse_args(argv=None):
     stage2_loco_group.add_argument("--stage2_unfreeze_loco_policy", action="store_true", default=False)
     parser.add_argument("--stage2_loco_learning_rate", type=float, default=None)
     parser.add_argument("--stage1_ckpt_path", type=str, default=None)
+    parser.add_argument("--stage1_finetune_ckpt_path", default=None,
+                        help="Weight-only fine-tuning from a numbered corrected-RPY Stage-1 checkpoint; fresh optimizer")
     parser.add_argument("--stage2_ckpt_path", type=str, default=None)
 
     parser.add_argument("--dyna_gait", action="store_true", default=False)
@@ -409,6 +426,9 @@ def parse_args(argv=None):
     )
 
     args = parser.parse_args(argv)
+    if args.stage1_finetune_ckpt_path and (args.train_stage != 'stage1' or not args.experiment or
+                                         args.resume or args.stage1_ckpt_path or args.stage2_ckpt_path):
+        parser.error('Stage-1 fine-tuning requires --train_stage stage1 --experiment and no resume/other checkpoints')
     defaults = dict(seed=-1, num_envs=4096, num_learning_iterations=100000,
                     num_steps_per_env=RunnerArgs.num_steps_per_env, num_mini_batches=PPO_Args.num_mini_batches,
                     save_interval=RunnerArgs.save_interval, learning_rate=PPO_Args.learning_rate,

@@ -11,6 +11,9 @@ TRAINING_KEYS = {"seed", "num_envs", "num_learning_iterations", "num_steps_per_e
 # Defaults preserve existing training and old checkpoint behavior.
 DEFAULTS = {
     "coordination_experiment": {},
+    "env.quarantine_invalid_physics": False,
+    "env.numerical_max_root_speed": 100.0,
+    "env.numerical_max_dof_speed": 1000.0,
     "rewards.attitude_command_convention": "legacy",
     "commands.coordination.enabled": False,
     "commands.coordination.velocity_schedule": [[0, 10.0], [8000, 10.0], [16000, 8.0], [24000, 6.0]],
@@ -21,6 +24,8 @@ DEFAULTS = {
     "commands.coordination.short_start_iteration": 20000,
     "commands.coordination.short_range_s": [3.0, 4.0],
     "commands.coordination.standing_probability": 0.1,
+    "commands.coordination.low_speed_probability": 0.0,
+    "commands.coordination.low_speed_ranges": [[-0.3, 0.3], [-0.2, 0.2], [-0.4, 0.4]],
     "commands.coordination.transition_window_s": 1.0,
     "env.coordination_arm.enabled": False,
     "env.coordination_arm.fractions": [0.7, 0.2, 0.1],
@@ -93,6 +98,13 @@ def validate_coordination(cfg):
                 raise ValueError(f"invalid {key}")
         if not 0 <= c.short_fraction <= 1 or not 0 <= c.standing_probability <= 1:
             raise ValueError("command fractions must be in [0, 1]")
+        if not 0 <= c.low_speed_probability <= 1 - c.standing_probability:
+            raise ValueError("low-speed and standing probabilities must sum to at most one")
+        if len(c.low_speed_ranges) != 3:
+            raise ValueError("low_speed_ranges needs vx, vy, yaw ranges")
+        for (lo, hi), (limit_lo, limit_hi) in zip(c.low_speed_ranges, (cfg.commands.limit_vel_x, cfg.commands.limit_vel_y, cfg.commands.limit_vel_yaw)):
+            if not (math.isfinite(lo) and math.isfinite(hi) and lo <= hi) or (c.low_speed_probability > 0 and not limit_lo <= lo <= hi <= limit_hi):
+                raise ValueError("low_speed_ranges must be finite and within command limits")
         if c.short_start_iteration < 0 or c.transition_window_s <= 0:
             raise ValueError("invalid command timing")
         if not cfg.commands.use_dynamic_gait or cfg.commands.limit_gait_frequency[0] <= 0:

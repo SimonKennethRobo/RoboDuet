@@ -126,6 +126,23 @@ def test_moving_frequency_restored_after_stand_without_gait_resampling():
         assert (env.commands_dog[moving, 6] >= 2).all()
 
 
+def test_demo_finetune_low_speed_mixture_preserves_full_command_support():
+    cfg = build_roboduet_config(Namespace(num_envs=10000, robot='go2_x5', train_stage='stage1',
+        dyna_gait=True, experiment='G', experiment_config='configs/coordination_demo_finetune.json'))
+    sampler = CoordinationCommands(cfg, 10000, 'cpu', .02)
+    env = make_env(cfg)
+    torch.manual_seed(11)
+    sampler.reset(env, torch.arange(10000), 20000)
+    moving = torch.norm(env.commands_dog[:, :3], dim=1) >= .1
+    bounds = torch.tensor(cfg.commands.coordination.low_speed_ranges)
+    low = ((env.commands_dog[:, :3] >= bounds[:, 0]) & (env.commands_dog[:, :3] <= bounds[:, 1])).all(dim=1)
+    assert .28 < (~moving).float().mean() < .34
+    assert .26 < (low & moving).float().mean() < .33
+    assert .36 < (~low & moving).float().mean() < .44
+    assert env.commands_dog[:, 0].abs().max() > 1.0
+    assert (env.commands_dog[~moving, 6] == 0).all()
+
+
 def arm_env(cfg):
     env = make_env(cfg)
     n = cfg.env.num_envs
