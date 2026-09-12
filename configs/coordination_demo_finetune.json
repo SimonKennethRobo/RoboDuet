@@ -203,7 +203,7 @@
       }
     },
     "H": {
-      "description": "B20k fine-tune: sustained wide arm motion with outdoor observation latency",
+      "description": "F20k fine-tune: sustained wide arm motion with outdoor observation latency",
       "overrides": {
         "env.coordination_arm.fractions": [
           0.85,
