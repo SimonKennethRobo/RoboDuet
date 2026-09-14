@@ -179,6 +179,7 @@ def run_qm_control(args) -> tuple[Path, list[dict]]:
 
     output_root = Path(args.output).resolve()
     output_root.mkdir(parents=True, exist_ok=True)
+    existing_outputs = {path.resolve() for path in output_root.iterdir() if path.is_dir()}
     command = [
         str(python), "-m", "benchmark.aligned_cli",
         "--roboduet-root", str(roboduet_root),
@@ -199,7 +200,10 @@ def run_qm_control(args) -> tuple[Path, list[dict]]:
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         timeout=args.timeout_s, check=False,
     )
-    candidates = [path for path in output_root.iterdir() if path.is_dir()]
+    candidates = [
+        path for path in output_root.iterdir()
+        if path.is_dir() and path.resolve() not in existing_outputs
+    ]
     if not candidates:
         raise RuntimeError("qm_control adapter produced no output directory\n" + completed.stdout)
     output = max(candidates, key=lambda path: path.stat().st_mtime_ns)

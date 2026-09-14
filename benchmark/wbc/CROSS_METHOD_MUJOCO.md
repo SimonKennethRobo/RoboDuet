@@ -40,3 +40,22 @@ contract as `run_qm_control`: consume `--suite`/`--task-id`, execute the common
 plant with method-native controller state, retain failures, and return a
 timestamped directory containing per-scenario trace-v3 and receipts. Add the
 method name to `METHODS`; do not add a new task generator or scorer.
+
+## First measured run
+
+Commit `c64d844` produced the complete nominal/push run at
+`benchmark/results/cross_method_mujoco/qm_control/20260915_035637`. Both
+scenarios recorded 911 valid 20 ms samples and exited cleanly without a fall or
+numerical fault. The push replay applied the requested `[8, 0, 0] N s` impulse
+over 41 physics steps.
+
+| scenario | success | end reason | EE position RMSE | EE rotation RMSE | final progress |
+| --- | --- | --- | ---: | ---: | ---: |
+| nominal | false | timeout | 0.12620 m | 0.73273 rad | 0.73595 |
+| push | false | timeout | 0.12615 m | 0.73271 rad | 0.73582 |
+
+This validates the method integration and failure-preserving result path. It
+does not establish task success: both runs missed the endpoint, tracking-tube,
+and hold criteria. qm_control does not expose policy actions, position targets,
+reach-model utilisation, base feedforward, or the runner's Jacobian/IK
+diagnostics, so those fields remain explicitly not-applicable or unavailable.
