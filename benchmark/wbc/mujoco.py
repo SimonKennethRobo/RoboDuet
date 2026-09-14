@@ -262,6 +262,35 @@ def _push_force_at(events, time_s: float) -> np.ndarray:
     return force
 
 
+def _foot_observation(model, data) -> tuple[np.ndarray, np.ndarray]:
+    """Return world linear velocity and contact load for FL, FR, RL, RR."""
+    names = ("FL", "FR", "RL", "RR")
+    body_ids = [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, f"{name}_foot") for name in names]
+    geom_ids = [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, name) for name in names]
+    if min(body_ids + geom_ids) < 0:
+        raise ValueError("MJCF must expose FL/FR/RL/RR foot bodies and geoms")
+    velocity = np.zeros((4, 3), dtype=np.float64)
+    for row, body in enumerate(body_ids):
+        spatial = np.zeros(6, dtype=np.float64)
+        mujoco.mj_objectVelocity(model, data, mujoco.mjtObj.mjOBJ_BODY, body, spatial, 0)
+        velocity[row] = spatial[3:]
+    force = np.zeros((4, 3), dtype=np.float64)
+    lookup = {geom: row for row, geom in enumerate(geom_ids)}
+    for index in range(data.ncon):
+        contact = data.contact[index]
+        rows = {lookup[geom] for geom in (int(contact.geom1), int(contact.geom2)) if geom in lookup}
+        if not rows:
+            continue
+        local = np.zeros(6, dtype=np.float64)
+        mujoco.mj_contactForce(model, data, index, local)
+        # The scorer needs normal support load; keep it positive independent of
+        # whether the foot is geom1 or geom2 in MuJoCo's contact pair.
+        vertical_load = abs(float(local[0] * contact.frame[2]))
+        for row in rows:
+            force[row, 2] += vertical_load
+    return velocity, force
+
+
 def _set_mpc_dog_command(sim, command: dict) -> np.ndarray:
     """Apply the physical OCS2 command at rl_sar's six-command boundary."""
     velocity = np.asarray(command["base_velocity_body"], dtype=np.float64).copy()
@@ -523,6 +552,7 @@ def run(args) -> Tuple[Path, dict]:
         q, dq, quat, gyro, base_pos, lin_vel = sim.read_state()
         actual_position = sim.data.site_xpos[site].copy()
         actual_quaternion = _quat_xyzw_from_matrix(sim.data.site_xmat[site].reshape(3, 3))
+        foot_velocity, foot_force = _foot_observation(sim.model, sim.data)
         spatial_velocity = np.zeros(6, dtype=np.float64)
         mujoco.mj_objectVelocity(sim.model, sim.data, mujoco.mjtObj.mjOBJ_SITE, site, spatial_velocity, 0)
         measured_arc, lateral_error = _forward_project(
@@ -584,6 +614,12 @@ def run(args) -> Tuple[Path, dict]:
         )
         trace.setdefault("benchmark_push_force_world_n", []).append(
             applied_push_force[None].astype(np.float32)
+        )
+        trace.setdefault("foot_linear_velocity_mps", []).append(
+            foot_velocity[None].astype(np.float32)
+        )
+        trace.setdefault("foot_contact_force_n", []).append(
+            foot_force[None].astype(np.float32)
         )
         executed_path.append(actual_position.copy())
         if viewer is not None:
