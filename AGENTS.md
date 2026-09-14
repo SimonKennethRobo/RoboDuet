@@ -460,6 +460,41 @@ Reward scale signs matter.
 - “Active reward scale” means the runtime scale after curriculum/global-switch logic, not necessarily the raw class default in config.
 - Reset randomization curricula for root `z`, roll, pitch, and yaw should be justified by locomotion tracking progress. If instability is actually caused by collisions or play-time config mismatch, prefer the smaller targeted fix over adding curriculum complexity.
 
+## WBC Benchmark (`benchmark/wbc/`)
+
+Stage-2 SE(3) trajectory-tracking evaluation, integrated into the benchmark
+pipeline (reuses the Accumulator, per-policy env slicing, HTML reports, and
+comparison tool from `benchmark/`).
+
+```bash
+python -m benchmark.cli --wbc --logdirs runs/<date>/<run> --headless
+python -m benchmark.cli --wbc --logdirs runs/A runs/B --names v1 v2 --headless
+```
+
+Sweeps all 36 curriculum cells (6x6 grid), accumulating per-cell metrics:
+EE tracking error, d_lat, timing, rho, base utilisation, motor power, and
+finite-difference acceleration/jerk (EE, base, arm joints).
+
+Writes `results.json`, `metadata.json` and an HTML report to
+`benchmark/results/<timestamp>/`.
+
+### Key things
+
+- **Held-out means `bank_seed`.** The trajectory bank is deterministic at env
+  construction, so training's seed (0) reproduces training trajectories.
+  `bank_seed` defaults to 12345.
+- **`WBCAccumulator` stores velocity time series** for offline
+  finite-difference smoothness computation — acceleration/jerk are
+  single-step derivatives and can't be accumulated per-step.
+- **`wbc_eval_loop` batches policies correctly**: arm inference for all
+  handles → `plan()` once → dog inference for all handles → `step()` once.
+  Per-policy stepping would silently overwrite `plan()`'s env-wide
+  `commands_dog` writes.
+- **`WBCEnv.load_custom_trajectories`** is the eval-side injection point
+  (probe trajectories). It routes through the same `_place_and_reset_trajectories`
+  the bank path uses, so probe `s` / `d_lat` / `timing_err` are comparable to
+  training episodes.
+
 ## Debug Checklist
 
 Related skills: isaac-skill

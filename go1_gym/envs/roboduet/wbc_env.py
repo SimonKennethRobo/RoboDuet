@@ -44,7 +44,10 @@ dog_cmd_idx = {
     "gait_params": slice(6, 11),
 }
 
-goal_plan_channel_names = ("vx", "vy", "yaw", "height", "pitch", "roll", "gait_freq", "stance_width", "stance_length")
+goal_plan_channel_names = (
+    "vx", "vy", "yaw", "height", "pitch", "roll",
+    "gait_freq", "stance_width", "stance_length",
+)
 
 
 class WBCEnv(LeggedRobot):
@@ -529,6 +532,7 @@ class WBCEnv(LeggedRobot):
 
         fixed_commands = {
             dog_cmd_idx["footswing_height"]: self.cfg.wbc.goal_reaching.fixed_footswing_height,
+            dog_cmd_idx["gait_duration"]: 0.49,
         }
         for index, value in fixed_commands.items():
             self.goal_command_targets[:, index] = value
@@ -760,12 +764,14 @@ class WBCEnv(LeggedRobot):
         if self.num_plan_actions not in (0, 6, 9):
             raise ValueError(
                 "Upper policy must use either the legacy 6D arm layout or the "
-                f"12D (6-plan) or 15D (9-plan) goal-reaching layout; got {self.cfg.arm.num_actions_arm_cd} actions"
+                f"12D (6-plan) or 15D (9-plan) goal-reaching layout; got "
+                f"{self.cfg.arm.num_actions_arm_cd} actions"
             )
         if self.num_plan_actions:
             channel_cfg = getattr(self.cfg.wbc.goal_reaching, "command_channels", None)
             self.goal_command_channel_enabled = tuple(
-                bool(getattr(channel_cfg, name, True)) for name in goal_plan_channel_names
+                bool(getattr(channel_cfg, name, True))
+                for name in goal_plan_channel_names[:self.num_plan_actions]
             )
             self.goal_command_channel_mask = torch.tensor(
                 self.goal_command_channel_enabled,
@@ -1011,7 +1017,7 @@ class WBCEnv(LeggedRobot):
         self.traj_bank = TrajectoryBank(
             self.traj_curriculum, per_cell=int(tcfg.bank_per_cell),
             max_gamma_points=self._traj_max_g, max_tl_points=self._traj_max_t,
-            device=self.device,
+            device=self.device, seed=int(getattr(tcfg, "bank_seed", 0)),
         )
         self.traj_batch = TrajectoryBatch(
             self.num_envs, self._traj_max_g, self._traj_max_t, device=self.device
@@ -1391,32 +1397,36 @@ class WBCEnv(LeggedRobot):
             self.traj_curriculum.rng,
         )
         self.traj_batch.load_from_stacked(env_ids, self.traj_bank.batch, rows)
+        self._place_and_reset_trajectories(env_ids)
 
-        # Anchor the origin-centered path in front of the shoulder (world axes
-        # -- the base yaws to follow via v_ff). anchor_offset_body supplies the
-        # DIRECTION; the distance along it is rho_star * R_max(that direction),
-        # so the path starts exactly at the comfortable stand-off the base
-        # feedforward will try to hold. Deriving it instead of trusting the
-        # configured length keeps the anchor consistent with whichever reach
-        # model is live -- with the M2 table the comfortable forward distance
-        # (~0.44 m on go2_x5) is not the sphere's 0.6*0.6 = 0.36 m, and an
-        # anchor at the wrong radius makes v_ff back the base away from the
-        # path on the very first step.
-        n = len(env_ids)
-        sh_pos, sh_quat = self._shoulder_frame()
-        sh_pos, sh_quat = sh_pos[env_ids], sh_quat[env_ids]
-        dir_body = torch.nn.functional.normalize(self._traj_anchor_offset, dim=-1).expand(n, -1)
-        dir_world = quat_apply(self.base_quat[env_ids], dir_body)
-        if self.reach_table is None:
-            r_max = torch.full((n,), float(self.cfg.wbc.goal_reaching.reach_radius), device=self.device)
-        else:
-            u_sh = quat_apply(quat_conjugate(sh_quat), dir_world)
-            r_max = self.reach_table.query(u_sh).clamp_min(1e-3)
-        distance = float(self.cfg.wbc.goal_reaching.rho_star) * r_max
-        anchor = sh_pos + dir_world * distance.unsqueeze(-1)
-        self.traj_batch.gamma_p[env_ids] += anchor.unsqueeze(1)
+    def load_custom_trajectories(self, env_ids, gammas, time_laws, offset=None):
+        """Load caller-supplied (Gamma, TimeLaw) pairs instead of bank rows.
 
-        # clear per-env progress state + episode accumulators
+        This is the eval-side entry point (benchmark/wbc/): a probe trajectory --
+        a single-axis sinusoid for the bandwidth sweep, a straight reach for
+        the workspace scan -- is not something the curriculum bank contains,
+        but it has to go through exactly the same placement and progress-state
+        reset the training path uses or its s / d_lat / timing numbers are not
+        comparable to a training episode's.
+
+        ``offset`` (len(env_ids), 3) overrides the default reach-derived
+        stand-off anchor with an explicit world translation, for probes that
+        need to land on a specific point rather than the comfortable one.
+        """
+        if len(env_ids) == 0:
+            return
+        env_ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
+        self.traj_batch.load(env_ids.tolist(), gammas, time_laws)
+        self._place_and_reset_trajectories(env_ids, offset=offset)
+
+    def _place_and_reset_trajectories(self, env_ids, offset=None):
+        """Translate the freshly loaded origin-centered paths into the world
+        and clear the per-env progress state + episode accumulators."""
+        env_ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
+        if offset is None:
+            offset = self._default_trajectory_anchor(env_ids)
+        self.traj_batch.gamma_p[env_ids] += offset.unsqueeze(1)
+
         for buf in (
             self.traj_s, self.traj_s_prev, self.traj_sim_time, self.traj_d_lat,
             self.traj_sdot_meas, self.traj_sdot_ref, self.traj_timing_err,
@@ -1432,6 +1442,32 @@ class WBCEnv(LeggedRobot):
             self.traj_motor_power_sum, self.traj_manipulability_sum,
         ):
             buf[env_ids] = 0.0
+
+    def _default_trajectory_anchor(self, env_ids):
+        """World translation that puts an origin-centered path in front of the
+        shoulder (world axes -- the base yaws to follow via v_ff).
+
+        anchor_offset_body supplies the DIRECTION; the distance along it is
+        rho_star * R_max(that direction), so the path starts exactly at the
+        comfortable stand-off the base feedforward will try to hold. Deriving
+        it instead of trusting the configured length keeps the anchor
+        consistent with whichever reach model is live -- with the M2 table the
+        comfortable forward distance (~0.44 m on go2_x5) is not the sphere's
+        0.6*0.6 = 0.36 m, and an anchor at the wrong radius makes v_ff back the
+        base away from the path on the very first step.
+        """
+        n = len(env_ids)
+        sh_pos, sh_quat = self._shoulder_frame()
+        sh_pos, sh_quat = sh_pos[env_ids], sh_quat[env_ids]
+        dir_body = torch.nn.functional.normalize(self._traj_anchor_offset, dim=-1).expand(n, -1)
+        dir_world = quat_apply(self.base_quat[env_ids], dir_body)
+        if self.reach_table is None:
+            r_max = torch.full((n,), float(self.cfg.wbc.goal_reaching.reach_radius), device=self.device)
+        else:
+            u_sh = quat_apply(quat_conjugate(sh_quat), dir_world)
+            r_max = self.reach_table.query(u_sh).clamp_min(1e-3)
+        distance = float(self.cfg.wbc.goal_reaching.rho_star) * r_max
+        return sh_pos + dir_world * distance.unsqueeze(-1)
 
     def _randomize_arm_dof_props(self, env_ids):
         """Override arm DOF slice in Kp/Kd/strength/offset buffers with stage-specific ranges."""
@@ -2172,7 +2208,26 @@ class WBCEnv(LeggedRobot):
             return
         for i in range(len(px) - 1):
             if valid[i] and valid[i + 1]:
-                cv2.line(frame, tuple(px[i]), tuple(px[i + 1]), (60, 180, 255, 255), 1, cv2.LINE_AA)
+                cv2.line(frame, tuple(px[i]), tuple(px[i + 1]), (255, 150, 40, 255), 1, cv2.LINE_AA)
+
+        trace = getattr(self, "_recording_ee_trace", None)
+        if trace is not None:
+            trace.append(
+                self.end_effector_state[env_id, :3].detach().cpu().numpy().astype(np.float32)
+            )
+            if len(trace) > 1200:
+                del trace[:-1200]
+            if len(trace) >= 2:
+                trace_np = np.asarray(trace, dtype=np.float32)
+                pxe, ve = self._project_world_points_to_camera(
+                    trace_np, env_handle, camera_handle
+                )
+                for i in range(len(pxe) - 1):
+                    if ve[i] and ve[i + 1]:
+                        cv2.line(
+                            frame, tuple(pxe[i]), tuple(pxe[i + 1]),
+                            (30, 255, 80, 255), 2, cv2.LINE_AA,
+                        )
 
         tcfg = self.cfg.wbc.goal_reaching.trajectory
         _, p_k, _, _ = tb.sample_preview(self.traj_s, float(tcfg.preview_horizon), int(tcfg.preview_points))
@@ -2180,14 +2235,17 @@ class WBCEnv(LeggedRobot):
         pxk, vk = self._project_world_points_to_camera(pk_np, env_handle, camera_handle)
         for i in range(len(pxk)):
             if vk[i]:
-                cv2.circle(frame, tuple(pxk[i]), 3, (0, 200, 255, 255), -1, cv2.LINE_AA)
+                cv2.circle(frame, tuple(pxk[i]), 3, (255, 190, 0, 255), -1, cv2.LINE_AA)
 
     def _arm_render_overlay_hook(self, frame, env_id, env_handle, camera_handle):
         self._overlay_trajectory_video(frame, env_id, env_handle, camera_handle)
         self._overlay_policy_trajectory(frame, env_id, env_handle, camera_handle)
         if self.cfg.env.recording_overlay_text:
             self._overlay_policy_text(frame, env_id)
-
+            cv2.putText(
+                frame, "reference: orange   actual EE: green", (12, frame.shape[0] - 12),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 255, 255, 255), 1, cv2.LINE_AA,
+            )
 
     def _arm_jacobian(self):
         """(num_envs, 6, num_actions_arm) world-frame Jacobian of the EE body

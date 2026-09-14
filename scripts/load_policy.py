@@ -219,7 +219,10 @@ def _ensure_asset_file(cfg, robot=None, checkpoint_asset_file=None):
     print(f"[RoboDuet] checkpoint asset file was empty; using {robot} asset: {cfg.asset.file}")
 
 
-def load_dog_policy(logdir, ckpt_id, cfg):
+def load_dog_policy(logdir, ckpt_id, cfg, device="cpu"):
+    """Inference-only dog policy. ``device`` defaults to CPU (single-env play
+    never needs the GPU); batched evaluation passes the sim device so the
+    observations don't round-trip to host memory every step."""
     run_parameters = _load_run_parameters(logdir)
     ckpt_path = _checkpoint_path(logdir, "dog", ckpt_id)
     ckpt = torch.load(ckpt_path, map_location="cpu")
@@ -232,7 +235,7 @@ def load_dog_policy(logdir, ckpt_id, cfg):
             cfg.dog.dog_num_obs_history,
             cfg.dog.dog_actions,
             use_adaptation_module=structure["uses_adaptation"],
-        ).to("cpu")
+        ).to(device)
     _load_inference_state(actor_critic, ckpt, "dog")
     actor_critic.eval()
     adaptation_module = actor_critic.adaptation_module
@@ -240,7 +243,7 @@ def load_dog_policy(logdir, ckpt_id, cfg):
 
     def policy(obs, info=None):
         info = {} if info is None else info
-        history = obs["obs_history"].to("cpu")
+        history = obs["obs_history"].to(device)
         actor_input = (history,)
         if adaptation_module is not None:
             latent = adaptation_module(history)
@@ -251,7 +254,8 @@ def load_dog_policy(logdir, ckpt_id, cfg):
     return policy
 
 
-def load_arm_policy(logdir, ckpt_id, cfg):
+def load_arm_policy(logdir, ckpt_id, cfg, device="cpu"):
+    """Inference-only arm policy. See ``load_dog_policy`` on ``device``."""
     run_parameters = _load_run_parameters(logdir)
     ckpt_path = _checkpoint_path(logdir, "arm", ckpt_id)
     ckpt = torch.load(ckpt_path, map_location="cpu")
@@ -264,7 +268,7 @@ def load_arm_policy(logdir, ckpt_id, cfg):
             cfg.arm.arm_num_obs_history,
             cfg.arm.num_actions_arm_cd,
             use_adaptation_module=structure["uses_adaptation"],
-        ).to("cpu")
+        ).to(device)
     _load_inference_state(actor_critic, ckpt, "arm")
     actor_critic.eval()
     adaptation_module = actor_critic.adaptation_module
@@ -273,12 +277,12 @@ def load_arm_policy(logdir, ckpt_id, cfg):
 
     def policy(obs, info=None):
         info = {} if info is None else info
-        history = obs["obs_history"].to("cpu")
+        history = obs["obs_history"].to(device)
         hist = actor_his(history[..., :-cfg.arm.arm_num_observations])
-        actor_input = (obs["obs"].to("cpu"), hist)
+        actor_input = (obs["obs"].to(device), hist)
         if adaptation_module is not None:
             latent = adaptation_module(history)
-            actor_input = (obs["obs"].to("cpu"), latent, hist)
+            actor_input = (obs["obs"].to(device), latent, hist)
             info["latent"] = latent
         return body(torch.cat(actor_input, dim=-1))
 
