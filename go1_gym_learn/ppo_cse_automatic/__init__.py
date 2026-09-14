@@ -301,6 +301,8 @@ class Runner:
             self.env.num_envs, self.env.num_actions_arm, dtype=torch.float, device=self.device, requires_grad=False
         )
         for it in range(self.current_learning_iteration, tot_iter):
+            if self.alg_dog.numerical_guard is not None:
+                self.alg_dog.numerical_guard.iteration = it
             start = time.time()
             # Rollout
             with torch.inference_mode():

@@ -29,7 +29,7 @@ from go1_gym.utils.math_utils import get_scale_shift, quat_apply_yaw
 from go1_gym.utils.terrain import Terrain
 from go1_gym.utils.height_sampling import sample_triangle_heights
 from go1_gym.envs.roboduet.robustness import FixedResetMixture, RobustnessMetrics
-from go1_gym.envs.roboduet.numerical_safety import quarantine_physics
+from go1_gym.envs.roboduet.numerical_safety import quarantine_physics, record_physics_context
 
 from go1_gym.envs.config.domain_randomization import resolve_domain_randomization
 
@@ -229,6 +229,7 @@ class LeggedRobot(BaseTask):
         clip_actions = self.cfg.normalization.clip_actions
         self.actions = torch.clip(actions, -clip_actions, clip_actions).to(self.device)
         self._arm_pre_step_hook()
+        record_physics_context(self)
         # step physics and render each frame
         self.prev_base_pos = self.base_pos.clone()
         self.prev_base_quat = self.base_quat.clone()

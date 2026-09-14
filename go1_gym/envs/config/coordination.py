@@ -14,6 +14,8 @@ DEFAULTS = {
     "env.quarantine_invalid_physics": False,
     "env.numerical_max_root_speed": 100.0,
     "env.numerical_max_dof_speed": 1000.0,
+    "env.numerical_trace_steps": 0,
+    "env.guard_policy_numerics": False,
     "rewards.attitude_command_convention": "legacy",
     "commands.coordination.enabled": False,
     "commands.coordination.velocity_schedule": [[0, 10.0], [8000, 10.0], [16000, 8.0], [24000, 6.0]],
@@ -81,6 +83,8 @@ def configure_experiment(cfg, args):
 
 
 def validate_coordination(cfg):
+    if type(cfg.env.numerical_trace_steps) is not int or not 0 <= cfg.env.numerical_trace_steps <= 64:
+        raise ValueError("numerical_trace_steps must be an integer in [0, 64]")
     if cfg.rewards.attitude_command_convention not in ("legacy", "rpy"):
         raise ValueError("attitude_command_convention must be legacy or rpy")
     c, a = cfg.commands.coordination, cfg.env.coordination_arm

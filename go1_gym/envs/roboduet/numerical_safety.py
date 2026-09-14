@@ -5,8 +5,39 @@ single ordered DOF/root reset at the end of the step. Invalid transitions are
 terminal with zero task reward; valid environments are left untouched.
 """
 from pathlib import Path
+from collections import deque
 import torch
 from go1_gym.file_io import optional_output
+
+
+def physics_context(env, ids):
+    """Raw per-environment controller/reset context; performs no sim writes."""
+    fields = ('root_states', 'dof_pos', 'dof_vel', 'actions', 'torques',
+              'commands_dog', 'episode_length_buf', 'next_push_step',
+              'stage1_arm_target_offset', 'stage1_arm_target_vel')
+    return {key: getattr(env, key)[ids].detach().clone() for key in fields
+            if isinstance(getattr(env, key, None), torch.Tensor)}
+
+
+def record_physics_context(env):
+    count = getattr(env.cfg.env, 'numerical_trace_steps', 0)
+    if not count:
+        return
+    if not hasattr(env, '_numerical_trace'):
+        env._numerical_trace = deque(maxlen=count)
+    env._numerical_trace.append(dict(step=env.common_step_counter,
+                                    values=physics_context(env, slice(0, env.num_envs))))
+
+
+def fault_context(env, ids):
+    """Select only failed rows when transferring the short GPU trace to CPU."""
+    ids = ids[:8]
+    history = [dict(step=frame['step'], values={k: v[ids].cpu() for k, v in frame['values'].items()})
+               for frame in getattr(env, '_numerical_trace', ())]
+    return dict(step=env.common_step_counter, ids=ids.cpu(), history=history,
+                current={k: v.cpu() for k, v in physics_context(env, ids).items()},
+                dof_names=getattr(env, 'dof_names', None),
+                control_type=getattr(getattr(env.cfg, 'control', None), 'control_type', None))
 
 
 def quarantine_physics(env):
@@ -40,7 +71,8 @@ def quarantine_physics(env):
                             root=root[chosen].cpu(), dof_pos=env.dof_pos[chosen].cpu(),
                             dof_vel=env.dof_vel[chosen].cpu(), rigid=rigid[chosen].cpu(),
                             contacts=contacts[chosen].cpu(), actions=env.actions[chosen].cpu(),
-                            commands=env.commands_dog[chosen].cpu()),
+                            commands=env.commands_dog[chosen].cpu(),
+                            context=fault_context(env, chosen)),
                        path / f'fault-{env.numerical_fault_dumps}.pt')
         env.numerical_fault_dumps += 1
 

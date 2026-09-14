@@ -326,6 +326,16 @@ def main(args):
         env, device=f"cuda:{gpu_id}", run_name=args.run_name, resume=args.resume, log_dir=args.log_dir, debug=args.debug
     )
     runner.current_learning_iteration = args.stage1_finetune_iteration
+    if cfg.env.guard_policy_numerics:
+        from go1_gym_learn.ppo_cse_automatic.numerical_guard import NumericalGuard
+        from go1_gym.envs.roboduet.numerical_safety import fault_context
+        guard = NumericalGuard(runner.dog_model, runner.alg_dog.optimizer,
+                               osp.join(args.log_dir, 'numerical_faults'),
+                               context=lambda ids: fault_context(env.env, ids))
+        runner.alg_dog.numerical_guard = guard
+        runner.dog_model.numerical_guard = guard
+        guard.check_parameters()
+        print('[numerics] physics quarantine, policy/PPO checks and recent state trace enabled', flush=True)
     runner.learn(
         num_learning_iterations=args.num_learning_iterations, init_at_random_ep_len=True, eval_freq=args.eval_freq
     )
