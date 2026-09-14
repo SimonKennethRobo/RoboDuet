@@ -1,5 +1,8 @@
 # Benchmark Configs
 
+跨方法 MuJoCo 入口和 qm_control 接入见
+[`wbc/CROSS_METHOD_MUJOCO.md`](wbc/CROSS_METHOD_MUJOCO.md)。
+
 这个目录存放 benchmark 运行配置和长期保留的 candidate checkpoints。
 
 更长期的设计记录和后续计划见 [docs/benchmark_roadmap.md](../docs/benchmark_roadmap.md)。
