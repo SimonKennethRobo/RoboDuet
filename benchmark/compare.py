@@ -54,7 +54,12 @@ def _finite_values(rows: Iterable[dict], key: str) -> List[float]:
 
 
 def _metric_average(rows: Iterable[dict], metric: str) -> Optional[float]:
+    rows = list(rows)
     values = _finite_values(rows, metric)
+    if not values and metric == "completion_rate":
+        values = [float(bool(row["completed"])) for row in rows if "completed" in row]
+    if not values and metric == "fall_rate":
+        values = [float(bool(row["fall"])) for row in rows if "fall" in row]
     if not values:
         return None
     return mean(values)

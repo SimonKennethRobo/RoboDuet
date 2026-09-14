@@ -424,3 +424,23 @@ export PYTHONPATH="/home/simon/Projects/WBC/RoboDuet:${PYTHONPATH:-}"
 - 本仓库 `AGENTS.md`、`benchmark/README.md`、`docs/benchmark_roadmap.md`；部分旧说明与 M12 当前代码有差异，以实际契约为准。
 - [MuJoCo simulation loop](https://mujoco.readthedocs.io/en/3.6.0/programming/simulation.html#simulation-loop)：状态、派生量与控制调用时序。
 - [Whole-body end-effector pose tracking](https://arxiv.org/html/2409.16048v2)：工作空间和全身操作比较参考；该文明确操作策略本身不含 locomotion，接入时按任务能力分组。
+
+## 13. 2026-09-14 执行进展
+
+已建立 `integration/legged-manip-benchmark`。文档提交为 `c5da12a`，Frank 三提交链通过 merge commit `a59e73c` 接入；两个预期冲突已按当前 9D plan、固定 gait duration 和完整 trajectory/coordination accumulator reset 语义解决。
+
+P0 已完成当前快照复核。`rl_sar` 仍在 `53204ad`，用户的 `policy/go2_x5/base.yaml` 改动未触碰。检查时 GPU 0 上另有一个 4096-env IsaacLab 训练进程，因此这里只运行 1-env、20-control-step 的有界 IsaacGym smoke。
+
+P1 已开始，当前工作树实现了首轮正确性修复：
+
+- 公共开发版 timed-trajectory success 协议使用 3 cm、5 deg、80% tracking tube、99% progress 和 0.5 s endpoint hold；阈值仍明确标为 development，不是论文最终标准。
+- active NaN/Inf 记录为 numerical fault；inactive NaN 通过 `where` 排除；无有效样本输出 null，JSON 禁止 NaN/Inf。
+- reference hash 覆盖 `gamma_*`、`tl_t/tl_s/tl_sdot`、`L/T`；任务 ID 还覆盖同步后的物理初态、environment-local anchor、deadline、扰动表和 success 协议。`bank_seed != 0` 不再自动声明 held-out。
+- settle 改为候选无关的 zero-action 流程；同一任务的 root/DOF 初态按 env origin 平移后同步，目标 anchor 以 environment-local 坐标冻结；任务注入时立即刷新 t=0 reference 和相关诊断。
+- compare 从逐任务 `completed`/`fall` 布尔事件计算 rate；旧的 80%-progress-only 逻辑已移除。
+- body-frame base velocity 不再直接求导；arm/whole-body torque 在 mixed `M` 控制下不可观测时输出 null，避免把 arm position target 当 torque。当前功率仍明确标注为 control-step sample，物理子步能量积分留在 P2。
+- 每个 wave 写 partial results/suite/run-state，metadata 保存 strict JSON、resolved config、checkpoint/config hashes、命令和两个仓库的 source snapshot；完成的 suite 另存完整 `gamma_*` 与 `tl_*` 的 backend-neutral NPZ replay archive。
+
+CPU regression：`pytest -q benchmark/wbc/test_contracts.py` 为 5 passed；`python benchmark/ci/static_check.py` 通过。真实 loader 验证发现 `runs/2026-08-31/stage2_v3_trajtracking_refactor_131152` 的 arm checkpoint 与恢复后的 runtime layout 不兼容（checkpoint history 11859 / actor 329，runtime 3953 / 195），没有绕过。`runs/2026-08-05/stage2_v3_trajtracking_rl_e2e_gait_wo_postproc_192018` 的 90D dog、201D arm、15D arm-action pair 通过 loader。
+
+IsaacGym smoke receipt：`benchmark/results/integration_start_smoke/20260914_114904/`。命令使用 1 env、1 task、2 settle steps、20 eval steps；`run_state.json` 为 complete，任务 `timed-trajectory-32408c2cf0e33d3d` 无 numerical fault。它只证明当前集成路径能创建真实 simulator、加载 policy pair、执行并写严格结果；0/1 complete 在 0.4 s 人工短 deadline 下不是 policy 质量结论。

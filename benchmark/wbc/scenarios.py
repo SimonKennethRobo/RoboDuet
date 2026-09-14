@@ -6,13 +6,18 @@ from typing import Dict, List, Optional, Sequence
 
 import isaacgym  # noqa: F401 - must precede torch
 import torch
+from isaacgym import gymtorch
 
 from benchmark.wbc.evaluation import (
     WBCPolicyHandle,
-    _wbc_step_all,
     wbc_eval_loop,
 )
-from benchmark.wbc.suite import build_suite_manifest, validate_coverage
+from benchmark.wbc.suite import (
+    build_suite_manifest,
+    finalize_task_spec,
+    refresh_suite_hash,
+    validate_coverage,
+)
 from go1_gym.utils.global_switch import global_switch
 
 
@@ -36,6 +41,92 @@ def _validate_handles(base, handles):
     return n_per
 
 
+def _neutral_settle_step(env):
+    """Advance every slot with candidate-independent zero actions."""
+    base = env.env
+    if env.num_plan_actions > 0:
+        env.plan(torch.zeros(base.num_envs, env.num_plan_actions, device=base.device))
+    env.step(
+        torch.zeros(base.num_envs, base.num_actions_loco, device=base.device),
+        torch.zeros(base.num_envs, base.num_actions_arm, device=base.device),
+    )
+
+
+def _synchronize_paired_initial_states(base, handles, count: int):
+    """Copy one canonical physical state into every policy slice.
+
+    Root positions are translated by each environment origin; orientation,
+    twist, DOF position, and DOF velocity remain identical.  Simulator writes
+    follow the repository's required DOF-before-root order.
+    """
+    if count <= 0:
+        return
+    reference = torch.arange(handles[0].env_start, handles[0].env_start + count, device=base.device)
+    all_ids = []
+    ref_root = base.root_states[reference].clone()
+    ref_dof = base.dof_state[reference].clone()
+    for handle in handles:
+        target = torch.arange(handle.env_start, handle.env_start + count, device=base.device)
+        root = ref_root.clone()
+        root[:, :3] += base.env_origins[target] - base.env_origins[reference]
+        base.dof_state[target] = ref_dof
+        base.root_states[target] = root
+        all_ids.append(target)
+
+        for name in (
+            "actions",
+            "last_actions",
+            "last_last_actions",
+            "commands_dog",
+            "commands_arm",
+            "goal_command_targets",
+            "goal_command_smoothed",
+            "upper_plan_actions_raw",
+            "arm_policy_actions",
+        ):
+            value = getattr(base, name, None)
+            if torch.is_tensor(value) and value.ndim > 0 and value.shape[0] == base.num_envs:
+                value[target] = value[reference]
+
+    env_ids = torch.cat(all_ids).to(dtype=torch.int32)
+    base.gym.set_dof_state_tensor_indexed(
+        base.sim,
+        gymtorch.unwrap_tensor(base.dof_state),
+        gymtorch.unwrap_tensor(env_ids),
+        len(env_ids),
+    )
+    base.gym.set_actor_root_state_tensor_indexed(
+        base.sim,
+        gymtorch.unwrap_tensor(base.root_states),
+        gymtorch.unwrap_tensor(env_ids),
+        len(env_ids),
+    )
+    base.gym.refresh_dof_state_tensor(base.sim)
+    base.gym.refresh_actor_root_state_tensor(base.sim)
+    base.gym.refresh_rigid_body_state_tensor(base.sim)
+    base.gym.refresh_net_contact_force_tensor(base.sim)
+    base.gym.refresh_jacobian_tensors(base.sim)
+
+
+def _freeze_task_execution_specs(base, handles, tasks: Sequence[dict], deadline_s: float):
+    reference = torch.arange(handles[0].env_start, handles[0].env_start + len(tasks), device=base.device)
+    anchors = base._default_trajectory_anchor(reference) - base.env_origins[reference]
+    root_local = base.root_states[reference].clone()
+    root_local[:, :3] -= base.env_origins[reference]
+    for index, task in enumerate(tasks):
+        state = {
+            "root_state_env_local": [float(value) for value in root_local[index].tolist()],
+            "dof_position_rad": [float(value) for value in base.dof_pos[reference[index]].tolist()],
+            "dof_velocity_rad_s": [float(value) for value in base.dof_vel[reference[index]].tolist()],
+        }
+        finalize_task_spec(
+            task,
+            initial_state=state,
+            anchor_env_local=anchors[index].tolist(),
+            deadline_s=deadline_s,
+        )
+
+
 def _load_paired_tasks(base, handles, tasks: Sequence[dict]):
     """Load the same flattened task list into every policy slice."""
     n_per = _validate_handles(base, handles)
@@ -57,7 +148,12 @@ def _load_paired_tasks(base, handles, tasks: Sequence[dict]):
         base.traj_curriculum.cell_A[env_ids] = cell_a
         base.traj_curriculum.cell_B[env_ids] = cell_b
         base.traj_batch.load_from_stacked(env_ids, base.traj_bank.batch, rows)
-        base._place_and_reset_trajectories(env_ids)
+        anchors = torch.as_tensor(
+            [task["anchor_env_local_m"] for task in tasks],
+            device=base.device,
+            dtype=base.root_states.dtype,
+        ) + base.env_origins[env_ids]
+        base._place_and_reset_trajectories(env_ids, offset=anchors)
         # Settling belongs to simulator warm-up, not to the logical benchmark
         # episode. Start timeout and trajectory early-termination grace at the
         # instant the concrete task is injected.
@@ -67,6 +163,19 @@ def _load_paired_tasks(base, handles, tasks: Sequence[dict]):
         base.reverse_buf[env_ids] = False
         base.traj_early_term[env_ids] = False
         base.traj_term_cause[env_ids] = False
+
+    # The first arm observation after injection must see the new t=0
+    # reference, not the reference left by the settle episode.
+    active_ids = torch.cat(
+        [
+            torch.arange(handle.env_start, handle.env_start + len(tasks), device=base.device)
+            for handle in handles
+        ]
+    )
+    base.arm_goal_pos_world[active_ids] = base.traj_batch.gamma_p[active_ids, 0]
+    base.arm_goal_quat_world[active_ids] = base.traj_batch.gamma_quat[active_ids, 0]
+    base._update_ee_task_space_error()
+    base._update_goal_reaching_diagnostics()
 
 
 def plan_wbc_waves(manifest: dict, tasks_per_policy: int) -> List[List[dict]]:
@@ -108,6 +217,7 @@ def run_wbc_aggregate(
     device: str = "cuda:0",
     suite_rows_per_cell: int = 0,
     validate_feature_coverage: bool = True,
+    progress_callback=None,
 ) -> Dict[str, Dict[str, object]]:
     """Evaluate one flattened ``cell x trajectory`` task per environment.
 
@@ -148,8 +258,10 @@ def run_wbc_aggregate(
         )
         env.reset()
         for _ in range(settle_steps):
-            _wbc_step_all(env, handles)
+            _neutral_settle_step(env)
 
+        _synchronize_paired_initial_states(base, handles, len(tasks))
+        _freeze_task_execution_specs(base, handles, tasks, deadline_s=n_steps * dt)
         _load_paired_tasks(base, handles, tasks)
         env.clear_cached(all_ids)
         accs = wbc_eval_loop(
@@ -198,8 +310,18 @@ def run_wbc_aggregate(
                 if row["wave_index"] == wave_index
             )
             print(f"    {handle.name}: {completed}/{len(tasks)} completed", flush=True)
+        refresh_suite_hash(manifest)
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "completed_wave_index": wave_index,
+                    "results": out,
+                    "suite_manifest": manifest,
+                }
+            )
 
     expected_ids = [task["trajectory_id"] for task in manifest["trajectories"]]
+    refresh_suite_hash(manifest)
     for handle in handles:
         actual_ids = [
             row["trajectory_id"] for row in out[handle.name]["wbc_trajectories"]

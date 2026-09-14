@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import hashlib
 import json
 import os
 import random
+import shlex
+import subprocess
+import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -14,6 +18,11 @@ import isaacgym  # noqa: F401 - must precede torch
 import numpy as np
 import torch
 
+from benchmark.metadata import git_snapshot, runtime_snapshot
+from benchmark.wbc.scoring import (
+    DEVELOPMENT_TIMED_TRAJECTORY_PROTOCOL,
+    PROTOCOL_VERSION,
+)
 from benchmark.wbc.evaluation import (
     WBCPolicyHandle,
     _load_cfg_from_pkl,
@@ -23,6 +32,8 @@ from benchmark.wbc.evaluation import (
     load_wbc_policies,
 )
 from benchmark.wbc.scenarios import run_wbc_aggregate
+from benchmark.wbc.suite import write_reference_archive
+from go1_gym.envs.config.core import cfg_to_dict
 
 
 def parse_args(argv: Optional[List[str]] = None):
@@ -119,6 +130,67 @@ def _normalized(values, n, default):
     return result
 
 
+def _dump_json(path, payload):
+    """Write standards-compliant JSON; non-finite metrics are a hard fault."""
+    with open(path, "w", encoding="utf-8") as stream:
+        json.dump(payload, stream, indent=2, allow_nan=False)
+
+
+def _sha256_file(path):
+    candidate = Path(path)
+    if not candidate.is_file():
+        return None
+    digest = hashlib.sha256()
+    with candidate.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _candidate_provenance(name, logdir, ckpt_id):
+    root = Path(logdir).resolve()
+    dog_name = "last_dog" if ckpt_id == "last" else ckpt_id.zfill(6)
+    arm_name = "last_arm" if ckpt_id == "last" else ckpt_id.zfill(6)
+    resources = {
+        "parameters": root / "parameters.pkl",
+        "dog_checkpoint": root / "checkpoints_dog" / f"ac_weights_{dog_name}.pt",
+        "arm_checkpoint": root / "checkpoints_arm" / f"ac_weights_{arm_name}.pt",
+    }
+    return {
+        "name": name,
+        "logdir": str(root),
+        "ckptid": ckpt_id,
+        "resources": {
+            key: {"path": str(path), "sha256": _sha256_file(path)}
+            for key, path in resources.items()
+        },
+    }
+
+
+def _git_snapshot_at(path):
+    root = Path(path)
+    if not root.is_dir():
+        return {"path": str(root), "available": False}
+
+    def output(*args):
+        try:
+            return subprocess.check_output(
+                ["git", "-C", str(root), *args], text=True, stderr=subprocess.DEVNULL
+            ).strip()
+        except Exception:
+            return None
+
+    status = output("status", "--short")
+    return {
+        "path": str(root.resolve()),
+        "available": output("rev-parse", "--is-inside-work-tree") == "true",
+        "commit": output("rev-parse", "HEAD"),
+        "branch": output("branch", "--show-current"),
+        "dirty": bool(status),
+        "status_short": status or "",
+    }
+
+
 def main(argv: Optional[List[str]] = None):
     args = parse_args(argv)
     n_runs = len(args.logdirs)
@@ -145,7 +217,7 @@ def main(argv: Optional[List[str]] = None):
     )
     print(
         f"[WBC Benchmark] seed={args.seed} bank_seed={args.bank_seed} "
-        f"held_out={args.bank_seed != 0}"
+        "held_out=unverified_against_training_bank"
     )
 
     if args.validate_only:
@@ -172,6 +244,20 @@ def main(argv: Optional[List[str]] = None):
     peak_envs = 0
     representative_video_records = []
     representative_video_errors = []
+    candidate_provenance = [
+        _candidate_provenance(name, logdir, ckpt_id)
+        for name, logdir, ckpt_id in zip(names, args.logdirs, ckptids)
+    ]
+    state_path = os.path.join(run_dir, "run_state.json")
+    _dump_json(
+        state_path,
+        {
+            "status": "running",
+            "started_at": datetime.datetime.now().isoformat(timespec="seconds"),
+            "completed_groups": 0,
+            "completed_waves_in_current_group": 0,
+        },
+    )
 
     for group_number, run_indices in enumerate(groups, start=1):
         set_benchmark_seed(args.seed, args.sim_device)
@@ -217,6 +303,9 @@ def main(argv: Optional[List[str]] = None):
             bank_per_cell=args.bank_per_cell,
         )
         base = env.env
+        resolved_config_name = f"resolved_config_group_{group_number:02d}.json"
+        resolved_config_path = os.path.join(run_dir, resolved_config_name)
+        _dump_json(resolved_config_path, cfg_to_dict(cfg))
         control_dts.append(float(base.dt))
         n_cells = (
             1 if args.smoke else int(base.traj_curriculum.nA * base.traj_curriculum.nB)
@@ -239,15 +328,54 @@ def main(argv: Optional[List[str]] = None):
                         names[run_index], dog_policy, arm_policy, start, end
                     )
                 )
-            run_output = run_wbc_aggregate(
-                env,
-                handles,
-                n_steps=args.num_eval_steps,
-                settle_steps=args.settle_steps,
-                device=args.sim_device,
-                suite_rows_per_cell=args.suite_rows_per_cell,
-                cells=[(0, 0)] if args.smoke else None,
-                validate_feature_coverage=not args.smoke,
+            def save_wave_progress(progress):
+                partial = dict(all_results)
+                for partial_name, scenarios in progress["results"].items():
+                    partial[partial_name] = scenarios
+                _dump_json(os.path.join(run_dir, "results.partial.json"), partial)
+                _dump_json(
+                    os.path.join(run_dir, "trajectory_suite.partial.json"),
+                    suite_manifests + [progress["suite_manifest"]],
+                )
+                _dump_json(
+                    state_path,
+                    {
+                        "status": "running",
+                        "completed_groups": group_number - 1,
+                        "current_group": group_number,
+                        "completed_waves_in_current_group": progress["completed_wave_index"] + 1,
+                    },
+                )
+
+            try:
+                run_output = run_wbc_aggregate(
+                    env,
+                    handles,
+                    n_steps=args.num_eval_steps,
+                    settle_steps=args.settle_steps,
+                    device=args.sim_device,
+                    suite_rows_per_cell=args.suite_rows_per_cell,
+                    cells=[(0, 0)] if args.smoke else None,
+                    validate_feature_coverage=not args.smoke,
+                    progress_callback=save_wave_progress,
+                )
+            except Exception as exc:
+                _dump_json(
+                    state_path,
+                    {
+                        "status": "failed",
+                        "failed_group": group_number,
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                        "failed_at": datetime.datetime.now().isoformat(timespec="seconds"),
+                    },
+                )
+                raise
+            reference_archive_name = f"task_references_group_{group_number:02d}.npz"
+            write_reference_archive(
+                os.path.join(run_dir, reference_archive_name),
+                base,
+                run_output["suite_manifest"],
             )
             for name, scenarios in run_output["results"].items():
                 all_results[name] = scenarios
@@ -268,6 +396,10 @@ def main(argv: Optional[List[str]] = None):
                     "layout": describe_wbc_shared_env_group(args.logdirs[base_index]),
                     "suite_sha256": run_output["suite_manifest"]["suite_sha256"],
                     "schedule": run_output["schedule"],
+                    "resolved_config": {
+                        "path": resolved_config_name,
+                        "sha256": _sha256_file(resolved_config_path),
+                    },
                 }
             )
         finally:
@@ -305,10 +437,8 @@ def main(argv: Optional[List[str]] = None):
     json_path = os.path.join(run_dir, "results.json")
     metadata_path = os.path.join(run_dir, "metadata.json")
     suite_path = os.path.join(run_dir, "trajectory_suite.json")
-    with open(json_path, "w") as stream:
-        json.dump(all_results, stream, indent=2)
-    with open(suite_path, "w") as stream:
-        json.dump(suite_manifests, stream, indent=2)
+    _dump_json(json_path, all_results)
+    _dump_json(suite_path, suite_manifests)
 
     if representative_video_records:
         trajectory_lookup = {
@@ -326,12 +456,16 @@ def main(argv: Optional[List[str]] = None):
                     for key in ("ee_pos_rmse_m", "ee_rot_rmse_rad", "completed", "fall")
                 }
             )
-        with open(os.path.join(run_dir, "representative_videos.json"), "w") as stream:
-            json.dump(representative_video_records, stream, indent=2)
+        _dump_json(
+            os.path.join(run_dir, "representative_videos.json"),
+            representative_video_records,
+        )
 
     metadata = {
         "mode": "wbc",
-        "protocol": "wbc-suite-v3",
+        "protocol": PROTOCOL_VERSION,
+        "evaluation_protocol": dict(DEVELOPMENT_TIMED_TRAJECTORY_PROTOCOL),
+        "task_suite_version": "wbc-task-spec-v1",
         "names": names,
         "logdirs": args.logdirs,
         "ckptids": ckptids,
@@ -341,7 +475,8 @@ def main(argv: Optional[List[str]] = None):
         "control_dt_s": control_dts,
         "seed": args.seed,
         "bank_seed": args.bank_seed,
-        "held_out": args.bank_seed != 0,
+        "held_out": None,
+        "held_out_status": "unverified_against_training_bank",
         "n_eval_steps": args.num_eval_steps,
         "settle_steps": args.settle_steps,
         "suite_rows_per_cell": args.suite_rows_per_cell,
@@ -351,10 +486,32 @@ def main(argv: Optional[List[str]] = None):
         "layout_groups": group_metadata,
         "representative_videos": representative_video_records,
         "representative_video_errors": representative_video_errors,
+        "power_sampling": {
+            "rate": "control_step",
+            "arm_and_whole_body_available_when": "control.control_type == P",
+            "electrical_energy_model": False,
+        },
+        "source": {
+            "roboduet": git_snapshot(),
+            "rl_sar": _git_snapshot_at("/home/simon/Projects/Simon/wbc_rl_mpc/rl_sar"),
+        },
+        "runtime": runtime_snapshot(),
+        "candidates": candidate_provenance,
+        "command": shlex.join(sys.argv if argv is None else ["python", "-m", "benchmark", "--wbc", *argv]),
         "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
     }
-    with open(metadata_path, "w") as stream:
-        json.dump(metadata, stream, indent=2)
+    _dump_json(metadata_path, metadata)
+    _dump_json(
+        state_path,
+        {
+            "status": "complete",
+            "completed_groups": len(groups),
+            "completed_at": datetime.datetime.now().isoformat(timespec="seconds"),
+            "results": os.path.basename(json_path),
+            "suite": os.path.basename(suite_path),
+            "metadata": os.path.basename(metadata_path),
+        },
+    )
 
     try:
         from benchmark.reports.html import write_report_bundle

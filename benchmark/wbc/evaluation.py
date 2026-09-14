@@ -22,6 +22,11 @@ from benchmark.dog_policy.evaluation import (
     _load_cfg_from_pkl,
     _apply_benchmark_env_overrides,
 )
+from benchmark.wbc.scoring import (
+    DEVELOPMENT_TIMED_TRAJECTORY_PROTOCOL,
+    aggregate_task_events,
+    timed_trajectory_success,
+)
 from go1_gym.envs.config import configure_privileged_obs_dims
 from go1_gym.envs.roboduet.wbc_env import WBCEnv
 from go1_gym.envs.roboduet.wbc_env_wrapper import HistoryWrapper
@@ -32,16 +37,40 @@ from go1_gym.envs.roboduet.wbc_env_wrapper import HistoryWrapper
 # ---------------------------------------------------------------------------
 
 WBC_COMPAT_PATHS = [
+    "sim.dt",
+    "sim.substeps",
+    "control.control_type",
+    "control.action_scale",
+    "control.hip_scale_reduction",
+    "control.decimation",
+    "dog.control.stiffness_leg",
+    "dog.control.damping_leg",
+    "arm.control.stiffness_arm",
+    "arm.control.damping_arm",
     "arm.arm_num_observations",
     "arm.arm_num_observation_history",
     "arm.num_actions_arm_cd",
     "arm.arm_num_privileged_obs",
     "arm.action_mode",
+    "arm.use_adaptation_module",
+    "env.arm_observe_dog_state",
+    "arm.end_to_end.action_scale",
+    "arm.waypoint.anchor",
+    "arm.waypoint.pos_scale",
+    "arm.waypoint.rot_scale",
+    "arm.ik.damping",
+    "arm.ik.step_gain",
+    "arm.ik.max_step_rad",
+    "arm.ik.residual_scale",
+    "arm.ik.pos_weight",
+    "arm.ik.rot_weight",
+    "arm.ik.ee_local_pos",
     "arm.checkpoint_observation_layout",
     "wbc.goal_reaching.target_mode",
     "wbc.goal_reaching.rho_star",
     "wbc.goal_reaching.rho_lo",
     "wbc.goal_reaching.rho_hi",
+    "wbc.goal_reaching.reach_table_path",
     "wbc.goal_reaching.delta_vel_limit",
     "wbc.goal_reaching.response_time_s",
     "wbc.goal_reaching.base_nom_filter_hz",
@@ -52,11 +81,13 @@ WBC_COMPAT_PATHS = [
     "wbc.goal_reaching.high_speed_posture_scale",
     "wbc.goal_reaching.high_speed_threshold",
     "wbc.goal_reaching.trajectory.preview_points",
+    "wbc.goal_reaching.trajectory.preview_horizon",
     "wbc.goal_reaching.trajectory.max_gamma_points",
     "wbc.goal_reaching.trajectory.max_tl_points",
     "wbc.goal_reaching.trajectory.update_s_window",
     "wbc.goal_reaching.trajectory.n_levels_A",
     "wbc.goal_reaching.trajectory.n_levels_B",
+    "wbc.goal_reaching.trajectory.anchor_offset_body",
     "wbc.goal_reaching.command_channels",
     "commands.limit_vel_x",
     "commands.limit_vel_y",
@@ -208,7 +239,14 @@ class WBCAccumulator(Accumulator):
         self.exposure_steps = torch.zeros(num_envs, device=device)
         self.episode_count = torch.ones(num_envs, device=device)
         self.final_progress = torch.zeros(num_envs, device=device)
-        self.success_progress = 0.8
+        self.final_reference_time_s = torch.zeros(num_envs, device=device)
+        self.reference_duration_s = torch.zeros(num_envs, device=device)
+        self.final_ee_pos_error = torch.full((num_envs,), torch.nan, device=device)
+        self.final_ee_rot_error = torch.full((num_envs,), torch.nan, device=device)
+        self.tracking_tube_steps = torch.zeros(num_envs, device=device)
+        self.endpoint_hold_steps = torch.zeros(num_envs, device=device)
+        self.completion_time_s = torch.full((num_envs,), torch.nan, device=device)
+        self.protocol = dict(DEVELOPMENT_TIMED_TRAJECTORY_PROTOCOL)
         # Full velocity vectors are retained so direction changes contribute to
         # acceleration and jerk. A validity mask prevents finite differences
         # from crossing a terminal/reset boundary.
@@ -219,7 +257,7 @@ class WBCAccumulator(Accumulator):
 
     @staticmethod
     def _masked(value: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        return value * mask.to(device=value.device, dtype=value.dtype)
+        return torch.where(mask.to(device=value.device), value, torch.zeros_like(value))
 
     def _add_sq(self, key: str, sq: torch.Tensor, mask: torch.Tensor):
         self._get(f"{key}_sq").add_(self._masked(sq, mask))
@@ -247,13 +285,13 @@ class WBCAccumulator(Accumulator):
             return torch.arange(self.n, device=self.dev, dtype=torch.long)
         return torch.as_tensor(indices, device=self.dev, dtype=torch.long)
 
-    def _maximum(self, key: str, indices=None) -> float:
+    def _maximum(self, key: str, indices=None):
         values = self._stats.get(f"{key}_max")
         if values is None:
-            return 0.0
+            return None
         values = values[self._indices(indices)]
         finite = values[torch.isfinite(values)]
-        return float(finite.max().cpu()) if finite.numel() else 0.0
+        return float(finite.max().cpu()) if finite.numel() else None
 
     def add_wbc_step(
         self,
@@ -264,7 +302,7 @@ class WBCAccumulator(Accumulator):
         done: torch.Tensor,
         timed_out: torch.Tensor,
         traj_early_term: torch.Tensor,
-    ):
+    ) -> torch.Tensor:
         """Accumulate one step without crossing an episode reset boundary.
 
         IsaacGym auto-resets inside ``env.step``. Continuous state tensors for
@@ -291,6 +329,31 @@ class WBCAccumulator(Accumulator):
         q_err = quat_mul(goal_q, quat_conjugate(ee[:, 3:7]))
         w = q_err[:, 3].abs().clamp(max=1.0)
         rot_err = 2.0 * torch.acos(w)
+
+        arm_slice = slice(
+            env.num_actions_loco, env.num_actions_loco + env.num_actions_arm
+        )
+        rho_g = env.goal_rho[s:e]
+        valid_g = env.goal_rho_valid[s:e]
+        finite = (
+            torch.isfinite(ee).all(dim=-1)
+            & torch.isfinite(goal_p).all(dim=-1)
+            & torch.isfinite(goal_q).all(dim=-1)
+            & torch.isfinite(env.traj_d_lat[s:e])
+            & torch.isfinite(env.traj_timing_err[s:e])
+            & torch.isfinite(env.traj_sdot_meas[s:e])
+            & torch.isfinite(env.traj_s[s:e])
+            & torch.isfinite(env.traj_batch.L[s:e])
+            & torch.isfinite(env.root_states[s:e, 7:13]).all(dim=-1)
+            & torch.isfinite(env.dof_vel[s:e]).all(dim=-1)
+            & torch.isfinite(env.torques[s:e]).all(dim=-1)
+            & torch.isfinite(env.goal_manipulability[s:e])
+            & (~valid_g | torch.isfinite(rho_g))
+        )
+        numerical_fault = measure & ~finite
+        self._add_count("numerical_fault", numerical_fault, active)
+        measure &= finite
+
         # _add_val already records both sum and squared sum.
         self._add_val("ee_rot_err", rot_err, measure)
 
@@ -303,13 +366,48 @@ class WBCAccumulator(Accumulator):
         )
         self._add_val("progress", progress, measure)
         self.final_progress[:] = torch.where(measure, progress, self.final_progress)
-        self.success_progress = float(
-            env.cfg.wbc.goal_reaching.trajectory.success_progress
+        self.final_reference_time_s[:] = torch.where(
+            measure, env.traj_sim_time[s:e], self.final_reference_time_s
+        )
+        self.reference_duration_s[:] = torch.where(
+            measure, env.traj_batch.T[s:e], self.reference_duration_s
+        )
+        self.final_ee_pos_error[:] = torch.where(
+            measure, torch.sqrt(pos_err2.clamp_min(0.0)), self.final_ee_pos_error
+        )
+        self.final_ee_rot_error[:] = torch.where(measure, rot_err, self.final_ee_rot_error)
+        within_tube = (
+            (self.final_ee_pos_error <= float(self.protocol["position_tolerance_m"]))
+            & (self.final_ee_rot_error <= float(self.protocol["rotation_tolerance_rad"]))
+        )
+        self.tracking_tube_steps.add_((measure & within_tube).float())
+        at_endpoint = (
+            progress >= float(self.protocol["endpoint_progress_min"])
+        ) & within_tube
+        self.endpoint_hold_steps[:] = torch.where(
+            measure & at_endpoint,
+            self.endpoint_hold_steps + 1.0,
+            torch.where(measure, torch.zeros_like(self.endpoint_hold_steps), self.endpoint_hold_steps),
+        )
+        self.steps.add_(measure.float())
+        tube_fraction = self.tracking_tube_steps / self.steps.clamp_min(1.0)
+        success_now = (
+            measure
+            & (env.traj_sim_time[s:e] >= env.traj_batch.T[s:e])
+            & (progress >= float(self.protocol["endpoint_progress_min"]))
+            & (tube_fraction >= float(self.protocol["tracking_tube_fraction"]))
+            & (
+                self.endpoint_hold_steps * float(env.dt)
+                >= float(self.protocol["hold_time_s"])
+            )
+            & ~torch.isfinite(self.completion_time_s)
+        )
+        elapsed = self.exposure_steps * float(env.dt)
+        self.completion_time_s[:] = torch.where(
+            success_now, elapsed, self.completion_time_s
         )
 
         # Reach utilisation
-        rho_g = env.goal_rho[s:e]
-        valid_g = env.goal_rho_valid[s:e]
         rho_measure = measure & valid_g
         self._add_val("rho", rho_g, rho_measure)
         self._add_max("rho", rho_g, rho_measure)
@@ -319,7 +417,10 @@ class WBCAccumulator(Accumulator):
 
         # Base utilisation
         ff_norm = torch.linalg.vector_norm(env.base_feedforward_cmd[s:e, :2], dim=-1)
-        base_velocity = env.base_lin_vel[s:e, :3]
+        # root_states stores world-frame base-origin velocity.  Differencing
+        # body-frame base_lin_vel would mix physical acceleration with frame
+        # rotation.
+        base_velocity = env.root_states[s:e, 7:10]
         base_norm = torch.linalg.vector_norm(base_velocity[:, :2], dim=-1)
         self._add_val("v_ff_xy", ff_norm, measure)
         self._add_val("v_base_xy", base_norm, measure)
@@ -327,16 +428,21 @@ class WBCAccumulator(Accumulator):
         ratio = base_norm / ff_norm.clamp_min(1e-6)
         self._add_val("util_ratio", ratio, measure & base_active)
 
-        # Motor power
-        arm_slice = slice(
-            env.num_actions_loco, env.num_actions_loco + env.num_actions_arm
+        # In mixed "M" control, env.torques contains leg torques followed by
+        # arm position targets.  Only the leg slice is a physical torque.  Arm
+        # and whole-body mechanical power are available only when all DOFs use
+        # torque/PD control ("P").
+        leg_power = (
+            env.torques[s:e, : env.num_actions_loco]
+            * env.dof_vel[s:e, : env.num_actions_loco]
         )
-        power = (
-            (env.torques[s:e, arm_slice] * env.dof_vel[s:e, arm_slice])
-            .abs()
-            .sum(dim=-1)
-        )
-        self._add_val("motor_power", power, measure)
+        self._add_val("leg_abs_mechanical_power", leg_power.abs().sum(dim=-1), measure)
+        self._add_val("leg_positive_mechanical_power", leg_power.clamp_min(0.0).sum(dim=-1), measure)
+        if str(env.cfg.control.control_type) == "P":
+            arm_power = env.torques[s:e, arm_slice] * env.dof_vel[s:e, arm_slice]
+            whole_power = env.torques[s:e] * env.dof_vel[s:e]
+            self._add_val("arm_abs_mechanical_power", arm_power.abs().sum(dim=-1), measure)
+            self._add_val("whole_abs_mechanical_power", whole_power.abs().sum(dim=-1), measure)
 
         # Full vectors for physically meaningful finite differences.
         ee_offset_world = quat_apply(ee[:, 3:7], env.ee_local_offset.expand(e - s, -1))
@@ -355,7 +461,7 @@ class WBCAccumulator(Accumulator):
         # Manipulability
         self._add_val("manipulability", env.goal_manipulability[s:e], measure)
 
-        self.steps.add_(measure.float())
+        return numerical_fault | success_now
 
     # -- smoothness summary (offline, called once per scenario point) -------
 
@@ -402,15 +508,15 @@ class WBCAccumulator(Accumulator):
             ),
         )
 
-    def _sample_mean(self, key: str) -> float:
+    def _sample_mean(self, key: str):
         total = self._stats.get(f"{key}_sum", torch.zeros(1, device=self.dev)).sum()
         count = self._stats.get(f"{key}_samples", torch.zeros(1, device=self.dev)).sum()
-        return float((total / count.clamp_min(1.0)).cpu())
+        return float((total / count).cpu()) if count.item() > 0 else None
 
-    def _sample_rmse(self, key: str) -> float:
+    def _sample_rmse(self, key: str):
         total = self._stats.get(f"{key}_sq", torch.zeros(1, device=self.dev)).sum()
         count = self._stats.get(f"{key}_samples", torch.zeros(1, device=self.dev)).sum()
-        return float(torch.sqrt(total / count.clamp_min(1.0)).cpu())
+        return float(torch.sqrt(total / count).cpu()) if count.item() > 0 else None
 
     def per_env_summary(self, index: int, dt: float) -> dict:
         def mean(key):
@@ -420,7 +526,7 @@ class WBCAccumulator(Accumulator):
             count = self._stats.get(
                 f"{key}_samples", torch.zeros(self.n, device=self.dev)
             )[index]
-            return float((total / count.clamp_min(1.0)).cpu())
+            return float((total / count).cpu()) if count.item() > 0 else None
 
         def rmse(key):
             total = self._stats.get(f"{key}_sq", torch.zeros(self.n, device=self.dev))[
@@ -429,17 +535,20 @@ class WBCAccumulator(Accumulator):
             count = self._stats.get(
                 f"{key}_samples", torch.zeros(self.n, device=self.dev)
             )[index]
-            return float(torch.sqrt(total / count.clamp_min(1.0)).cpu())
+            return float(torch.sqrt(total / count).cpu()) if count.item() > 0 else None
 
         def count(key):
             return int(
                 self._stats.get(key, torch.zeros(self.n, device=self.dev))[index].item()
             )
 
-        completed = bool(
-            self.final_progress[index].item() >= self.success_progress
-        ) and not bool(count("fall") + count("traj_early_term"))
-        return dict(
+        samples = int(self.steps[index].item())
+        completion_time = self.completion_time_s[index]
+        deadline_reached = (
+            int(self.exposure_steps[index].item()) >= self.n_steps
+            and not torch.isfinite(completion_time)
+        )
+        metrics = dict(
             ee_pos_rmse_m=rmse("ee_pos_err"),
             ee_pos_mae_m=mean("ee_pos_err_l1"),
             ee_rot_rmse_rad=rmse("ee_rot_err"),
@@ -449,14 +558,45 @@ class WBCAccumulator(Accumulator):
             progress_mean=mean("progress"),
             rho_mean=mean("rho"),
             base_util_mean=mean("util_ratio"),
-            motor_power_mean_w=mean("motor_power"),
+            leg_abs_mechanical_power_mean_w=mean("leg_abs_mechanical_power"),
+            leg_positive_mechanical_power_mean_w=mean("leg_positive_mechanical_power"),
+            arm_abs_mechanical_power_mean_w=mean("arm_abs_mechanical_power"),
+            whole_body_abs_mechanical_power_mean_w=mean("whole_abs_mechanical_power"),
+            final_progress=float(self.final_progress[index].item()) if samples else None,
+            reference_time_s=(
+                float(self.final_reference_time_s[index].item()) if samples else None
+            ),
+            reference_duration_s=(
+                float(self.reference_duration_s[index].item()) if samples else None
+            ),
+            final_ee_pos_error_m=(
+                float(self.final_ee_pos_error[index].item()) if samples else None
+            ),
+            final_ee_rot_error_rad=(
+                float(self.final_ee_rot_error[index].item()) if samples else None
+            ),
+            tracking_tube_fraction=(
+                float(self.tracking_tube_steps[index].item()) / samples if samples else None
+            ),
+            endpoint_hold_time_s=float(self.endpoint_hold_steps[index].item()) * dt,
+            completion_time_s=(
+                float(completion_time.item()) if torch.isfinite(completion_time) else None
+            ),
             fall=bool(count("fall")),
-            timed_out=bool(count("timed_out")),
+            timed_out=bool(count("timed_out")) or deadline_reached,
+            benchmark_deadline_reached=deadline_reached,
             traj_early_term=bool(count("traj_early_term")),
-            completed=completed,
-            incomplete=not completed,
+            numerical_fault=bool(count("numerical_fault")),
             n_env_steps=int(self.exposure_steps[index].item()),
         )
+        decision = timed_trajectory_success(metrics, self.protocol)
+        metrics.update(
+            completed=decision["success"],
+            success=decision["success"],
+            incomplete=not decision["success"],
+            end_reason=decision["end_reason"],
+        )
+        return metrics
 
     def wbc_summary(self, dt: float) -> dict:
         """All WBC metrics for this scenario point, as a plain dict."""
@@ -471,25 +611,17 @@ class WBCAccumulator(Accumulator):
             return float(values[selected].sum().item())
 
         def sample_mean(key):
-            return stat_sum(f"{key}_sum") / max(stat_sum(f"{key}_samples"), 1.0)
+            count = stat_sum(f"{key}_samples")
+            return stat_sum(f"{key}_sum") / count if count > 0 else None
 
         def sample_rmse(key):
-            return (stat_sum(f"{key}_sq") / max(stat_sum(f"{key}_samples"), 1.0)) ** 0.5
+            count = stat_sum(f"{key}_samples")
+            return (stat_sum(f"{key}_sq") / count) ** 0.5 if count > 0 else None
 
-        episodes = max(float(self.episode_count[selected].sum().item()), 1.0)
-        fall = self._stats.get("fall", torch.zeros(self.n, device=self.dev))[selected]
-        early = self._stats.get(
-            "traj_early_term", torch.zeros(self.n, device=self.dev)
-        )[selected]
-        completed = float(
-            (self.final_progress[selected] >= self.success_progress)
-            .float()
-            .mul(1.0 - fall.clamp(max=1.0))
-            .mul(1.0 - early.clamp(max=1.0))
-            .sum()
-            .item()
-        )
-        return dict(
+        per_task = [self.per_env_summary(int(index), dt) for index in selected.tolist()]
+        events = aggregate_task_events(per_task)
+        rho_valid = stat_sum("rho_valid")
+        summary = dict(
             ee_pos_rmse_m=sample_rmse("ee_pos_err"),
             ee_pos_mae_m=sample_mean("ee_pos_err_l1"),
             ee_rot_rmse_rad=sample_rmse("ee_rot_err"),
@@ -499,23 +631,23 @@ class WBCAccumulator(Accumulator):
             progress_mean=sample_mean("progress"),
             rho_mean=sample_mean("rho"),
             rho_max=self._maximum("rho", selected),
-            rho_above_hi_rate=(
-                stat_sum("rho_above_hi") / max(stat_sum("rho_valid"), 1.0)
-            ),
+            rho_above_hi_rate=(stat_sum("rho_above_hi") / rho_valid if rho_valid > 0 else None),
             base_util_mean=sample_mean("util_ratio"),
             v_ff_xy_mean=sample_mean("v_ff_xy"),
             v_base_xy_mean=sample_mean("v_base_xy"),
-            motor_power_mean_w=sample_mean("motor_power"),
+            leg_abs_mechanical_power_mean_w=sample_mean("leg_abs_mechanical_power"),
+            leg_positive_mechanical_power_mean_w=sample_mean("leg_positive_mechanical_power"),
+            arm_abs_mechanical_power_mean_w=sample_mean("arm_abs_mechanical_power"),
+            whole_body_abs_mechanical_power_mean_w=sample_mean("whole_abs_mechanical_power"),
             manipulability_mean=sample_mean("manipulability"),
-            fall_rate=(stat_sum("fall") / episodes),
-            timeout_rate=(stat_sum("timed_out") / episodes),
-            traj_early_term_rate=(stat_sum("traj_early_term") / episodes),
-            completion_rate=(completed / episodes),
-            incomplete_rate=(max(episodes - completed, 0.0) / episodes),
-            n_episodes=int(episodes),
             smoothness=self.smoothness_summary(dt, selected),
             n_env_steps=int(self.exposure_steps[selected].sum().item()),
         )
+        summary.update(events)
+        summary["incomplete_rate"] = (
+            None if events["completion_rate"] is None else 1.0 - events["completion_rate"]
+        )
+        return summary
 
 
 # ---------------------------------------------------------------------------
@@ -622,7 +754,7 @@ def wbc_eval_loop(
         done, timed_out, early_term = _wbc_step_all(env, handles)
         for i, (h, acc) in enumerate(zip(handles, accs)):
             s, e = h.env_start, h.env_end
-            acc.add_wbc_step(
+            finished = acc.add_wbc_step(
                 base,
                 s,
                 e,
@@ -631,7 +763,7 @@ def wbc_eval_loop(
                 timed_out=timed_out[s:e],
                 traj_early_term=early_term[s:e],
             )
-            active[i] &= ~done[s:e]
+            active[i] &= ~done[s:e] & ~finished
         if not any(bool(mask.any().item()) for mask in active):
             break
 
