@@ -546,9 +546,10 @@ GOAL_REACHING_OVERRIDES = {
     # front, slightly up.
     "wbc.goal_reaching.trajectory.anchor_offset_body": [0.36, 0.0, 0.10],
     # trajectory bank / batch sizing (see modules/curriculum.py TrajectoryBank).
-    # max_gamma_points bounds L/ds_grid; hardest cell L~10m at ds_grid=0.01 with
-    # per-sample variation, so 1536 leaves headroom.
-    "wbc.goal_reaching.trajectory.max_gamma_points": 1536,
+    # max_gamma_points bounds L/ds_grid. The 5 m planar-travel, 0--1.5 m
+    # ground-relative and high-curvature hardest cell reached 1515 points in
+    # the fixed 384-row audit; 2048 prevents benchmark reference truncation.
+    "wbc.goal_reaching.trajectory.max_gamma_points": 2048,
     "wbc.goal_reaching.trajectory.max_tl_points": 512,
     "wbc.goal_reaching.trajectory.bank_per_cell": 64,
     # Seed for the pre-generated trajectory bank. Training leaves this at 0;
@@ -587,15 +588,11 @@ GOAL_REACHING_OVERRIDES = {
     # reach_radius, which means the same thing in every curriculum cell.
     "wbc.goal_reaching.trajectory.terminate_d_lat": 1.00,        # lateral err (m)
     # timing is a FRACTION of the path length, not metres. |s - s_ref| is an
-    # arc length bounded by L, and L spans 2.0 m (easiest cell) to 9.0 m
-    # (hardest) -- a fixed metre threshold would mean 75% of the path on the
-    # easy end and 17% on the hard end, i.e. effectively disabled early and
-    # strict late, by accident rather than by design. As a fraction it is
-    # cell-independent, and because the time law normalizes L to T seconds,
-    # timing_err / L is exactly "fraction of the episode's duration behind
-    # schedule": 0.70 ~ 5.6 s of lag at the default T = 8 s, in every cell.
-    # 0.70 is the same ~p99-of-baseline calibration as terminate_d_lat (the
-    # baseline's p99 lag is 1.35 m on the easiest cell, whose L is 2.0 m).
+    # arc length bounded by L, so a fixed metre threshold would become
+    # accidentally stricter as paths get longer. The time-law generator can
+    # extend duration to respect its declared speed/acceleration limits;
+    # timing_err / L therefore remains a path-progress lag, not a fixed number
+    # of seconds. 0.70 retains the original ~p99-of-baseline calibration.
     "wbc.goal_reaching.trajectory.terminate_timing_frac": 0.70,
     # Grace period after a reset during which none of the above fire. The arm
     # starts the episode wherever the reset pose left it, not on the path, so

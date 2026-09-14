@@ -24,10 +24,14 @@ def effective_gait_frequency(params, velocity_command):
 
 
 def dog_command_values(params, command):
+    command = np.asarray(command, dtype=np.float64)
+    if params.get("omit_height", False) and command.size >= 6:
+        command = np.delete(command, 5)
     extra = np.array(params["dog_commands_extra"], dtype=np.float64, copy=True)
     if extra.size:
         extra[0] = effective_gait_frequency(params, command[:3])
-    return np.concatenate([command, extra])
+    values = np.concatenate([command, extra])
+    return values[: len(params["dog_commands_scale"])]
 
 
 def quat_rotate_inverse_np(quat_xyzw, vec):
@@ -95,8 +99,8 @@ class RlSarObservation:
             "roboduet/arm_commands": int(p["arm_num_commands"]),
             "roboduet/clock_inputs": 4,
             "roboduet/base_lin_vel": 3,
-            "roboduet/body_pose_actual": 3,
-            "roboduet/body_pose_error": 3,
+            "roboduet/body_pose_actual": 2 if p.get("omit_height", False) else 3,
+            "roboduet/body_pose_error": 2 if p.get("omit_height", False) else 3,
             "roboduet/velocity_error": 3,
             "roboduet/arm_dof_pos": self.num_arm,
             "roboduet/arm_dof_vel": self.num_arm,
@@ -155,17 +159,19 @@ class RlSarObservation:
             if not p.get("observe_pose_actual", True):
                 return np.zeros(3)
             euler = quat_to_euler_np(s["quat"])
-            return np.array([s["base_height"] * p["body_height_cmd_scale"],
-                             euler[1] * p["body_pitch_cmd_scale"],
-                             euler[0] * p["body_roll_cmd_scale"]])
+            values = np.array([s["base_height"] * p["body_height_cmd_scale"],
+                               euler[1] * p["body_pitch_cmd_scale"],
+                               euler[0] * p["body_roll_cmd_scale"]])
+            return values[1:] if p.get("omit_height", False) else values
         if name == "roboduet/body_pose_error":
             if not p.get("observe_track_error", True):
                 return np.zeros(3)
             euler = quat_to_euler_np(s["quat"])
             height_target = float(p["base_height_target"]) + s["cmd_height"]
-            return np.array([(height_target - s["base_height"]) * p["body_height_cmd_scale"],
-                             (s["cmd_pitch"] - euler[1]) * p["body_pitch_cmd_scale"],
-                             (s["cmd_roll"] - euler[0]) * p["body_roll_cmd_scale"]])
+            values = np.array([(height_target - s["base_height"]) * p["body_height_cmd_scale"],
+                               (s["cmd_pitch"] - euler[1]) * p["body_pitch_cmd_scale"],
+                               (s["cmd_roll"] - euler[0]) * p["body_roll_cmd_scale"]])
+            return values[1:] if p.get("omit_height", False) else values
         if name == "roboduet/velocity_error":
             if not p.get("observe_track_error", True):
                 return np.zeros(3)
