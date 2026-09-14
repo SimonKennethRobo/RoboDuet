@@ -22,10 +22,11 @@ The current common-plant adapters are:
 | `roboduet` | deployed RL-SAR dog policy + scripted DLS arm |
 | `roboduet_raw` | original exported dog policy + scripted DLS arm |
 | `ma2022` | recurrent dual-GRU student with arm-reaction prediction + scripted DLS arm |
+| `deep_whole_body_control` | native history encoder + learned 18-joint position targets |
 | `wb_locoman` | native FATROP sidecar, direct 18-joint torque |
 | `qm_control` | native SQP-MPC + QP-WBC ROS process |
 
-`umi`, `visual_wholebody`, and `deep_whole_body_control` are registered but
+`umi` and `visual_wholebody` are registered but
 preflight remains blocked: their local artifacts contain training checkpoints
 and IsaacGym adapters, but no observation-correct common-MuJoCo inference
 boundary. The CLI exits before a run and reports this exact blocker rather

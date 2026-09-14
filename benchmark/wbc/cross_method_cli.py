@@ -116,9 +116,9 @@ def _method_contracts() -> dict[str, dict]:
             "blocker": "only an IsaacGym cross-wbc-v1 adapter exists; no MuJoCo observation adapter",
         },
         "deep_whole_body_control": {
-            "backend": "checkpoint_only",
-            "root": WORKSPACE_ROOT / "baselines/Deep-Whole-Body-Control", "common_mujoco": False,
-            "blocker": "training checkpoint is not exported with a MuJoCo observation adapter",
+            "backend": "dwbc_checkpoint_mujoco",
+            "policy_key": "unused",
+            "root": WORKSPACE_ROOT / "baselines/Deep-Whole-Body-Control", "common_mujoco": True,
         },
     }
 
@@ -442,6 +442,11 @@ def run_policy_method(args) -> tuple[Path, list[dict]]:
                 "--policy-adapter", "wb_locoman",
                 "--wb-locoman-root", str(contract["root"]),
                 "--wb-locoman-python", "/opt/miniconda3/envs/base312/bin/python",
+            ])
+        elif args.method == "deep_whole_body_control":
+            command.extend([
+                "--policy-adapter", "dwbc", "--dwbc-root", str(contract["root"]),
+                "--dwbc-checkpoint", str(contract["root"] / "legged_gym/logs/go2_x5/1789388761_go2_x5_reward_fix/model_11000.pt"),
             ])
         commands.append(command)
         if args.prepare_only:
