@@ -27,6 +27,8 @@ The adapter subprocess uses `/opt/miniconda3/envs/base312/bin/python` by
 default because that environment contains the ROS/MuJoCo dependencies used by
 the installed qm_control prefix. The launcher gives it a clean environment so
 stale ROS overlays in the interactive shell cannot change the run.
+The workspace-specific baseline default can be replaced with
+`--baseline-root /absolute/path/to/baselines/mpc_baseline`.
 
 Each timestamped output contains `cross_method_manifest.json`, `results.json`,
 `adapter.log`, the exported reference, and a nominal/push directory. Scenario

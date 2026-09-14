@@ -27,6 +27,9 @@ from benchmark.wbc.trace import TRACE_SCHEMA_VERSION, score_trace_archive
 
 
 METHODS = ("qm_control",)
+DEFAULT_BASELINE_ROOT = Path(
+    "/home/simon/Projects/Simon/wbc_rl_mpc/baselines/mpc_baseline"
+)
 COMMON_PHYSICAL_FIELDS = (
     "ee_pos_rmse_m", "ee_rot_rmse_rad", "ee_pos_error_p95_m",
     "ee_pos_error_peak_m", "ee_rot_error_p95_rad", "ee_rot_error_peak_rad",
@@ -160,8 +163,7 @@ def _clean_environment(python: Path, ros_domain_id: int) -> dict[str, str]:
 
 def run_qm_control(args) -> tuple[Path, list[dict]]:
     roboduet_root = Path(__file__).resolve().parents[2]
-    workspace = roboduet_root.parent
-    baseline_root = Path(args.baseline_root or workspace / "baselines/mpc_baseline").resolve()
+    baseline_root = Path(args.baseline_root or DEFAULT_BASELINE_ROOT).resolve()
     python = Path(args.python).resolve()
     required = (
         baseline_root / "benchmark/aligned_cli.py",
