@@ -76,3 +76,26 @@ does not establish task success: both runs missed the endpoint, tracking-tube,
 and hold criteria. qm_control does not expose policy actions, position targets,
 reach-model utilisation, base feedforward, or the runner's Jacobian/IK
 diagnostics, so those fields remain explicitly not-applicable or unavailable.
+
+## Eight-method integration run
+
+All rows below use the common scene hash, source task
+`timed-trajectory-ac28cbf79041b70f`, the derived `8 N s` push, trace-v3, and
+the same offline scorer. Every manifest records clean commit `51d07e0`.
+Failures remain in the table and denominators.
+
+| method | run | nominal (steps/end, pos/rot RMSE, progress) | push (steps/end, pos/rot RMSE, progress) |
+| --- | --- | --- | --- |
+| qm_control | `20260915_043716` | 911/timeout, 0.1262 m / 0.7323 rad, 0.7359 | 911/timeout, 0.1261 m / 0.7331 rad, 0.7363 |
+| roboduet | `20260915_043320` | 910/timeout, 0.3616 / 1.2270, 0.0429 | 910/timeout, 0.3364 / 1.2051, 0.0429 |
+| roboduet_raw | `20260915_043328` | 910/timeout, 0.3019 / 1.0748, 0.0351 | 910/timeout, 0.2625 / 1.0812, 0.0390 |
+| ma2022 | `20260915_043336` | 910/timeout, 0.2279 / 1.1625, 0.0429 | 910/timeout, 0.2199 / 1.0188, 0.1597 |
+| deep_whole_body_control | `20260915_043344` | 910/timeout, 0.1649 / 1.4756, 0.1325 | 910/timeout, 0.1784 / 1.4130, 0.1325 |
+| visual_wholebody | `20260915_043251` | 44/fall, 0.3493 / 0.5408, 0.1208 | 39/fall, 0.1664 / 0.6401, 0.0429 |
+| umi | `20260915_043254` | 58/fall, 0.3456 / 1.1181, 0.0896 | 30/fall, 0.3438 / 0.8020, 0.0039 |
+| wb_locoman | `20260915_043353` | 381/fall, 0.1756 / 0.4814, 0.5221 | 53/fall, 0.0882 / 0.0422, 0.0312 |
+
+All 16 scenario receipts exited without a numerical fault and have complete
+common physical metric coverage. None passed the endpoint/tracking/hold success
+gate on this long task; this run validates executable integration, not method
+quality or promotion.
