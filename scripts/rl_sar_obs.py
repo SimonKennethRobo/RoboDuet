@@ -27,7 +27,15 @@ def dog_command_values(params, command):
     command = np.asarray(command, dtype=np.float64)
     if params.get("omit_height", False) and command.size >= 6:
         command = np.delete(command, 5)
-    extra = np.array(params["dog_commands_extra"], dtype=np.float64, copy=True)
+    # Older, already exported bundles store these values as named fields.
+    # New exports also carry the packed list consumed by current rl_sar.
+    extra = np.array(params.get("dog_commands_extra", [
+        params.get("gait_frequency", 0.0),
+        params.get("footswing_height", 0.0),
+        params.get("stance_width", 0.0),
+        params.get("stance_length", 0.0),
+        params.get("gait_duration", 0.5),
+    ]), dtype=np.float64, copy=True)
     if extra.size:
         extra[0] = effective_gait_frequency(params, command[:3])
     values = np.concatenate([command, extra])
@@ -102,6 +110,8 @@ class RlSarObservation:
             "roboduet/body_pose_actual": 2 if p.get("omit_height", False) else 3,
             "roboduet/body_pose_error": 2 if p.get("omit_height", False) else 3,
             "roboduet/velocity_error": 3,
+            "roboduet/base_roll": 1,
+            "roboduet/base_pitch": 1,
             "roboduet/arm_dof_pos": self.num_arm,
             "roboduet/arm_dof_vel": self.num_arm,
         }
@@ -132,6 +142,10 @@ class RlSarObservation:
             return cmd * np.array(p["dog_commands_scale"], dtype=np.float64)
         if name == "roboduet/arm_commands":
             return np.zeros(int(p["arm_num_commands"]))
+        if name == "roboduet/base_roll":
+            return quat_to_euler_np(s["quat"])[0:1]
+        if name == "roboduet/base_pitch":
+            return quat_to_euler_np(s["quat"])[1:2]
         if name == "roboduet/clock_inputs":
             gait_phases = p["gait_phases"]
             phases, offsets, bounds = (

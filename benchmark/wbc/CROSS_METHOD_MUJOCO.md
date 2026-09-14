@@ -5,11 +5,31 @@ validation, trace-v3 normalization, scoring, and final receipts are handled by
 `cross_method_cli.py`. Method-specific controller processes stay in their
 original trees and every consumed source/config/model is recorded by hash.
 
-The first adapter runs qm_control's native SQP-MPC + QP-WBC against the shared
-Go2+X5 MuJoCo model. It restores the selected TaskSpec initial state, replays
-the inherited time law, runs both nominal and a derived deterministic push
-variant, and preserves backend traces before applying the current RoboDuet
-protocol metadata and offline scorer.
+The registry covers all eight handoff methods. It restores the selected
+TaskSpec initial state, replays the inherited time law, runs nominal and a
+derived deterministic push variant, and emits trace-v3 for every connected
+backend. Run the machine-readable preflight before launching work:
+
+```bash
+/opt/miniconda3/envs/isaacgym/bin/python -m benchmark.wbc.cross_method_cli \
+  --list-methods
+```
+
+The current common-plant adapters are:
+
+| method | controller boundary |
+| --- | --- |
+| `roboduet` | deployed RL-SAR dog policy + scripted DLS arm |
+| `roboduet_raw` | original exported dog policy + scripted DLS arm |
+| `ma2022` | recurrent dual-GRU student with arm-reaction prediction + scripted DLS arm |
+| `wb_locoman` | native FATROP sidecar, direct 18-joint torque |
+| `qm_control` | native SQP-MPC + QP-WBC ROS process |
+
+`umi`, `visual_wholebody`, and `deep_whole_body_control` are registered but
+preflight remains blocked: their local artifacts contain training checkpoints
+and IsaacGym adapters, but no observation-correct common-MuJoCo inference
+boundary. The CLI exits before a run and reports this exact blocker rather
+than relabeling their old `cross-wbc-v1` IsaacGym traces.
 
 From the RoboDuet checkout:
 
@@ -23,9 +43,8 @@ From the RoboDuet checkout:
   --ros-domain-id 91
 ```
 
-The adapter subprocess uses `/opt/miniconda3/envs/base312/bin/python` by
-default because that environment contains the ROS/MuJoCo dependencies used by
-the installed qm_control prefix. The launcher gives it a clean environment so
+The qm_control subprocess uses `/opt/miniconda3/envs/base312/bin/python` by
+default because that environment contains its ROS/MuJoCo dependencies. The launcher gives it a clean environment so
 stale ROS overlays in the interactive shell cannot change the run.
 The workspace-specific baseline default can be replaced with
 `--baseline-root /absolute/path/to/baselines/mpc_baseline`.
@@ -35,11 +54,9 @@ Each timestamped output contains `cross_method_manifest.json`, `results.json`,
 directories contain the TaskSpec manifest, raw backend trace, normalized
 trace-v3, current scorer output, metric coverage, controller log, and receipt.
 
-To add another method, implement one runner function with the same return
-contract as `run_qm_control`: consume `--suite`/`--task-id`, execute the common
-plant with method-native controller state, retain failures, and return a
-timestamped directory containing per-scenario trace-v3 and receipts. Add the
-method name to `METHODS`; do not add a new task generator or scorer.
+For a policy or sidecar method, replace its blocked registry entry only after
+its real checkpoint/controller consumes common-plant state and passes a short
+closed-loop smoke. Do not add a new task generator or scorer.
 
 ## First measured run
 

@@ -225,6 +225,43 @@ def _add_scalar_column(store, name, value, dtype=np.float32):
     store.setdefault(name, []).append(np.asarray([value], dtype=dtype))
 
 
+def _validated_push_events(schedule) -> list[dict]:
+    """Validate the backend-neutral base-force subset used by this runner."""
+    events = []
+    for event in schedule:
+        expected = {
+            "type": "constant_force",
+            "body": "base",
+            "frame": "environment_world",
+            "application_point": "body_center_of_mass",
+        }
+        mismatches = [
+            f"{key}={event.get(key)!r} (expected {value!r})"
+            for key, value in expected.items() if event.get(key) != value
+        ]
+        force = np.asarray(event.get("force_n"), dtype=np.float64)
+        start = float(event.get("start_time_s", -1.0))
+        duration = float(event.get("duration_s", -1.0))
+        if mismatches or force.shape != (3,) or not np.isfinite(force).all():
+            detail = "; ".join(mismatches) or f"invalid force_n={force!r}"
+            raise ValueError(f"unsupported MuJoCo disturbance: {detail}")
+        if start < 0.0 or duration <= 0.0:
+            raise ValueError("push start_time_s must be nonnegative and duration_s positive")
+        declared = float(event.get("magnitude_n", np.linalg.norm(force)))
+        if not np.isclose(declared, np.linalg.norm(force), rtol=1e-6, atol=1e-9):
+            raise ValueError("push magnitude_n does not match force_n")
+        events.append({"start": start, "stop": start + duration, "force": force})
+    return events
+
+
+def _push_force_at(events, time_s: float) -> np.ndarray:
+    force = np.zeros(3, dtype=np.float64)
+    for event in events:
+        if event["start"] <= time_s < event["stop"]:
+            force += event["force"]
+    return force
+
+
 def _set_mpc_dog_command(sim, command: dict) -> np.ndarray:
     """Apply the physical OCS2 command at rl_sar's six-command boundary."""
     velocity = np.asarray(command["base_velocity_body"], dtype=np.float64).copy()
@@ -290,13 +327,25 @@ def run(args) -> Tuple[Path, dict]:
 
     suite_path = Path(args.suite).resolve()
     reference = FrozenReference(suite_path, args.task_id)
-    if reference.task["disturbance_schedule"]:
-        raise NotImplementedError(
-            "MuJoCo TaskSpec disturbance replay is not implemented; select a nominal task"
-        )
-    robot_dir = rl_sar_root / "policy" / "go2_x5"
+    push_events = _validated_push_events(reference.task["disturbance_schedule"])
     scene = Path(args.scene).resolve()
-    sim = RlSarMujoco(robot_dir, args.policy_key, scene, seed=args.seed)
+    robot_dir = rl_sar_root / "policy" / "go2_x5"
+    if args.policy_adapter == "wb_locoman":
+        from benchmark.wbc.wb_locoman_mujoco import WbLocomanMujoco  # pylint: disable=import-outside-toplevel
+
+        sim = WbLocomanMujoco(args.wb_locoman_root, args.wb_locoman_python, scene)
+    elif args.policy_adapter == "ma2022":
+        from benchmark.wbc.ma2022_mujoco import (  # pylint: disable=import-outside-toplevel
+            Ma2022Mujoco, load_config,
+        )
+
+        sim = Ma2022Mujoco(
+            args.ma2022_deployment_root, args.ma2022_policy,
+            args.ma2022_env_config, scene,
+            load_config(Path(args.ma2022_config).resolve()),
+        )
+    else:
+        sim = RlSarMujoco(robot_dir, args.policy_key, scene, seed=args.seed)
     sim.model.opt.timestep = float(args.physics_dt)
     sim.substeps = max(1, round(sim.control_dt / sim.model.opt.timestep))
 
@@ -322,6 +371,8 @@ def run(args) -> Tuple[Path, dict]:
     mujoco.mj_forward(sim.model, sim.data)
     sim.history.fill(0.0)
     sim.actions.fill(0.0)
+    if hasattr(sim, "reset_policy"):
+        sim.reset_policy()
     sim.gait_indices = 0.0
     sim.command = [0.0] * 6
 
@@ -373,6 +424,10 @@ def run(args) -> Tuple[Path, dict]:
         if viewer is not None and not viewer.is_running():
             break
         q, dq, quat, gyro, base_pos, lin_vel = sim.read_state()
+        reference_time = min((step + 1) * policy_dt, reference.duration)
+        arc, goal_position, goal_quaternion = reference.at(reference_time)
+        if hasattr(sim, "set_reference"):
+            sim.set_reference(reference, reference_time)
         mpc_command = None
         base_feedforward = np.zeros(3, dtype=np.float64)
         if use_mpc:
@@ -400,8 +455,6 @@ def run(args) -> Tuple[Path, dict]:
             base_feedforward = _set_mpc_dog_command(sim, mpc_command)
         actions = sim.forward(q, dq, quat, gyro, base_pos, lin_vel)
         q_target = sim.compute_output(actions)
-        reference_time = min((step + 1) * policy_dt, reference.duration)
-        arc, goal_position, goal_quaternion = reference.at(reference_time)
 
         jacp = np.zeros((3, sim.model.nv), dtype=np.float64)
         jacr = np.zeros((3, sim.model.nv), dtype=np.float64)
@@ -412,7 +465,12 @@ def run(args) -> Tuple[Path, dict]:
             (goal_position - sim.data.site_xpos[site], args.orientation_weight * _rotation_error(goal_quaternion, current_rotation))
         )
         normal = jacobian @ jacobian.T + args.ik_damping**2 * np.eye(6)
-        if use_mpc:
+        if getattr(sim, "direct_torque", False):
+            arm_q = q[12:18].copy()
+            raw_step_norm = 0.0
+            saturated = False
+            ik_valid = False
+        elif use_mpc:
             arm_q = np.asarray(mpc_command["arm_q_cmd"], dtype=np.float64).copy()
             step_q = arm_q - q[12:18]
             raw_step_norm = float(np.linalg.norm(step_q))
@@ -441,16 +499,25 @@ def run(args) -> Tuple[Path, dict]:
 
         leg_abs_energy = 0.0
         leg_positive_energy = 0.0
+        push_impulse = np.zeros(3, dtype=np.float64)
         for _ in range(int(sim.p["decimation"])):
             for _ in range(sim.substeps):
+                push_force = _push_force_at(push_events, float(sim.data.time))
+                sim.data.xfrc_applied[base, :3] = push_force
+                push_impulse += push_force * sim.model.opt.timestep
                 q_now, dq_now, *_ = sim.read_state()
-                torque = np.clip(kp * (q_target - q_now) - kd * dq_now, -torque_limits, torque_limits)
+                torque = np.clip(
+                    actions if getattr(sim, "direct_torque", False)
+                    else kp * (q_target - q_now) - kd * dq_now,
+                    -torque_limits, torque_limits,
+                )
                 for i in range(sim.n):
                     sim.data.ctrl[sim.mapping[i]] = torque[i]
                 mujoco.mj_step(sim.model, sim.data)
                 power = torque[:12] * dq_now[:12]
                 leg_abs_energy += float(np.abs(power).sum()) * sim.model.opt.timestep
                 leg_positive_energy += float(np.maximum(power, 0.0).sum()) * sim.model.opt.timestep
+        sim.data.xfrc_applied[base, :3] = 0.0
 
         mujoco.mj_forward(sim.model, sim.data)
         q, dq, quat, gyro, base_pos, lin_vel = sim.read_state()
@@ -511,6 +578,13 @@ def run(args) -> Tuple[Path, dict]:
             base_feedforward[None].astype(np.float32)
         )
         trace.setdefault("joint_limit_distance_fraction", []).append(margins[None].astype(np.float32))
+        applied_push_force = push_impulse / policy_dt
+        trace.setdefault("benchmark_push_active", []).append(
+            np.asarray([bool(np.linalg.norm(push_impulse) > 0.0)], dtype=bool)
+        )
+        trace.setdefault("benchmark_push_force_world_n", []).append(
+            applied_push_force[None].astype(np.float32)
+        )
         executed_path.append(actual_position.copy())
         if viewer is not None:
             _draw_trajectory(viewer, reference, executed_path, goal_position, sim.data.xpos[base])
@@ -526,6 +600,8 @@ def run(args) -> Tuple[Path, dict]:
     if transport is not None:
         transport.close()
         atexit.unregister(transport.close)
+    if hasattr(sim, "close"):
+        sim.close()
 
     output_dir = Path(args.output).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -536,9 +612,12 @@ def run(args) -> Tuple[Path, dict]:
         protocol_json=np.asarray(json.dumps(DEVELOPMENT_TIMED_TRAJECTORY_PROTOCOL, sort_keys=True, separators=(",", ":"))),
         kinematic_protocol_json=np.asarray(json.dumps(DEVELOPMENT_KINEMATIC_PROTOCOL, sort_keys=True, separators=(",", ":"))),
         task_id=np.asarray([reference.task["task_id"]]), control_dt_s=np.asarray(policy_dt, np.float64),
-        requested_steps=np.asarray(requested_steps, np.int64), control_type=np.asarray("P"),
+        requested_steps=np.asarray(requested_steps, np.int64),
+        control_type=np.asarray("T" if getattr(sim, "direct_torque", False) else "P"),
         num_actions_loco=np.asarray(12, np.int64), num_actions_arm=np.asarray(6, np.int64),
-        arm_action_mode=np.asarray(args.upper_controller), reach_model=np.asarray("not_available"),
+        arm_action_mode=np.asarray(
+            "direct_torque" if getattr(sim, "direct_torque", False) else args.upper_controller
+        ), reach_model=np.asarray("not_available"),
         self_collision_observability=np.asarray("not_recorded"),
     )
     np.savez_compressed(trace_path, **arrays)
@@ -549,12 +628,22 @@ def run(args) -> Tuple[Path, dict]:
     production_observation = rl_sar_root / "src" / "rl_sar" / "library" / "core" / "rl_sdk" / "rl_sdk.cpp"
     receipt = {
         "status": "complete" if len(trace["sample_present"]) else "failed",
-        "backend": "mujoco-python-rl-sar-boundary-v1",
+        "backend": (
+            "mujoco-python-wb-locoman-sidecar-v1"
+            if args.policy_adapter == "wb_locoman"
+            else "mujoco-python-ma2022-boundary-v1"
+            if args.policy_adapter == "ma2022"
+            else "mujoco-python-rl-sar-boundary-v1"
+        ),
         "runner_sha256": _sha256(Path(__file__).resolve()),
         "controller_adapter": (
-            "rl_sar_dog_policy_plus_native_floating_base_ocs2_mpc"
-            if use_mpc
-            else "rl_sar_dog_policy_plus_scripted_dls_ik_arm"
+            "wb_locoman_fatrop_direct_torque"
+            if args.policy_adapter == "wb_locoman"
+            else
+            "ma2022_recurrent_student_plus_scripted_dls_ik_arm"
+            if args.policy_adapter == "ma2022"
+            else "rl_sar_dog_policy_plus_native_floating_base_ocs2_mpc"
+            if use_mpc else "rl_sar_dog_policy_plus_scripted_dls_ik_arm"
         ),
         "evidence_scope": (
             "closed_loop_mujoco_native_ocs2_implementation_test"
@@ -563,12 +652,16 @@ def run(args) -> Tuple[Path, dict]:
         ),
         "initial_state_adapter": {
             "root": "isaac_xyzw_to_mujoco_wxyz",
-            "joint_order": "rl_sar_joint_mapping",
+            "joint_order": (
+                "named_FL_FR_RL_RR_X5" if args.policy_adapter != "rl_sar"
+                else "rl_sar_joint_mapping"
+            ),
             "task_dof_count": len(state["dof_position_rad"]),
             "simulated_dof_count": sim.n,
             "ignored_task_dofs": max(0, len(state["dof_position_rad"]) - sim.n),
         },
         "task_id": reference.task["task_id"],
+        "disturbance_schedule": reference.task["disturbance_schedule"],
         "suite_sha256": reference.group["suite_sha256"],
         "reference_archive_sha256": _sha256(reference.archive_path),
         "scene": {
@@ -578,17 +671,35 @@ def run(args) -> Tuple[Path, dict]:
             "resource_tree_sha256": resource_tree_hash,
             "resource_file_count": resource_file_count,
         },
-        "policy": {
+        "policy": ({
+            "adapter": "wb_locoman_fatrop_sidecar",
+            "sidecar_sha256": _sha256(Path(args.wb_locoman_root) / "benchmark_sidecar.py"),
+            "controller_sha256": _sha256(Path(args.wb_locoman_root) / "controller.py"),
+            "solver_mode": "runtime_fatrop",
+        } if args.policy_adapter == "wb_locoman" else {
+            "adapter": "ma2022_recurrent_student",
+            "model_sha256": _sha256(sim.policy_path),
+            "env_config_sha256": _sha256(sim.env_config_path),
+            "deployment_config_sha256": _sha256(sim.config_path),
+            "deployment_adapter_sha256": _sha256(sim.adapter_source),
+        } if args.policy_adapter == "ma2022" else {
+            "adapter": "rl_sar",
             "key": args.policy_key,
             "model_sha256": _sha256(robot_dir / args.policy_key / "policy.pt"),
             "config_sha256": _sha256(robot_dir / args.policy_key / "config.yaml"),
             "base_config_sha256": _sha256(robot_dir / "base.yaml"),
-        },
+        }),
         "observation_boundary": {
             "implementation": "python_mirror_of_rl_sar_compute_observation",
             "mirror_sha256": _sha256(observation_mirror),
             "simulation_loop_mirror_sha256": _sha256(sim_loop_mirror),
-            "production_rl_sdk_sha256": _sha256(production_observation),
+            "production_rl_sdk_sha256": (
+                _sha256(production_observation) if production_observation.is_file() else None
+            ),
+            "production_rl_sdk_path": (
+                str(production_observation) if production_observation.is_file()
+                else "not_packaged_with_policy_bundle"
+            ),
         },
         "mujoco_version": mujoco.__version__,
         "physics_dt_s": sim.model.opt.timestep,
@@ -629,6 +740,13 @@ def main():
     parser.add_argument("--task-id")
     parser.add_argument("--rl-sar-root", required=True)
     parser.add_argument("--policy-key", required=True)
+    parser.add_argument("--policy-adapter", choices=("rl_sar", "ma2022", "wb_locoman"), default="rl_sar")
+    parser.add_argument("--ma2022-deployment-root")
+    parser.add_argument("--ma2022-policy")
+    parser.add_argument("--ma2022-env-config")
+    parser.add_argument("--ma2022-config")
+    parser.add_argument("--wb-locoman-root")
+    parser.add_argument("--wb-locoman-python", default="/opt/miniconda3/envs/base312/bin/python")
     parser.add_argument("--scene", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--seed", type=int, default=0)

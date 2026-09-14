@@ -2,7 +2,7 @@ import json
 
 import numpy as np
 
-from benchmark.wbc.cross_method_cli import normalize_trace_protocol
+from benchmark.wbc.cross_method_cli import METHODS, normalize_trace_protocol
 from benchmark.wbc.scoring import (
     DEVELOPMENT_KINEMATIC_PROTOCOL,
     DEVELOPMENT_TIMED_TRAJECTORY_PROTOCOL,
@@ -32,3 +32,10 @@ def test_normalize_trace_protocol_preserves_sample_fields(tmp_path):
         assert json.loads(str(normalized["kinematic_protocol_json"].item())) == (
             DEVELOPMENT_KINEMATIC_PROTOCOL
         )
+
+
+def test_registry_contains_every_handoff_method():
+    assert set(METHODS) == {
+        "roboduet", "roboduet_raw", "umi", "visual_wholebody",
+        "wb_locoman", "qm_control", "deep_whole_body_control", "ma2022",
+    }

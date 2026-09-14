@@ -9,6 +9,7 @@ SQP-MPC, QP-WBC, and common Go2+X5 MuJoCo plant.
 from __future__ import annotations
 
 import argparse
+import copy
 import datetime as dt
 import hashlib
 import json
@@ -26,9 +27,19 @@ from benchmark.wbc.scoring import (
 from benchmark.wbc.trace import TRACE_SCHEMA_VERSION, score_trace_archive
 
 
-METHODS = ("qm_control",)
+METHODS = (
+    "roboduet", "roboduet_raw", "umi", "visual_wholebody",
+    "wb_locoman", "qm_control", "deep_whole_body_control", "ma2022",
+)
 DEFAULT_BASELINE_ROOT = Path(
     "/home/simon/Projects/Simon/wbc_rl_mpc/baselines/mpc_baseline"
+)
+WORKSPACE_ROOT = Path("/home/simon/Projects/Simon/wbc_rl_mpc")
+DEFAULT_RL_SAR_ROOT = WORKSPACE_ROOT / "rl_sar"
+DEFAULT_SCENE = DEFAULT_RL_SAR_ROOT / "src/rl_sar_zoo/go2_x5_description/mjcf/scene.xml"
+RAW_BUNDLE_ROOT = Path(
+    "/home/simon/Projects/WBC/RoboDuetRaw/runs/default_go2x5v3_noselfcollision/0905/"
+    "default_go2x5v3_noselfcollision_151454_seed6444/rl_sar"
 )
 COMMON_PHYSICAL_FIELDS = (
     "ee_pos_rmse_m", "ee_rot_rmse_rad", "ee_pos_error_p95_m",
@@ -66,6 +77,91 @@ def _git_state(root: Path) -> dict:
         "branch": capture("branch", "--show-current"),
         "dirty": bool(capture("status", "--porcelain")),
     }
+
+
+def _method_contracts() -> dict[str, dict]:
+    """Return the auditable adapter inventory; paths are checked at call time."""
+    return {
+        "roboduet": {
+            "backend": "roboduet_rl_sar_mujoco", "policy_key": "roboduet_stage1",
+            "root": DEFAULT_RL_SAR_ROOT, "common_mujoco": True,
+        },
+        "roboduet_raw": {
+            "backend": "roboduet_rl_sar_mujoco", "policy_key": "roboduet_go2_x5",
+            "root": RAW_BUNDLE_ROOT, "common_mujoco": True,
+        },
+        "qm_control": {
+            "backend": "qm_control_native", "root": DEFAULT_BASELINE_ROOT,
+            "common_mujoco": True,
+        },
+        "wb_locoman": {
+            "backend": "common_controller_sidecar",
+            "policy_key": "unused",
+            "root": DEFAULT_BASELINE_ROOT / "wb-locoman_baseline",
+            "common_mujoco": True,
+        },
+        "ma2022": {
+            "backend": "ma2022_recurrent_student",
+            "policy_key": "ma2022_student",
+            "root": DEFAULT_RL_SAR_ROOT / "deploy/ma2022", "common_mujoco": True,
+        },
+        "visual_wholebody": {
+            "backend": "checkpoint_only",
+            "root": WORKSPACE_ROOT / "baselines/visual_wholebody", "common_mujoco": False,
+            "blocker": "only an IsaacGym cross-wbc-v1 adapter exists; no MuJoCo observation adapter",
+        },
+        "umi": {
+            "backend": "checkpoint_only",
+            "root": WORKSPACE_ROOT / "baselines/umi-on-legs/mani-centric-wbc", "common_mujoco": False,
+            "blocker": "only an IsaacGym cross-wbc-v1 adapter exists; no MuJoCo observation adapter",
+        },
+        "deep_whole_body_control": {
+            "backend": "checkpoint_only",
+            "root": WORKSPACE_ROOT / "baselines/Deep-Whole-Body-Control", "common_mujoco": False,
+            "blocker": "training checkpoint is not exported with a MuJoCo observation adapter",
+        },
+    }
+
+
+def preflight(method: str | None = None) -> dict:
+    contracts = _method_contracts()
+    selected = METHODS if method is None else (method,)
+    result = {}
+    for name in selected:
+        contract = copy.deepcopy(contracts[name])
+        root = Path(contract.pop("root"))
+        required = []
+        if name in ("roboduet", "roboduet_raw"):
+            policy = root / "policy/go2_x5" / contract["policy_key"]
+            required = [root / "policy/go2_x5/base.yaml", policy / "config.yaml",
+                        policy / "policy.pt", DEFAULT_SCENE]
+        elif name == "qm_control":
+            required = [root / "benchmark/aligned_cli.py",
+                        root / "qm_control_baseline/install_aligned/setup.bash",
+                        root / "mujoco_models/go2_x5_description/mjcf/scene.xml"]
+        elif name == "wb_locoman":
+            required = [root / "benchmark_sidecar.py", root / "controller.py"]
+        elif name == "ma2022":
+            required = [root / "adapter.py", root / "play.py",
+                        root / "config.yaml",
+                        DEFAULT_RL_SAR_ROOT / "policy/go2_x5/ma2022_student/student_policy.pt",
+                        DEFAULT_RL_SAR_ROOT / "policy/go2_x5/ma2022_student/env_cfg.json"]
+        elif name == "visual_wholebody":
+            required = [root / "benchmark_adapter/run.py",
+                        root / "low-level/logs/go2x5-visual-low/go2x5_low_v6_velocity_curriculum_tb_resume1000/model_24000.pt"]
+        elif name == "umi":
+            required = [root / "benchmark_adapter/run.py",
+                        root / "checkpoints/tossing/ours-real/model.pt"]
+        else:
+            required = [root / "legged_gym/logs/go2_x5/1789388761_go2_x5_reward_fix/model_11000.pt"]
+        missing = [str(path) for path in required if not path.is_file()]
+        ready = bool(contract["common_mujoco"] and not missing)
+        result[name] = {
+            **contract, "root": str(root), "required": [str(path) for path in required],
+            "missing": missing, "status": "ready" if ready else "blocked",
+            "blocker": None if ready else contract.get("blocker", "missing required files"),
+        }
+    return {"schema_version": "cross-method-preflight-v1", "methods": result}
 
 
 def normalize_trace_protocol(trace_path: Path) -> dict:
@@ -233,23 +329,199 @@ def run_qm_control(args) -> tuple[Path, list[dict]]:
     return output, results
 
 
+def _selected_group(suite_path: Path, task_id: str | None) -> tuple[dict, dict, int]:
+    payload = json.loads(suite_path.read_text())
+    wrappers = payload if isinstance(payload, list) else [payload]
+    matches = []
+    for wrapper in wrappers:
+        if wrapper.get("robustness_scenario", "nominal") != "nominal":
+            continue
+        group = wrapper.get("suite", wrapper)
+        for row, task in enumerate(group["trajectories"]):
+            if task_id is None or task["task_id"] == task_id:
+                matches.append((wrapper, group, row))
+    if not matches:
+        raise ValueError(f"no nominal task {task_id!r} in {suite_path}")
+    if task_id is None and len(matches) != 1:
+        raise ValueError("--task-id is required when the suite has multiple nominal tasks")
+    return matches[0]
+
+
+def _materialize_scenario_suite(
+    source: Path, destination: Path, task_id: str | None, scenario: str,
+) -> tuple[Path, str]:
+    # Keep torch out of module import so IsaacGym-first test processes remain valid.
+    from benchmark.wbc.suite import finalize_task_spec, refresh_suite_hash
+
+    wrapper, source_group, row = _selected_group(source, task_id)
+    group = copy.deepcopy(source_group)
+    task = copy.deepcopy(group["trajectories"][row])
+    source_task_id = task["task_id"]
+    if scenario == "push":
+        finalize_task_spec(
+            task, initial_state=task["initial_state"],
+            anchor_env_local=task["anchor_env_local_xyz_m"],
+            orientation_left_multiplier_xyzw=task["orientation_left_multiplier_xyzw"],
+            deadline_s=task["deadline_s"],
+            disturbance_schedule=[{
+                "type": "constant_force", "start_time_s": 0.1,
+                "duration_s": 0.1, "body": "base",
+                "frame": "environment_world", "force_n": [80.0, 0.0, 0.0],
+                "magnitude_n": 80.0, "application_point": "body_center_of_mass",
+            }],
+        )
+    group["trajectories"] = [task]
+    archive_record = wrapper.get("reference_archive", source_group["reference_archive"])
+    archive_source = (source.parent / archive_record["path"]).resolve()
+    with np.load(archive_source, allow_pickle=False) as archive:
+        old_ids = [str(value) for value in archive["task_id"].tolist()]
+        archive_row = old_ids.index(source_task_id)
+        arrays = {}
+        for name in archive.files:
+            value = archive[name]
+            if value.ndim and value.shape[0] == len(old_ids):
+                arrays[name] = value[archive_row:archive_row + 1]
+            else:
+                arrays[name] = value
+        arrays["task_id"] = np.asarray([task["task_id"]])
+    destination.mkdir(parents=True, exist_ok=True)
+    archive_out = destination / "reference.npz"
+    np.savez_compressed(archive_out, **arrays)
+    record = {"path": archive_out.name, "format": "numpy_npz_v1", "sha256": _sha256(archive_out)}
+    group["reference_archive"] = record
+    refresh_suite_hash(group)
+    suite_out = destination / "suite.json"
+    _write_json(suite_out, [{"suite": group, "reference_archive": record,
+                             "robustness_scenario": scenario}])
+    return suite_out, task["task_id"]
+
+
+def run_policy_method(args) -> tuple[Path, list[dict]]:
+    contract = _method_contracts()[args.method]
+    readiness = preflight(args.method)["methods"][args.method]
+    if readiness["status"] != "ready":
+        raise RuntimeError(f"{args.method} preflight blocked: {readiness['blocker']}; missing={readiness['missing']}")
+    roboduet_root = Path(__file__).resolve().parents[2]
+    python = Path(args.python or "/opt/miniconda3/envs/isaacgym/bin/python").resolve()
+    output_root = Path(args.output or (
+        roboduet_root / "benchmark/results/cross_method_mujoco" / args.method
+    )).resolve()
+    stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    output = output_root / stamp
+    output.mkdir(parents=True)
+    started = dt.datetime.now(dt.timezone.utc)
+    results = []
+    commands = []
+    for scenario in args.scenarios:
+        scenario_dir = output / scenario
+        suite_path, scenario_task_id = _materialize_scenario_suite(
+            Path(args.suite).resolve(), scenario_dir, args.task_id, scenario,
+        )
+        policy_root = (
+            contract["root"] if args.method in ("roboduet", "roboduet_raw")
+            else DEFAULT_RL_SAR_ROOT
+        )
+        command = [
+            str(python), "-m", "benchmark.wbc.mujoco",
+            "--suite", str(suite_path), "--task-id", scenario_task_id,
+            "--rl-sar-root", str(policy_root),
+            "--policy-key", contract["policy_key"], "--scene", str(DEFAULT_SCENE),
+            "--output", str(scenario_dir), "--upper-controller", "scripted_dls_ik",
+        ]
+        if args.method == "ma2022":
+            bundle = DEFAULT_RL_SAR_ROOT / "policy/go2_x5/ma2022_student"
+            command.extend([
+                "--policy-adapter", "ma2022",
+                "--ma2022-deployment-root", str(contract["root"]),
+                "--ma2022-policy", str(bundle / "student_policy.pt"),
+                "--ma2022-env-config", str(bundle / "env_cfg.json"),
+                "--ma2022-config", str(contract["root"] / "config.yaml"),
+            ])
+        elif args.method == "wb_locoman":
+            command.extend([
+                "--policy-adapter", "wb_locoman",
+                "--wb-locoman-root", str(contract["root"]),
+                "--wb-locoman-python", "/opt/miniconda3/envs/base312/bin/python",
+            ])
+        commands.append(command)
+        if args.prepare_only:
+            continue
+        completed = subprocess.run(
+            command, cwd=roboduet_root, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            timeout=args.timeout_s, check=False,
+        )
+        (scenario_dir / "run.log").write_text(completed.stdout)
+        if completed.returncode:
+            raise RuntimeError(
+                f"{args.method} {scenario} exited {completed.returncode}; see {scenario_dir / 'run.log'}"
+            )
+        receipt_path = scenario_dir / "receipt.json"
+        if not receipt_path.is_file():
+            raise RuntimeError(f"{args.method} {scenario} produced no receipt")
+        receipt = json.loads(receipt_path.read_text())
+        coverage = _coverage(receipt["result"])
+        receipt.update(method=args.method, scenario=scenario,
+                       benchmark_owner="RoboDuet/benchmark/wbc",
+                       metric_coverage=coverage)
+        _write_json(scenario_dir / "metric_coverage.json", coverage)
+        _write_json(receipt_path, receipt)
+        results.append(receipt)
+    status = "prepared" if args.prepare_only else "complete"
+    manifest = {
+        "schema_version": "cross-method-mujoco-run-v1", "status": status,
+        "method": args.method, "started_at": started.isoformat(),
+        "finished_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "source_suite": str(Path(args.suite).resolve()), "source_task_id": args.task_id,
+        "scenarios": list(args.scenarios), "commands": commands,
+        "roboduet_git": _git_state(roboduet_root), "preflight": readiness,
+        "result_count": len(results),
+    }
+    _write_json(output / "cross_method_manifest.json", manifest)
+    _write_json(output / "results.json", results)
+    _write_json(output / "run_state.json", {"status": status, "output": str(output)})
+    return output, results
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--method", choices=METHODS, default="qm_control")
-    parser.add_argument("--suite", required=True)
+    parser.add_argument("--method", choices=METHODS)
+    parser.add_argument("--list-methods", action="store_true")
+    parser.add_argument("--preflight", action="store_true")
+    parser.add_argument("--suite")
     parser.add_argument("--task-id")
     parser.add_argument("--scenarios", nargs="+", choices=("nominal", "push"),
                         default=("nominal", "push"))
-    parser.add_argument("--output", default="benchmark/results/cross_method_mujoco/qm_control")
+    parser.add_argument("--output")
     parser.add_argument("--baseline-root")
-    parser.add_argument("--python", default="/opt/miniconda3/envs/base312/bin/python")
+    parser.add_argument("--python")
     parser.add_argument("--ros-domain-id", type=int, default=91)
     parser.add_argument("--timeout-s", type=float, default=480.0)
     parser.add_argument("--prepare-only", action="store_true")
     args = parser.parse_args(argv)
+    if args.list_methods or args.preflight:
+        print(json.dumps(preflight(args.method), indent=2))
+        return
+    if not args.method:
+        parser.error("--method is required (or use --list-methods)")
+    if not args.suite:
+        parser.error("--suite is required for a run")
     if not 0 <= args.ros_domain_id <= 232:
         parser.error("--ros-domain-id must be in 0..232")
-    output, results = run_qm_control(args)
+    readiness = preflight(args.method)["methods"][args.method]
+    if readiness["status"] != "ready":
+        raise SystemExit(
+            f"{args.method} is not runnable on the common MuJoCo plant: "
+            f"{readiness['blocker']}; missing={readiness['missing']}"
+        )
+    if args.method == "qm_control":
+        if args.output is None:
+            args.output = "benchmark/results/cross_method_mujoco/qm_control"
+        if args.python is None:
+            args.python = "/opt/miniconda3/envs/base312/bin/python"
+        output, results = run_qm_control(args)
+    else:
+        output, results = run_policy_method(args)
     print(json.dumps({"output": str(output), "results": results}, indent=2))
 
 

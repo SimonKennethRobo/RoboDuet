@@ -9,7 +9,12 @@ import isaacgym  # noqa: F401
 
 pytest.importorskip("mujoco")
 
-from benchmark.wbc.mujoco import FrozenReference, _forward_project
+from benchmark.wbc.mujoco import (
+    FrozenReference,
+    _forward_project,
+    _push_force_at,
+    _validated_push_events,
+)
 from benchmark.wbc.scoring import DEVELOPMENT_TIMED_TRAJECTORY_PROTOCOL
 from benchmark.wbc.suite import refresh_suite_hash
 
@@ -162,6 +167,36 @@ def test_progress_projection_is_monotonic_and_window_bounded(tmp_path):
     )
     assert 0.25 <= arc <= 0.40
     assert lateral == pytest.approx(0.60)
+
+
+def test_mujoco_push_schedule_has_half_open_timing_and_adds_events():
+    events = _validated_push_events([
+        {
+            "type": "constant_force", "start_time_s": 1.0,
+            "duration_s": 0.25, "body": "base",
+            "frame": "environment_world", "force_n": [32.0, 0.0, 0.0],
+            "magnitude_n": 32.0, "application_point": "body_center_of_mass",
+        },
+        {
+            "type": "constant_force", "start_time_s": 1.1,
+            "duration_s": 0.1, "body": "base",
+            "frame": "environment_world", "force_n": [0.0, 5.0, 0.0],
+            "magnitude_n": 5.0, "application_point": "body_center_of_mass",
+        },
+    ])
+    np.testing.assert_allclose(_push_force_at(events, 0.999), [0.0, 0.0, 0.0])
+    np.testing.assert_allclose(_push_force_at(events, 1.15), [32.0, 5.0, 0.0])
+    np.testing.assert_allclose(_push_force_at(events, 1.25), [0.0, 0.0, 0.0])
+
+
+def test_mujoco_push_schedule_rejects_non_common_body():
+    with pytest.raises(ValueError, match="unsupported MuJoCo disturbance"):
+        _validated_push_events([{
+            "type": "constant_force", "start_time_s": 1.0,
+            "duration_s": 0.25, "body": "arm",
+            "frame": "environment_world", "force_n": [1.0, 0.0, 0.0],
+            "application_point": "body_center_of_mass",
+        }])
 
 
 def test_frozen_reference_reads_system_matrix_v3_wrapper_and_full_transform(tmp_path):
