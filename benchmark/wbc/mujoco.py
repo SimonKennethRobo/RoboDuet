@@ -359,10 +359,15 @@ def run(args) -> Tuple[Path, dict]:
     push_events = _validated_push_events(reference.task["disturbance_schedule"])
     scene = Path(args.scene).resolve()
     robot_dir = rl_sar_root / "policy" / "go2_x5"
-    if args.policy_adapter == "dwbc":
+    if args.policy_adapter == "umi":
+        from benchmark.wbc.umi_mujoco import UmiMujoco  # pylint: disable=import-outside-toplevel
+
+        sim = UmiMujoco(args.umi_checkpoint, scene)
+    elif args.policy_adapter in ("dwbc", "visual"):
         from benchmark.wbc.dwbc_mujoco import DwbcMujoco  # pylint: disable=import-outside-toplevel
 
-        sim = DwbcMujoco(args.dwbc_root, args.dwbc_checkpoint, scene)
+        sim = DwbcMujoco(args.dwbc_root, args.dwbc_checkpoint, scene,
+                         variant="visual" if args.policy_adapter == "visual" else "dwbc")
     elif args.policy_adapter == "wb_locoman":
         from benchmark.wbc.wb_locoman_mujoco import WbLocomanMujoco  # pylint: disable=import-outside-toplevel
 
@@ -674,7 +679,11 @@ def run(args) -> Tuple[Path, dict]:
     receipt = {
         "status": "complete" if len(trace["sample_present"]) else "failed",
         "backend": (
-            "mujoco-python-dwbc-boundary-v1"
+            "mujoco-python-umi-boundary-v1"
+            if args.policy_adapter == "umi"
+            else "mujoco-python-visual-wholebody-boundary-v1"
+            if args.policy_adapter == "visual"
+            else "mujoco-python-dwbc-boundary-v1"
             if args.policy_adapter == "dwbc"
             else "mujoco-python-wb-locoman-sidecar-v1"
             if args.policy_adapter == "wb_locoman"
@@ -684,7 +693,11 @@ def run(args) -> Tuple[Path, dict]:
         ),
         "runner_sha256": _sha256(Path(__file__).resolve()),
         "controller_adapter": (
-            "deep_whole_body_control_learned_joint_targets"
+            "umi_on_legs_learned_joint_targets"
+            if args.policy_adapter == "umi"
+            else "visual_wholebody_policy_plus_scripted_dls_ik_arm"
+            if args.policy_adapter == "visual"
+            else "deep_whole_body_control_learned_joint_targets"
             if args.policy_adapter == "dwbc"
             else
             "wb_locoman_fatrop_direct_torque"
@@ -722,10 +735,15 @@ def run(args) -> Tuple[Path, dict]:
             "resource_file_count": resource_file_count,
         },
         "policy": ({
-            "adapter": "deep_whole_body_control_checkpoint",
+            "adapter": "umi_on_legs_official_actor",
+            "model_sha256": _sha256(Path(args.umi_checkpoint)),
+            "adapter_sha256": _sha256(Path(__file__).with_name("umi_mujoco.py")),
+        } if args.policy_adapter == "umi" else {
+            "adapter": ("visual_wholebody_checkpoint" if args.policy_adapter == "visual"
+                        else "deep_whole_body_control_checkpoint"),
             "model_sha256": _sha256(Path(args.dwbc_checkpoint)),
             "adapter_sha256": _sha256(Path(__file__).with_name("dwbc_mujoco.py")),
-        } if args.policy_adapter == "dwbc" else {
+        } if args.policy_adapter in ("dwbc", "visual") else {
             "adapter": "wb_locoman_fatrop_sidecar",
             "sidecar_sha256": _sha256(Path(args.wb_locoman_root) / "benchmark_sidecar.py"),
             "controller_sha256": _sha256(Path(args.wb_locoman_root) / "controller.py"),
@@ -794,7 +812,7 @@ def main():
     parser.add_argument("--task-id")
     parser.add_argument("--rl-sar-root", required=True)
     parser.add_argument("--policy-key", required=True)
-    parser.add_argument("--policy-adapter", choices=("rl_sar", "ma2022", "wb_locoman", "dwbc"), default="rl_sar")
+    parser.add_argument("--policy-adapter", choices=("rl_sar", "ma2022", "wb_locoman", "dwbc", "visual", "umi"), default="rl_sar")
     parser.add_argument("--ma2022-deployment-root")
     parser.add_argument("--ma2022-policy")
     parser.add_argument("--ma2022-env-config")
@@ -803,6 +821,7 @@ def main():
     parser.add_argument("--wb-locoman-python", default="/opt/miniconda3/envs/base312/bin/python")
     parser.add_argument("--dwbc-root")
     parser.add_argument("--dwbc-checkpoint")
+    parser.add_argument("--umi-checkpoint")
     parser.add_argument("--scene", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--seed", type=int, default=0)

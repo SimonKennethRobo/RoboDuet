@@ -19,9 +19,11 @@ JOINT_NAMES = [
 class DwbcMujoco:
     controls_arm = True
 
-    def __init__(self, root, checkpoint, scene):
+    def __init__(self, root, checkpoint, scene, variant="dwbc"):
         self.root = Path(root).resolve()
-        sys.path.insert(0, str(self.root / "rsl_rl"))
+        self.variant = variant
+        self.controls_arm = variant == "dwbc"
+        sys.path.insert(0, str(self.root / ("third_party/rsl_rl" if variant == "visual" else "rsl_rl")))
         from rsl_rl.modules.actor_critic import ActorCritic
 
         self.model = mujoco.MjModel.from_xml_path(str(scene))
@@ -38,34 +40,41 @@ class DwbcMujoco:
             self.mapping.append(int(ids[0]))
         self.default_dof_pos = np.asarray([
             0.1, 0.8, -1.5, -0.1, 0.8, -1.5,
-            0.1, 0.8, -1.5, -0.1, 0.8, -1.5,
-            0.0, 1.5, 1.5, 0.0, 0.0, 0.0,
+            0.1, 1.0 if variant == "visual" else 0.8, -1.5,
+            -0.1, 1.0 if variant == "visual" else 0.8, -1.5,
+            0.0, 0.6 if variant == "visual" else 1.5,
+            0.5 if variant == "visual" else 1.5, 0.0, 0.0, 0.0,
         ])
         self.scale = np.asarray([0.4, 0.45, 0.45] * 4 + [1.0, 0.6, 0.6, 0.5, 0.5, 0.5])
         limits = self.model.actuator_ctrlrange[self.mapping]
         self.p = {
-            "decimation": 8,
+            "decimation": 4 if variant == "visual" else 8,
             "rl_kp": [35.0] * 12 + [50.0, 50.0, 80.0, 30.0, 20.0, 20.0],
-            "rl_kd": [1.0] * 12 + [2.0, 3.0, 3.0, 0.5, 0.3, 0.1],
+            "rl_kd": [1.0] * 12 + (
+                [8.0, 15.0, 15.0, 5.0, 4.0, 2.0]
+                if variant == "visual" else [2.0, 3.0, 3.0, 0.5, 0.3, 0.1]
+            ),
             "torque_limits": np.maximum(abs(limits[:, 0]), abs(limits[:, 1])).tolist(),
         }
-        self.control_dt = 0.0025
+        self.control_dt = 0.005 if variant == "visual" else 0.0025
         self.policy_dt = 0.02
         self.substeps = 1
+        prop_width = 71 if variant == "visual" else 76
+        priv_width = 18 if variant == "visual" else 24
         self.actor_critic = ActorCritic(
-            76, 76, 18, actor_hidden_dims=[128], critic_hidden_dims=[128],
+            prop_width, prop_width, 18, actor_hidden_dims=[128], critic_hidden_dims=[128],
             leg_control_head_hidden_dims=[128, 128], arm_control_head_hidden_dims=[128, 128],
             priv_encoder_dims=[64, 20], num_leg_actions=12, num_arm_actions=6,
             adaptive_arm_gains=False, adaptive_arm_gains_scale=10.0,
-            num_priv=24, num_hist=10, num_prop=76, zero_actor_output=False,
-            init_std=[[1.0] * 18],
+            num_priv=priv_width, num_hist=10, num_prop=prop_width, zero_actor_output=False,
+            init_std=[[1.0] * 18], output_tanh=False,
         ).eval()
         saved = torch.load(checkpoint, map_location="cpu")
         self.actor_critic.load_state_dict(saved["model_state_dict"], strict=True)
         self.checkpoint_path = Path(checkpoint)
-        self.history = np.zeros((10, 76), dtype=np.float32)
+        self.history = np.zeros((10, prop_width), dtype=np.float32)
         self.actions = np.zeros(18)
-        self.action_queue = [np.zeros(18) for _ in range(3)]
+        self.action_queue = [np.zeros(18) for _ in range(1 if variant == "visual" else 3)]
         self.command = [0.0] * 6
         self.gait_indices = 0.0
         self.goal_position = None
@@ -74,7 +83,7 @@ class DwbcMujoco:
 
     def reset_policy(self):
         self.history.fill(0.0)
-        self.action_queue = [np.zeros(18) for _ in range(3)]
+        self.action_queue = [np.zeros(18) for _ in range(1 if self.variant == "visual" else 3)]
 
     def set_reference(self, reference, time_s):
         _arc, self.goal_position, self.goal_quaternion = reference.at(time_s)
@@ -121,10 +130,24 @@ class DwbcMujoco:
         orientation_delta = (goal_rpy - np.asarray([0.0, 0.0, yaw]) + np.pi) % (2*np.pi) - np.pi
         q20 = np.r_[q, 0.0, 0.0]
         dq20 = np.r_[dq, 0.0, 0.0]
-        prop = np.r_[rpy[:2], gyro, q20 - np.r_[self.default_dof_pos, 0.0, 0.0],
-                     dq20 * 0.05, self.actions, self._contacts(), [0.0, 0.0, 0.0],
-                     sphere, orientation_delta].astype(np.float32)
-        if prop.shape != (76,) or not np.isfinite(prop).all():
+        if self.variant == "visual":
+            # Visual low-level keeps arm motion in scripted IK and observes
+            # only the previous 12 leg actions plus five standing-gait slots.
+            arm_base = base_pos + self.data.xmat[self.base].reshape(3, 3) @ np.array([0.05, 0.0, 0.1])
+            base_rotation = self.data.xmat[self.base].reshape(3, 3)
+            local_goal = base_rotation.T @ (self.goal_position - arm_base)
+            relative_rotation = base_rotation.T @ self._quat_matrix(self.goal_quaternion)
+            wxyz = np.empty(4)
+            mujoco.mju_mat2Quat(wxyz, relative_rotation.reshape(-1))
+            local_orientation = wxyz[1:] * (1.0 if wxyz[0] >= 0.0 else -1.0)
+            prop = np.r_[rpy[:2], gyro, q - self.default_dof_pos, dq * 0.05,
+                         self.actions[:12], self._contacts(), [0.0, 0.0, 0.0],
+                         local_goal, local_orientation, np.zeros(5)].astype(np.float32)
+        else:
+            prop = np.r_[rpy[:2], gyro, q20 - np.r_[self.default_dof_pos, 0.0, 0.0],
+                         dq20 * 0.05, self.actions, self._contacts(), [0.0, 0.0, 0.0],
+                         sphere, orientation_delta].astype(np.float32)
+        if prop.shape != (self.history.shape[1],) or not np.isfinite(prop).all():
             raise ValueError(f"invalid DWBC proprioception {prop.shape}")
         if not np.any(self.history):
             self.history[:] = prop
@@ -135,7 +158,16 @@ class DwbcMujoco:
         self.history[-1] = prop
         self.action_queue.append(np.clip(action, -100.0, 100.0))
         self.actions = self.action_queue.pop(0)
+        if self.variant == "visual":
+            self.actions[12:] = 0.0
         return self.actions.copy()
 
     def compute_output(self, actions):
         return self.default_dof_pos + self.scale * actions
+
+    @staticmethod
+    def _quat_matrix(quat):
+        x, y, z, w = quat / np.linalg.norm(quat)
+        return np.asarray([[1-2*(y*y+z*z), 2*(x*y-z*w), 2*(x*z+y*w)],
+                           [2*(x*y+z*w), 1-2*(x*x+z*z), 2*(y*z-x*w)],
+                           [2*(x*z-y*w), 2*(y*z+x*w), 1-2*(x*x+y*y)]])

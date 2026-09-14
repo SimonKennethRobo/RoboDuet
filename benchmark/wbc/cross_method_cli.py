@@ -106,14 +106,12 @@ def _method_contracts() -> dict[str, dict]:
             "root": DEFAULT_RL_SAR_ROOT / "deploy/ma2022", "common_mujoco": True,
         },
         "visual_wholebody": {
-            "backend": "checkpoint_only",
-            "root": WORKSPACE_ROOT / "baselines/visual_wholebody", "common_mujoco": False,
-            "blocker": "only an IsaacGym cross-wbc-v1 adapter exists; no MuJoCo observation adapter",
+            "backend": "visual_checkpoint_mujoco", "policy_key": "unused",
+            "root": WORKSPACE_ROOT / "baselines/visual_wholebody", "common_mujoco": True,
         },
         "umi": {
-            "backend": "checkpoint_only",
-            "root": WORKSPACE_ROOT / "baselines/umi-on-legs/mani-centric-wbc", "common_mujoco": False,
-            "blocker": "only an IsaacGym cross-wbc-v1 adapter exists; no MuJoCo observation adapter",
+            "backend": "umi_checkpoint_mujoco", "policy_key": "unused",
+            "root": WORKSPACE_ROOT / "baselines/umi-on-legs/mani-centric-wbc", "common_mujoco": True,
         },
         "deep_whole_body_control": {
             "backend": "dwbc_checkpoint_mujoco",
@@ -447,6 +445,16 @@ def run_policy_method(args) -> tuple[Path, list[dict]]:
             command.extend([
                 "--policy-adapter", "dwbc", "--dwbc-root", str(contract["root"]),
                 "--dwbc-checkpoint", str(contract["root"] / "legged_gym/logs/go2_x5/1789388761_go2_x5_reward_fix/model_11000.pt"),
+            ])
+        elif args.method == "visual_wholebody":
+            command.extend([
+                "--policy-adapter", "visual", "--dwbc-root", str(contract["root"]),
+                "--dwbc-checkpoint", str(contract["root"] / "low-level/logs/go2x5-visual-low/go2x5_low_v6_velocity_curriculum_tb_resume1000/model_24000.pt"),
+            ])
+        elif args.method == "umi":
+            command.extend([
+                "--policy-adapter", "umi",
+                "--umi-checkpoint", str(contract["root"] / "checkpoints/tossing/ours-real/model.pt"),
             ])
         commands.append(command)
         if args.prepare_only:
