@@ -105,3 +105,6 @@ All 16 scenario receipts exited without a numerical fault and have complete
 common physical metric coverage. None passed the endpoint/tracking/hold success
 gate on this long task; this run validates executable integration, not method
 quality or promotion.
+
+The follow-up A0/B1 harder-trajectory run, including all 16 videos and tracking
+plots, is documented in `benchmark/wbc/CROSS_METHOD_HARDER_A0_B1.md`.
