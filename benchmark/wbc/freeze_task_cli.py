@@ -10,7 +10,7 @@ from pathlib import Path
 
 import numpy as np
 
-from benchmark.wbc.suite import finalize_task_spec, refresh_suite_hash
+from benchmark.wbc.suite import SUITE_VERSION, finalize_task_spec, refresh_suite_hash
 
 
 def _sha256(path: Path) -> str:
@@ -36,6 +36,7 @@ def freeze_task(source, task_id: str, output, deadline_s: float) -> tuple[Path, 
         raise ValueError(f"expected one source task {task_id!r}, found {len(matches)}")
     wrapper, source_group, row, source_task = matches[0]
     group = copy.deepcopy(source_group)
+    group["suite_version"] = SUITE_VERSION
     task = copy.deepcopy(source_task)
     anchor = task.get("anchor_env_local_xyz_m")
     if anchor is None:
