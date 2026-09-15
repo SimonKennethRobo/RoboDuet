@@ -1,4 +1,4 @@
-"""Reproducible I_Q command-response identification using the deployed bundle.
+"""Reproducible command-response identification using an RL-SAR deployed bundle.
 
 No PPO, policy changes, or external processes are needed for data collection.
 All samples use MuJoCo state at a policy boundary, then the recorded command
@@ -20,9 +20,11 @@ import numpy as np
 import torch
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "scripts"))
-from sim2sim_mujoco import RlSarMujoco
-from rl_sar_obs import quat_to_euler_np
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from scripts.sim2sim_mujoco import RlSarMujoco
+from scripts.rl_sar_obs import quat_to_euler_np
+from sysid.identification_bundle import load_bundle_contract
 
 STACK = Path("/home/simon/Projects/Simon/wbc_rl_mpc")
 CHANNELS = ["vx", "vy", "wz", "height", "pitch", "roll"]
@@ -37,72 +39,93 @@ def write_json(path, value):
     Path(path).write_text(json.dumps(value, indent=2, allow_nan=False) + "\n")
 
 
-def protocol():
+def protocol(command_channels=CHANNELS):
     episodes = []
-    # IDs, excitation RNG, initial states, and arm motions are frozen before
-    # fitting. Each split has fresh excitation and initial-state seeds.
-    for split, seed in [("train", 6101), ("development", 7101), ("test", 8101)]:
-        for channel in range(6):
-            waves = ["steps", "chirp"] if split == "train" else ["prbs"]
+    active = [CHANNELS.index(name) for name in command_channels]
+    # Disjoint realizations/seeds/phases prevent the held-out split from
+    # repeating training commands. Joint excitation exposes channel coupling.
+    settings = {
+        "train": (6101, ["steps", "chirp"], 1.0),
+        "development": (7101, ["multisine"], 1.17),
+        "test": (8101, ["prbs"], .87),
+    }
+    for split, (seed, waves, frequency_scale) in settings.items():
+        for channel in active:
             for wave in waves:
                 for walking in ([False, True] if split == "train" else [True]):
                     episodes.append(dict(split=split, channel=channel, waveform=wave,
-                        walking=walking, arm="fixed", duration_s=20., seed=seed + len(episodes)))
-        velocities = [[.2, 0, 0], [.4, 0, 0], [.6, 0, 0], [-.3, 0, 0],
-                      [0, .25, 0], [0, 0, .5]]
-        for velocity in velocities:
-            for arm in ["fixed", "moving"]:
-                episodes.append(dict(split=split, channel=-1, waveform="steady",
-                    velocity=velocity, walking=True, arm=arm, duration_s=20., seed=seed + len(episodes)))
+                        walking=walking, arm="fixed", duration_s=20., frequency_scale=frequency_scale,
+                        seed=seed + len(episodes)))
+        for wave in ["multisine", "prbs", "chirp"]:
+            for walking in [False, True]:
+                for arm in ["fixed", "moving"]:
+                    episodes.append(dict(split=split, channel=-1, waveform=wave,
+                        walking=walking, arm=arm, duration_s=20., frequency_scale=frequency_scale,
+                        excited_channels=active, seed=seed + len(episodes)))
     for index, episode in enumerate(episodes):
         episode["id"] = f"{episode['split']}_{index:03d}"
-    return dict(schema="iq_mujoco_identification_v1", channels=CHANNELS,
+        episode["available_channels"] = active
+        rng = np.random.default_rng(episode["seed"])
+        episode["initial_phase_rad"] = float(rng.uniform(0, 2*np.pi))
+        episode["arm_phase_rad"] = float(rng.uniform(-np.pi, np.pi))
+        episode["arm_frequency_scale"] = float(rng.uniform(.85, 1.15))
+    return dict(schema="policy_mujoco_identification_v2", channels=CHANNELS,
         policy="I_Q", checkpoint_iteration=32498, policy_dt_s=.02, control_dt_s=.005,
         physics_dt_s=.0025, integrator="implicitfast", gait_frequency_hz=2.75,
         warmup_s=3., frame="heading vx/vy at trunk, body wz, arm-mount world z, ZYX pitch/roll",
         command_order="vx,vy,wz,height_offset,pitch,roll",
-        nominal_model="six independent first-order gain/tau/bias, no assumed pure delay",
+        nominal_models=["first_order", "first_order_delay", "critically_damped_second_order_delay"],
         residual_model="(a0+a1*speed)*sin(harmonic*phase+offset), z/pitch/roll",
         harmonic_candidates=[1, 2, 3, 4], prediction_horizons_s=[.1, .3, .6, 1.0],
-        selection="train fits; development chooses residual harmonics; test is final only",
+        selection="train fits; development chooses residual harmonics and F0/F1/F1_gait/F2; test is final only",
         failure="nonfinite state/action, trunk z<0.15 m, abs roll/pitch>0.85 rad, MuJoCo warning",
         scope="flat-ground native MJCF, fixed gait; moving-arm holdout; not hardware evidence",
-        episodes=episodes)
+        delay_candidates_s=[0., .02, .04, .06, .10],
+        command_channels=list(command_channels),
+        command_limits=[float(AMPLITUDES[c]) if c in active else 0. for c in range(6)], episodes=episodes)
 
 
 def commands(episode, dt=.02):
     t = np.arange(round(episode["duration_s"] / dt) + 1) * dt
     u = np.zeros((len(t), 6))
-    if episode["waveform"] == "steady":
-        u[:, :3] = episode["velocity"]
-    else:
-        c = episode["channel"]
-        if episode["walking"]:
-            u[:, 0] = .35
-        rng = np.random.default_rng(episode["seed"])
+    channels = episode.get("excited_channels", range(6)) if episode["channel"] < 0 else [episode["channel"]]
+    rng = np.random.default_rng(episode["seed"])
+    scale = episode.get("frequency_scale", 1.)
+    for c in channels:
+        phase = rng.uniform(-np.pi, np.pi, 3)
         if episode["waveform"] == "steps":
-            signal = np.array([0., .5, -.5, 1., -1., .7, -.7, 0.])
-            signal = signal[np.minimum((t / 2.5).astype(int), 7)]
+            values = np.array([0., .5, -.5, 1., -1., .7, -.7, 0.])
+            signal = values[np.minimum((t / 2.5).astype(int), 7)]
         elif episode["waveform"] == "chirp":
-            phase = rng.uniform(-np.pi, np.pi)
-            signal = np.sin(2*np.pi*(.06*t + .5*(1.4-.06)/20*t*t) + phase)
+            signal = np.sin(2*np.pi*(.06*scale*t + .5*(1.4-.06)*scale/20*t*t) + phase[0])
+        elif episode["waveform"] == "multisine":
+            signal = sum(weight*np.sin(2*np.pi*frequency*scale*t+p)
+                         for weight, frequency, p in zip([.5,.3,.2], [.11,.29,.61], phase))
+        elif episode["waveform"] == "prbs":
+            values = rng.choice([-1., 1.], size=20)
+            signal = values[np.minimum((t / 1.25).astype(int), len(values)-1)]
         else:
-            signal = rng.uniform(-1., 1., 20)[np.minimum((t / 1.25).astype(int), 19)]
-        u[:, c] = AMPLITUDES[c] * signal
-        if c == 0 and episode["walking"]:
-            u[:, 0] = .35 + .23 * signal
+            raise ValueError(f"unknown waveform {episode['waveform']}")
+        amplitude = .23 if c == 0 and episode["walking"] else AMPLITUDES[c]
+        u[:, c] = amplitude * signal
+    if episode["walking"] and 0 in episode.get("available_channels", range(6)):
+        u[:, 0] += .25
+    u = np.clip(u, -AMPLITUDES, AMPLITUDES)
     return t, u
 
 
 class IdentificationPlant:
-    def __init__(self, robot_dir, scene, seed):
-        self.sim = RlSarMujoco(robot_dir, "I_Q", scene, seed=seed)
+    def __init__(self, robot_dir, scene, seed, policy_key="I_Q"):
+        load_bundle_contract(robot_dir, policy_key)
+        self.sim = RlSarMujoco(robot_dir, policy_key, scene, seed=seed)
         s = self.sim
         s.model.opt.timestep = .0025
         s.model.opt.integrator = mujoco.mjtIntegrator.mjINT_IMPLICITFAST
         s.substeps = 2
-        if s.obs_width != 90 or s.history_length != 30 or abs(s.policy_dt-.02) > 1e-10:
-            raise ValueError("I_Q contract must be 90x30, 50 Hz")
+        with torch.no_grad():
+            probe = s.policy(torch.zeros(1, s.obs_width * len(s.history_index)))
+        if not isinstance(probe, torch.Tensor) or tuple(probe.shape) != (1, 12) or not torch.isfinite(probe).all():
+            raise ValueError("Policy must accept flattened observation history and return 12 finite leg actions")
         self.base = s.model.body("base_link").id
         self.mount = s.model.body("x5_base_link").id
         self.ee = s.model.site("x5_ee").id
@@ -184,15 +207,22 @@ class IdentificationPlant:
 
 
 def collect(args):
+    policy_key = getattr(args, "policy_key", "I_Q")
+    args.robot_dir = str(Path(args.robot_dir).resolve())
+    contract = load_bundle_contract(args.robot_dir, policy_key)
     out = Path(args.output).resolve()
     out.mkdir(parents=True, exist_ok=True)
     spec_path = out / "protocol.json"
     if not spec_path.exists():
-        spec = json.loads(Path(args.protocol_file).read_text()) if args.protocol_file else protocol()
+        spec = json.loads(Path(args.protocol_file).read_text()) if args.protocol_file else protocol(contract["command_channels"])
+        if not args.protocol_file:
+            spec.update(contract)
+            spec["checkpoint_iteration"] = None  # The policy file hash is authoritative.
+            spec["scene"] = str(Path(args.scene).resolve())
         files = [Path(__file__), ROOT/"scripts/sim2sim_mujoco.py", ROOT/"scripts/rl_sar_obs.py",
-                 Path(args.robot_dir)/"base.yaml", Path(args.robot_dir)/"I_Q/config.yaml",
-                 Path(args.robot_dir)/"I_Q/policy.pt", STACK/"overleaf/3method.tex"]
-        files += sorted(Path(args.scene).parent.glob("*.xml"))
+                 Path(args.robot_dir)/"base.yaml", Path(args.robot_dir)/policy_key/"config.yaml",
+                 Path(args.robot_dir)/policy_key/"policy.pt", ROOT/"sysid/identification_bundle.py"]
+        files += sorted(Path(args.scene).resolve().parent.glob("*.xml"))
         write_json(out/"input_manifest.json", dict(files={str(p): sha(p) for p in files},
             python=sys.version, mujoco=mujoco.__version__, torch=torch.__version__))
         write_json(spec_path, spec)
@@ -200,6 +230,12 @@ def collect(args):
         for p in files[:3]:
             shutil.copy2(p, out/"source"/p.name)
     spec = json.loads(spec_path.read_text())
+    if spec.get("policy", "I_Q") != policy_key:
+        raise ValueError("Existing collection belongs to a different policy; use a new output directory")
+    if "robot_dir" in spec and Path(spec["robot_dir"]).resolve() != Path(args.robot_dir).resolve():
+        raise ValueError("Existing collection uses a different robot bundle directory")
+    if "scene" in spec and Path(spec["scene"]).resolve() != Path(args.scene).resolve():
+        raise ValueError("Existing collection uses a different scene")
     if args.protocol_file and spec != json.loads(Path(args.protocol_file).read_text()):
         raise ValueError("existing collection protocol differs from the requested protocol")
     manifest = json.loads((out/"input_manifest.json").read_text())
@@ -213,10 +249,13 @@ def collect(args):
     for episode in episodes:
         dest = out/"raw"/episode["id"]
         if dest.with_suffix(".json").exists():
+            saved = json.loads(dest.with_suffix(".json").read_text())
+            if sha(dest.with_suffix(".npz")) != saved["sha256"]:
+                raise ValueError(f"Existing raw data hash mismatch: {dest}")
             continue
         dest.parent.mkdir(parents=True, exist_ok=True)
         begin = time.monotonic()
-        plant = IdentificationPlant(args.robot_dir, args.scene, episode["seed"])
+        plant = IdentificationPlant(args.robot_dir, args.scene, episode["seed"], policy_key)
         # Independent held-out oscillator starts; the standing observation
         # clock is phase-independent, so its warmup history remains valid.
         plant.sim.gait_indices = episode.get("initial_phase_rad", 0.)/(2*np.pi)
@@ -253,6 +292,7 @@ def main():
     parser.add_argument("mode", choices=["collect"])
     parser.add_argument("--output", default=str(ROOT/"tmp/experiments/20260915_iq_identification"))
     parser.add_argument("--robot-dir", default=str(STACK/"rl_sar/policy/go2_x5"))
+    parser.add_argument("--policy-key", default="I_Q", help="RL-SAR deployment key under --robot-dir")
     parser.add_argument("--scene", default=str(STACK/"rl_sar/src/rl_sar_zoo/go2_x5_description/mjcf/scene.xml"))
     parser.add_argument("--split", choices=["all", "train", "development", "test"], default="all")
     parser.add_argument("--limit", type=int, default=0)

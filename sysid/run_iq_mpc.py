@@ -1,4 +1,4 @@
-"""Export I_Q fitted task files and run their native OCS2/MuJoCo closed loop."""
+"""Export fitted policy task files and run their native OCS2/MuJoCo closed loop."""
 from __future__ import annotations
 
 import argparse
@@ -13,7 +13,11 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 import torch
 
-from identify_iq_mujoco import IdentificationPlant, ROOT, STACK, CHANNELS, sha, write_json
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from sysid.identify_iq_mujoco import IdentificationPlant, ROOT, STACK, CHANNELS, sha, write_json
 sys.path.insert(0, str(ROOT))
 from benchmark.wbc.controllers import NativeOcs2Transport, encode_ocs2_state_values
 
@@ -33,10 +37,34 @@ def block_span(text, key):
     raise ValueError("unbalanced task")
 
 
-def export(root):
+def export(root, stack_root=STACK):
+    root, stack_root = Path(root).resolve(), Path(stack_root).resolve()
+    spec = json.loads((root/"protocol.json").read_text())
+    policy_key = spec.get("policy", "I_Q")
+    robot_dir = Path(spec.get("robot_dir", str(stack_root/"rl_sar/policy/go2_x5")))
+    frequency = float(spec.get("gait_frequency_hz", 2.75))
+    limits = np.asarray(spec.get("command_limits", LIMITS), dtype=float)
+    if limits.shape != (6,) or not np.isfinite(limits).all() or np.any(limits < 0.):
+        raise ValueError("protocol command_limits must contain six finite nonnegative values")
+    # Interior-point input boxes must have nonzero width. Missing policy
+    # channels remain optimizer no-ops through gain=0 and are clamped to zero
+    # by identifiedDeployment/bridge, while the solver retains a valid box.
+    solver_limits = np.where(limits > 0., limits, LIMITS)
+    stop_at_stand = "true" if spec.get("stop_gait_at_stand", True) else "false"
+    prefix = f"task_{policy_key}"
+    inputs = json.loads((root/"input_manifest.json").read_text())["files"]
+    for path in [robot_dir/"base.yaml", robot_dir/policy_key/"config.yaml", robot_dir/policy_key/"policy.pt"]:
+        if inputs.get(str(path)) != sha(path):
+            raise ValueError(f"Policy bundle differs from collected data: {path}")
+    selection = json.loads((root/"models_v2/selection.json").read_text())
+    if selection["protocol_sha256"] != sha(root/"protocol.json"):
+        raise ValueError("Fitted model and collection protocol do not match")
+    for name, digest in selection.get("model_hashes", {}).items():
+        if sha(root/"models_v2"/f"{name}.json") != digest:
+            raise ValueError(f"Fitted model was modified: {name}")
     out = root/"mpc"
     out.mkdir(exist_ok=True)
-    source = STACK/"go2_x5_ocs2/config/task_floating.info"
+    source = stack_root/"go2_x5_ocs2/config/task_floating.info"
     text = source.read_text()
     # A mount-height state must not be constrained by the old trunk-height
     # [0.2,0.35] box. All three compared controllers share this correction.
@@ -45,16 +73,27 @@ def export(root):
     text = re.sub(r"recompileLibraries\s+true", "recompileLibraries false", text)
     # Frozen initial values are superseded by the first measured observation.
     # Preserve original costs/arm geometry and keep self collision enabled.
-    (out/"task_I_Q_ideal.info").write_text(text)
+    (out/f"{prefix}_ideal.info").write_text(text)
     manifests = {}
-    for label, filename in [("first_order", "F0.json"), ("gait", "F1_gait.json")]:
+    selected_name = selection.get("selected_model", "F1_gait")
+    exports = [("first_order", "F0", False), ("first_order_delay", "F1", False),
+               ("gait", "F1_gait", True), ("second_order", "F2", False),
+               ("selected", selected_name, selected_name == "F1_gait")]
+    for label, model_name, residual_active in exports:
+        filename = f"{model_name}.json"
         model_path = root/"models_v2"/filename
+        if not model_path.is_file():
+            continue
         model = json.loads(model_path.read_text())
         task = re.sub(r"manipulatorModelType\s+3", "manipulatorModelType 4", text)
+        if model_name == "F2":
+            # F2 changes the AD state dimension. Never load a first-order cache
+            # with the same task profile; generate a dimension-matched library.
+            task = re.sub(r"recompileLibraries\s+false", "recompileLibraries true", task)
         blocks = list(re.finditer(r"fullyActuatedFloatingArmManipulator\s*\{[^{}]*\}", task))
         if len(blocks) != 4:
             raise ValueError("expected initial state, input cost, lower/upper command blocks")
-        values = [[0, 0, .4, 0, 0, 0, 0, 0, 0, 0], None, -LIMITS, LIMITS]
+        values = [[0, 0, .4, 0, 0, 0, 0, 0, 0, 0], None, -solver_limits, solver_limits]
         for index, match in reversed(list(enumerate(blocks))):
             if index == 1:
                 entries = "\n".join(f" ({j},{j}) {w}" for j, w in enumerate([.2,.2,.15,.3,.4,.4]))
@@ -63,27 +102,40 @@ def export(root):
             task = task[:match.end()]+"\n policyAwareFloatingArmManipulator\n {\n"+entries+"\n }\n"+task[match.end():]
         task = task.replace("inputCost\n{", "inputCost\n{\n physicalMotion true\n physicalMotionWeights\n {\n"+
             "\n".join(f" ({j},0) {w}" for j,w in enumerate([.2,.2,.3,.15,.4,.4]+[.01]*6))+"\n }\n", 1)
-        task += "\n; I_Q model independently fitted in MuJoCo; mounting-plane coordinates.\npolicyResponseModel\n{\n transportDelays false\n bodyFrameVelocity false\n stopGaitAtStand true\n heightOffset 0\n gaitFrequency 2.75\n nominal\n {\n"
+        response_order = 2 if model_name == "F2" else 1
+        residual_active = residual_active and any("residual" in model[name] for name in CHANNELS[3:])
+        transport_delays = any(model[name].get("delay_s", 0.) > 0 for name in CHANNELS[:5])
+        task += (f"\n; {policy_key} {model_name} independently fitted in MuJoCo; mounting-plane coordinates.\n"
+                 f"policyResponseModel\n{{\n responseOrder {response_order}\n transportDelays {'true' if transport_delays else 'false'}\n bodyFrameVelocity false\n"
+                 f" stopGaitAtStand {stop_at_stand}\n heightOffset 0\n gaitFrequency {frequency:.17g}\n nominal\n {{\n")
         for name in CHANNELS:
             c = model[name]
-            task += f" {name} {{ gain {c['gain']:.17g} timeConstant {c['tau_s']:.17g} bias {c['bias']:.17g} delay 0 }}\n"
-        task += " }\n gaitResidual\n {\n activate "+("true" if label == "gait" else "false")+"\n"
-        if label == "gait":
+            omega = c.get("natural_frequency_rad_s", 1./c.get("tau_s", .15))
+            tau = c.get("tau_s", 1./omega)
+            task += (f" {name} {{ gain {c['gain']:.17g} timeConstant {tau:.17g} "
+                     f"bias {c['bias']:.17g} delay {c.get('delay_s', 0.):.17g} naturalFrequency {omega:.17g} }}\n")
+        task += " }\n gaitResidual\n {\n activate "+("true" if residual_active else "false")+"\n"
+        if residual_active:
             for name, field in [("height", "z"), ("pitch", "pitch"), ("roll", "roll")]:
-                r = model[name]["residual"]
+                r = model[name].get("residual", dict(amplitude=0., speed_amplitude=0., harmonic=1, phase_offset=0.))
                 task += f" {field} {{ amplitude {r['amplitude']:.17g} speedAmplitude {r['speed_amplitude']:.17g} harmonic {r['harmonic']} phaseOffset {r['phase_offset']:.17g} }}\n"
         task += " }\n}\nidentifiedDeployment\n{\n"
         for bound, sign in [("commandMin", -1), ("commandMax", 1)]:
-            task += " "+bound+"\n {\n"+"\n".join(f" {name} {sign*limit}" for name,limit in zip(CHANNELS,LIMITS))+"\n }\n"
+            task += " "+bound+"\n {\n"+"\n".join(f" {name} {sign*limit}" for name,limit in zip(CHANNELS,limits))+"\n }\n"
         task += "}\n"
-        path = out/f"task_I_Q_{label}.info"
+        path = out/f"{prefix}_{label}.info"
         path.write_text(task)
-        manifests[label] = dict(model=str(model_path), model_sha256=sha(model_path),
-            task=str(path), task_sha256=sha(path), state_dim=16, input_dim=12)
+        manifests[label] = dict(model_name=model_name, model=str(model_path), model_sha256=sha(model_path),
+            task=str(path), task_sha256=sha(path), response_order=response_order,
+            transport_delays=transport_delays,
+            state_dim=16+(10 if transport_delays else 0)+(6 if response_order == 2 else 0), input_dim=12)
     write_json(out/"manifest.json", dict(models=manifests, source_task=str(source),
-        source_task_sha256=sha(source), ideal_task_sha256=sha(out/"task_I_Q_ideal.info"),
-        policy_sha256=sha(STACK/"rl_sar/policy/go2_x5/I_Q/policy.pt"),
-        command_limits=LIMITS.tolist(), scope="flat ground, fixed 2.75Hz gait; limits are sampled ranges, not a learned feasibility envelope"))
+        source_task_sha256=sha(source), ideal_task_sha256=sha(out/f"{prefix}_ideal.info"),
+        policy=policy_key, robot_dir=str(robot_dir), stack_root=str(stack_root),
+        policy_sha256=sha(robot_dir/policy_key/"policy.pt"),
+        protocol_sha256=sha(root/"protocol.json"), selection_sha256=sha(root/"models_v2/selection.json"),
+        command_channels=spec.get("command_channels", CHANNELS), command_limits=limits.tolist(),
+        scope=f"flat ground, fixed {frequency:g}Hz gait; limits are sampled ranges, not a learned feasibility envelope"))
     print(json.dumps(manifests, indent=2))
 
 
@@ -107,9 +159,15 @@ def reference(initial, seconds, scenario):
 def run(args):
     root = Path(args.root).resolve()
     deployment = json.loads((root/"mpc/manifest.json").read_text())
+    limits = np.asarray(deployment.get("command_limits", LIMITS), dtype=float)
+    spec = json.loads((root/"protocol.json").read_text())
+    policy_key = deployment.get("policy", "I_Q")
+    stack_root = Path(deployment.get("stack_root", str(STACK)))
+    robot_dir = Path(deployment.get("robot_dir", str(stack_root/"rl_sar/policy/go2_x5")))
+    scene = args.scene or spec.get("scene", str(stack_root/"rl_sar/src/rl_sar_zoo/go2_x5_description/mjcf/scene.xml"))
     inputs = json.loads((root/"input_manifest.json").read_text())["files"]
-    for path in [STACK/"rl_sar/policy/go2_x5/base.yaml", STACK/"rl_sar/policy/go2_x5/I_Q/config.yaml",
-                 STACK/"rl_sar/policy/go2_x5/I_Q/policy.pt", *Path(args.scene).parent.glob("*.xml")]:
+    for path in [robot_dir/"base.yaml", robot_dir/policy_key/"config.yaml",
+                 robot_dir/policy_key/"policy.pt", *Path(scene).parent.glob("*.xml")]:
         if str(path) not in inputs or sha(path) != inputs[str(path)]:
             raise ValueError(f"identified plant input changed: {path}")
     output = Path(args.output).resolve() if args.output else root/"closed_loop"/f"{args.scenario}_{args.controller}_s{args.seed}"
@@ -117,18 +175,18 @@ def run(args):
         raise FileExistsError("finished trial exists; use a new output")
     output.mkdir(parents=True, exist_ok=True)
     torch.set_num_threads(1)
-    plant = IdentificationPlant(STACK/"rl_sar/policy/go2_x5", args.scene, args.seed)
+    plant = IdentificationPlant(robot_dir, scene, args.seed, policy_key)
     init = plant.snapshot()
     times, poses = reference(init, args.seconds, args.scenario)
     np.savez_compressed(output/"reference.npz", times=times, poses=poses)
-    task = root/"mpc"/f"task_I_Q_{args.controller}.info"
+    task = root/"mpc"/f"task_{policy_key}_{args.controller}.info"
     expected_task = (deployment["ideal_task_sha256"] if args.controller == "ideal"
                      else deployment["models"][args.controller]["task_sha256"])
     if sha(task) != expected_task:
         raise ValueError("MPC task differs from the frozen exported model")
-    runtime_hashes = {str(p): sha(p) for p in [Path(__file__), ROOT/"scripts/identify_iq_mujoco.py",
+    runtime_hashes = {str(p): sha(p) for p in [Path(__file__), ROOT/"sysid/identify_iq_mujoco.py",
         ROOT/"scripts/sim2sim_mujoco.py", ROOT/"scripts/rl_sar_obs.py", ROOT/"benchmark/wbc/controllers.py",
-        STACK/"ros2_ws/install/go2_x5_ocs2_bridge/lib/go2_x5_ocs2_bridge/wbc_benchmark_sync"]}
+        stack_root/"ros2_ws/install/go2_x5_ocs2_bridge/lib/go2_x5_ocs2_bridge/wbc_benchmark_sync"]}
     transport = None
     viewer = None
     if args.viewer:
@@ -139,7 +197,7 @@ def run(args):
     fail = plant.failure()
     begin = time.monotonic()
     try:
-        transport = NativeOcs2Transport(output/"ocs2", STACK, mode="synchronous",
+        transport = NativeOcs2Transport(output/"ocs2", stack_root, mode="synchronous",
             task_profile="native_ideal", task_file=task, timeout_s=300.)
         for k in range(round(args.seconds/.02)):
             if fail or (viewer and not viewer.is_running()):
@@ -154,7 +212,7 @@ def run(args):
                 poses if k == 0 else None, gait_phase_rad=state["phase"])
             solve_wall = time.monotonic()-tic
             u_raw = np.r_[command["base_velocity_body"], command["body_posture"]]
-            u = np.clip(u_raw, -LIMITS, LIMITS)
+            u = np.clip(u_raw, -limits, limits)
             arm = np.asarray(command["arm_q_cmd"])
             qdot = np.asarray(command["arm_dq_cmd"])
             if not np.isfinite(np.r_[u,arm,qdot]).all():
@@ -191,7 +249,7 @@ def run(args):
             wall_seconds=time.monotonic()-begin, task_sha256=sha(task),
             runtime_hashes=runtime_hashes, reference_sha256=sha(output/"reference.npz"),
             transport_statistics=transport.runtime_stats if transport else {},
-            policy_sha256=sha(STACK/"rl_sar/policy/go2_x5/I_Q/policy.pt"),
+            policy=policy_key, policy_sha256=sha(robot_dir/policy_key/"policy.pt"),
             phase_source="actual RlSarMujoco policy clock at measured state boundary",
             protocol="simulator-time native C++ SQP/MRT, Python rl_sar mirror, original explicit torque PD",
             arm_model="ideal dq integration plus existing MRT position lookahead; actual plant has PD/target slew",
@@ -212,8 +270,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=["export", "run"])
     parser.add_argument("--root", default=str(ROOT/"tmp/experiments/20260915_iq_identification"))
-    parser.add_argument("--scene", default=str(STACK/"rl_sar/src/rl_sar_zoo/go2_x5_description/mjcf/scene.xml"))
-    parser.add_argument("--controller", choices=["ideal", "first_order", "gait"], default="first_order")
+    parser.add_argument("--scene", help="Defaults to the scene used for collection")
+    parser.add_argument("--stack-root", default=str(STACK), help="OCS2 stack root for export")
+    parser.add_argument("--controller", choices=["ideal", "first_order", "first_order_delay", "gait", "second_order", "selected"], default="selected")
     parser.add_argument("--scenario", choices=["hold", "curve", "long_curve", "walking_curve"], default="curve")
     parser.add_argument("--seconds", type=float, default=16.)
     parser.add_argument("--seed", type=int, default=9101)
@@ -221,6 +280,6 @@ if __name__ == "__main__":
     parser.add_argument("--viewer", action="store_true")
     args = parser.parse_args()
     if args.mode == "export":
-        export(Path(args.root).resolve())
+        export(Path(args.root).resolve(), Path(args.stack_root).resolve())
     else:
         run(args)

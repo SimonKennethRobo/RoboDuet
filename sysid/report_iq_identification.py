@@ -3,8 +3,14 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import sys
 import numpy as np
-from identify_iq_mujoco import ROOT, CHANNELS, sha, write_json
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from sysid.identify_iq_mujoco import ROOT, CHANNELS, sha, write_json
 
 
 def main(root):
@@ -93,7 +99,7 @@ def main(root):
         "`source/iq_response_model_fit_v2.py` 保存了散列与 selection.json 一致的精确拟合源码。原拟合的速度平方平滑项为 1e-8；冻结参数后，正式验证与 MPC 统一为 1e-6，没有重新拟合或选谐波。",
         "`mpc_preflight/gait/` 保留命令字段名错误的失败预检；`closed_loop/` 保留尚未展开相位的第一轮 18 条闭环。正式闭环以 `closed_loop_v2/` 为准；该修正只改变相位测量接入，没有再拟合模型或调整代价。",
         "重新评估冻结模型：", "", "```bash",
-        "/opt/miniconda3/envs/base312/bin/python scripts/iq_response_model.py --evaluate-only \\",
+        "/opt/miniconda3/envs/base312/bin/python sysid/iq_response_model.py --evaluate-only \\",
         "  --data-root tmp/experiments/20260915_iq_identification/independent_holdout \\",
         "  --report-name independent_prediction_recheck.json", "```", "",
         "策略 SHA256：`60e70cc4ad2a885e0b469f7a39b11b7d851e46595b7a7382ee9eb10a205a14f0`。模型、原始数据和运行文件散列见各 manifest/receipt 以及 `handoff_manifest.json`。", ""]
