@@ -116,6 +116,8 @@ def _add_path(scene, points, rgba, max_points=90) -> None:
 def _replay_video(trace: dict, scene_path: Path, output: Path, method: str,
                   scenario: str, fps: int, width: int, height: int) -> None:
     model = mujoco.MjModel.from_xml_path(str(scene_path))
+    model.vis.global_.offwidth = max(int(model.vis.global_.offwidth), width)
+    model.vis.global_.offheight = max(int(model.vis.global_.offheight), height)
     data = mujoco.MjData(model)
     qpos_addresses = [int(model.jnt_qposadr[model.joint(name).id]) for name in JOINT_NAMES]
     indices = video_sample_indices(
