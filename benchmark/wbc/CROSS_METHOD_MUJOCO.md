@@ -40,6 +40,7 @@ From the RoboDuet checkout:
   --task-id timed-trajectory-ac28cbf79041b70f \
   --scenarios nominal push \
   --output benchmark/results/cross_method_mujoco/qm_control \
+  --record-video \
   --ros-domain-id 91
 ```
 
@@ -53,6 +54,11 @@ Each timestamped output contains `cross_method_manifest.json`, `results.json`,
 `adapter.log`, the exported reference, and a nominal/push directory. Scenario
 directories contain the TaskSpec manifest, raw backend trace, normalized
 trace-v3, current scorer output, metric coverage, controller log, and receipt.
+With `--record-video`, each scenario also contains `mujoco_tracking.mp4` and
+`trajectory_tracking.png`. The MP4 deterministically replays recorded root and
+joint states in the receipt's hashed common MuJoCo scene, with the full
+reference path in yellow and executed EE history in cyan. Replay rendering is
+post-run so it cannot change controller timing or physics.
 
 For a policy or sidecar method, replace its blocked registry entry only after
 its real checkpoint/controller consumes common-plant state and passes a short

@@ -241,6 +241,30 @@ def _normalize_results(output: Path, roboduet_root: Path) -> list[dict]:
     return results
 
 
+def _render_results(output: Path, results: list[dict], args, scene: Path) -> list[dict]:
+    if not args.record_video:
+        return results
+    os.environ.setdefault("MUJOCO_GL", "egl")
+    from benchmark.wbc.mujoco_video import render_trace_artifacts
+
+    updated = []
+    for receipt in results:
+        scenario = receipt.get("scenario")
+        if scenario is None:
+            schedule = receipt.get("disturbance_schedule", [])
+            scenario = "push" if schedule else "nominal"
+        scenario_dir = output / scenario
+        receipt["visual_artifacts"] = render_trace_artifacts(
+            scenario_dir / "trace.npz", scene, scenario_dir,
+            method=args.method, scenario=scenario, fps=args.video_fps,
+            width=args.video_width, height=args.video_height,
+        )
+        _write_json(scenario_dir / "receipt.json", receipt)
+        updated.append(receipt)
+    _write_json(output / "results.json", updated)
+    return updated
+
+
 def _clean_environment(python: Path, ros_domain_id: int) -> dict[str, str]:
     return {
         "HOME": os.environ.get("HOME", str(Path.home())),
@@ -307,6 +331,10 @@ def run_qm_control(args) -> tuple[Path, list[dict]]:
             f"qm_control adapter exited {completed.returncode}; see {output / 'adapter.log'}"
         )
     results = [] if args.prepare_only else _normalize_results(output, roboduet_root)
+    results = _render_results(
+        output, results, args,
+        baseline_root / "mujoco_models/go2_x5_description/mjcf/scene.xml",
+    )
     manifest = {
         "schema_version": "cross-method-mujoco-run-v1",
         "status": "prepared" if args.prepare_only else "complete",
@@ -491,6 +519,7 @@ def run_policy_method(args) -> tuple[Path, list[dict]]:
         "result_count": len(results),
     }
     _write_json(output / "cross_method_manifest.json", manifest)
+    results = _render_results(output, results, args, DEFAULT_SCENE)
     _write_json(output / "results.json", results)
     _write_json(output / "run_state.json", {"status": status, "output": str(output)})
     return output, results
@@ -511,6 +540,10 @@ def main(argv=None):
     parser.add_argument("--ros-domain-id", type=int, default=91)
     parser.add_argument("--timeout-s", type=float, default=480.0)
     parser.add_argument("--prepare-only", action="store_true")
+    parser.add_argument("--record-video", action="store_true")
+    parser.add_argument("--video-fps", type=int, default=25)
+    parser.add_argument("--video-width", type=int, default=960)
+    parser.add_argument("--video-height", type=int, default=540)
     args = parser.parse_args(argv)
     if args.list_methods or args.preflight:
         print(json.dumps(preflight(args.method), indent=2))
@@ -521,6 +554,8 @@ def main(argv=None):
         parser.error("--suite is required for a run")
     if not 0 <= args.ros_domain_id <= 232:
         parser.error("--ros-domain-id must be in 0..232")
+    if args.video_fps < 1 or args.video_width < 64 or args.video_height < 64:
+        parser.error("video fps must be positive and dimensions at least 64 pixels")
     readiness = preflight(args.method)["methods"][args.method]
     if readiness["status"] != "ready":
         raise SystemExit(
