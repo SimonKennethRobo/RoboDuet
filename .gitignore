@@ -61,7 +61,7 @@ runs
 
 # other
 *.egg-info
-__pycache__
+**__pycache__
 
 docker/rsc
 *.swp
@@ -70,16 +70,13 @@ tmp
 *.tar
 resources/robots/**/urdf/*_mount_bucket_*.urdf
 
-wandb/*
+wandb
 
-benchmark/results/
-
-*/__pycache__/*
-__pycache__
 .pytest_cache
 
 benchmark/candidates
 benchmark/results
+benchmark/data/*library*/
 
 tests
 

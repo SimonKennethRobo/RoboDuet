@@ -4,6 +4,13 @@
 
 主仓库：`/home/simon/Projects/WBC/RoboDuet`。
 
+Visual WholeBody 的 2026-09-15 最新运行修复见第 28 节；其验收采用用户最新要求：能运行、目视大致跟随，不以 tracking success 为门槛。
+
+RoboDuetRaw 的同类运行修复见第 29 节；A0/B0 底盘不动的后续修正见第 30 节，沿用上述验收标准。
+
+**最新跟随算法见第 31 节**：按用户要求改为 EE 地面投影、footprint 偏移、
+切向 yaw 与共用全向 waypoint PID；第 28–30 节的旧跟随规则作为历史保留。
+
 部署仓库：`/home/simon/Projects/Simon/wbc_rl_mpc/rl_sar`。
 
 ## 0. 最新执行交接（2026-09-14 16:52 CST，以本节为准）
@@ -1067,3 +1074,113 @@ RMSE/peak 为 `0.31767/0.74200 rad`，最终 progress `0.89614`、tracking-tube
 fraction `0.00110`，最终 timeout/unsuccessful。尽管主动平移命令为零，接触和
 姿态耦合仍造成 `0.41449 m` base XY 净漂移；pose-only 不是 fixed-base 物理
 约束。该结果证明 pose-only 数据链路可运行，不证明跟踪性能通过验收。
+
+## 28. 2026-09-15 Visual WholeBody 接入冻结轨迹库
+
+新增 `benchmark/wbc/visual_mujoco.py` 和
+`benchmark/data/run_visual_library.py`。恢复原生播放入口的当拍动作，接通
+已有 `EEBaseFollower`、步态观测和工作空间投影；底盘会主动随 EE 目标移动。
+直接使用 `benchmark/data/frozen_trajectory_library/suite` 中已冻结的 TaskSpec，
+参考、时间律、初态和评分保持原定义，控制器投影目标单独记录。
+
+从 `/home/simon/Projects/Simon/wbc_rl_mpc` 运行：
+
+```bash
+./run_visual_wholebody_library.sh --viewer --cell 0 0
+./run_visual_wholebody_library.sh --viewer --trajectory random-line-000
+./run_visual_wholebody_library.sh --list
+```
+
+全部 68 条通过每条 2 步短测；5 条完整时长尝试中，4 条跑完整段无跌倒，
+`random-circle-009` 在后段跌倒。用户本次明确不要求 tracking 达标，
+因此保留诊断评分，不继续为成功率调参。27 项相关测试通过，Xvfb viewer
+10 步测试和直线 MP4 回放已生成。
+
+这里是 Visual low-level policy + 原仓库启发式 follower + IK，未加载图像
+high-level policy。具体命令、限制和产物见
+[Visual WholeBody 运行说明](visual-wholebody-library-20260915.md)。
+
+## 29. 2026-09-15 RoboDuetRaw 冻结轨迹库运行修复
+
+保留 Raw 原始双策略和 learned body posture plan，给 `plan_vel=False`
+checkpoint 增加明确标注的启发式底盘跟随辅助。近处目标交给机械臂处理，
+目标超出近处工作空间后底盘开始跟随；策略输入投影到该 checkpoint 的训练
+范围内，冻结参考和初态保持不变。没有用 IK 替换 arm actor，没有重训。
+
+从 `/home/simon/Projects/Simon/wbc_rl_mpc` 运行：
+
+```bash
+./run_roboduet_raw_library.sh --viewer --cell 0 0
+./run_roboduet_raw_library.sh --viewer --trajectory random-line-000
+./run_roboduet_raw_library.sh --list
+```
+
+最终代表轨迹 A0/B0、A2/B2、random-line-000、random-circle-009 全部跑完整段，
+无跌倒和非有限状态。全部 68 条另做了各 2 步短测。30 项相关测试通过，
+包含原生 arm/dog 观测、历史和姿态规划对照；已检查 viewer 并生成离线回放。
+长程和圆轨迹仍有明显跟踪偏差，按用户最新要求不继续以评分达标为门槛。
+
+命令、辅助控制边界和结果路径见
+[RoboDuetRaw 运行说明](roboduet-raw-library-20260915.md)。
+
+## 30. 2026-09-15 RoboDuetRaw A0/B0 底盘参与跟随
+
+用户反馈第 29 节命令 `--viewer --cell 0 0` 的底盘不动。核对 trace 后确认，
+此前“超过 0.60 m 才跟随”的门槛使 A0/B0 整段底盘速度命令为零。
+现在默认 `follow` 在近处也跟随参考 XY 位移，保留起始臂端偏移与底盘 yaw，
+平移速度限制为 0.25 m/s；远处继续使用原有接近目标逻辑。
+`--base-mode stand` 仍保留零平移诊断行为。启动命令不变。
+
+修正后 A0/B0 完成 935 步、无跌倒/数值故障，底盘相对起点最大平移
+0.278 m，EE 位置 RMSE 0.076 m。30 项相关测试重新通过，新增近距离
+参考移动时底盘必须收到非零平移命令的检查。结果和回放位于
+`benchmark/results/raw_base_motion_20260915/`，旧版产物保留。
+完整 viewer 与 headless A0/B0 的 trace hash 一致；A2/B2、随机直线 000、
+随机圆 009 也都复查跑完整段且无跌倒/数值故障。
+
+## 31. 2026-09-15 共用全向 waypoint PID
+
+用户要求不规划速度的方法采用统一底盘跟随逻辑，并确认前馈速度为
+“实测底盘速度 + 轨迹参考速度”。新增 `benchmark/wbc/omni_waypoint_follower.py`，
+接入 Raw、Visual、DWBC 的速度输入。几何约定为 EE 投影沿轨迹切向后退
+footprint 半长加余量，底盘目标 yaw 始终取轨迹切向。世界系位置/yaw PID
+包含积分限幅、速度/加速度限制、静止与终点停车及任务 reset。
+
+Raw 原有近/远距离切换已移除；Visual 保留原 arm IK/工作空间投影；DWBC
+原来固定为零的三个速度观测槽接入命令。UMI 没有速度命令接口，现有 MPC
+方法保留各自底盘规划。原始权重、TaskSpec、参考与 scorer 未修改。
+
+新结果根目录 `benchmark/results/omni_follower_20260915/`：
+
+- `raw_final` 四条代表轨迹全程完成、无跌倒/数值故障。
+- `dwbc_final` 的 A0/B0 完成 935 步，无跌倒/数值故障。
+- `raw_viewer` 为 A0/B0 完整 Xvfb viewer 检查。
+- `visual_final` 四条中随机圆 009 全程完成；A0/B0、A2/B2、随机直线 000
+  发生跌倒。Visual 原生训练 `vy=0`，施加较小横移/后退限幅仍未解决，
+  当前只能确认控制器接入，不能写成 Visual 全库可稳定运行。
+
+窗口新增蓝色 waypoint、目标 footprint 和切向线。receipt 记录共用算法、
+完整参数与 source hash；trace 新增 `follower_*` 诊断，原参考不变。
+完整公式、参数及适用范围见
+[全向 waypoint PID 说明](omni-waypoint-follower-20260915.md)。
+
+## 32. 2026-09-15 library2 A5/B3 跟随诊断
+
+用户指出 `frozen_trajectory_library2 --cell 5 3` 后段底盘和 yaw 均未跟上。
+trace 确认旧版平移/yaw 命令分别约 95%/81% 时间饱和；参考速度峰值
+0.489 m/s，切向角速度峰值 6.72 rad/s，而旧限制只有 0.35 m/s 和
+0.60 rad/s。0.36 m footprint 偏移还使 waypoint 速度 P95 达到约
+0.98 m/s；约 15.8% 路段曲率半径小于该偏移。
+
+另外修复了 yaw 误差的结构问题：目标与实测 yaw 现在连续展开，实际落后
+超过 π 后不会因 wrapped shortest-path 误差反向追赶。Raw 限制调整到
+0.50 m/s 总速度、0.45 m/s 横移、0.35 m/s 后退、1.00 rad/s yaw，仍位于
+checkpoint 训练采样范围。原时间律 `tuned_v2` 完成 1272 步、无跌倒，
+平均/末端 waypoint 误差约 0.40/0.50 m，平均绝对 yaw 误差约 68°。
+
+新增 `--playback-speed` 诊断选项，默认 1.0 不改变 TaskSpec 时间律。0.15
+倍运行完成 8194 步、无跌倒，平均 waypoint 误差约 0.21 m、平均绝对 yaw
+误差约 45°。慢放 receipt 明确标为非 TaskSpec timing comparable；0.10 倍
+因低层策略出现反向自旋而退化，不推荐。当前证据说明调参能避免跌倒并减少
+落后，但 A5/B3 的曲率和原时间律超出该低层策略保持切向 yaw 的执行能力。
+结果位于 `benchmark/results/omni_cell53_diagnosis_20260915/`。

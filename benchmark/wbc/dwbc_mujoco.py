@@ -9,6 +9,8 @@ import mujoco
 import numpy as np
 import torch
 
+from benchmark.wbc.omni_waypoint_follower import configure_follower, follow_reference
+
 
 JOINT_NAMES = [
     f"{leg}_{part}_joint" for leg in ("FL", "FR", "RL", "RR")
@@ -20,7 +22,9 @@ VISUAL_POLICY_ORDER = np.asarray([3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8, 12, 13, 
 class DwbcMujoco:
     controls_arm = True
 
-    def __init__(self, root, checkpoint, scene, variant="dwbc"):
+    def __init__(self, root, checkpoint, scene, variant="dwbc", *, base_mode="follow"):
+        if base_mode not in ("follow", "stand"):
+            raise ValueError("DWBC base mode must be follow/stand")
         self.root = Path(root).resolve()
         self.variant = variant
         self.controls_arm = True
@@ -85,6 +89,9 @@ class DwbcMujoco:
         self.goal_position = None
         self.goal_quaternion = None
         self.base = self.model.body("base_link").id
+        self.base_mode = base_mode
+        if self.variant == "dwbc":
+            configure_follower(self)
 
     def reset_policy(self):
         self.history.fill(0.0)
@@ -92,9 +99,14 @@ class DwbcMujoco:
         self.latest_actions.fill(0.0)
         self.action_queue = [np.zeros(18) for _ in range(1 if self.variant == "visual" else 2)]
         self.arm_pos_targets = self.data.qpos[self.qadr[12:18]].copy()
+        if self.variant == "dwbc":
+            self.follower.reset()
+            self.command = [0.] * 6
 
     def set_reference(self, reference, time_s):
         _arc, self.goal_position, self.goal_quaternion = reference.at(time_s)
+        if self.variant == "dwbc" and self.base_mode == "follow":
+            follow_reference(self, reference, time_s)
 
     def read_state(self):
         q = self.data.qpos[self.qadr].copy()
@@ -150,11 +162,14 @@ class DwbcMujoco:
             local_orientation = wxyz[1:] * (1.0 if wxyz[0] >= 0.0 else -1.0)
             prop = np.r_[rpy[:2], gyro, (q - self.default_dof_pos)[VISUAL_POLICY_ORDER],
                          dq[VISUAL_POLICY_ORDER] * 0.05,
-                         self.latest_actions[:12], self._contacts()[[1, 0, 3, 2]], [0.0, 0.0, 0.0],
-                         local_goal, local_orientation, np.zeros(5)].astype(np.float32)
+                         self.latest_actions[:12], self._contacts()[[1, 0, 3, 2]],
+                         getattr(self, "command", [0.0] * 6)[:3],
+                         local_goal, local_orientation,
+                         getattr(self, "gait_observation", np.zeros(5))].astype(np.float32)
         else:
             prop = np.r_[rpy[:2], gyro, q20 - np.r_[self.default_dof_pos, 0.0, 0.0],
-                         dq20 * 0.05, self.latest_actions, self._contacts(), [0.0, 0.0, 0.0],
+                         dq20 * 0.05, self.latest_actions, self._contacts(),
+                         getattr(self, "command", [0.] * 6)[:3],
                          sphere, orientation_delta].astype(np.float32)
         if prop.shape != (self.history.shape[1],) or not np.isfinite(prop).all():
             raise ValueError(f"invalid DWBC proprioception {prop.shape}")

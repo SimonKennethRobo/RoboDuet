@@ -89,6 +89,7 @@ def test_dwbc_visual_observation_and_delayed_actions(plant, variant, delay, prop
     sim.history = np.zeros((10, prop), np.float32)
     sim.actions = np.zeros(18)
     sim.latest_actions = np.zeros(18)
+    sim.command = [.12, -.23, .34, 0., 0., 0.]
     sim.action_queue = [np.zeros(18) for _ in range(delay)]
     sim._contacts = lambda: np.array([1., 0., 1., 0.])
     actor = CaptureActor()
@@ -107,6 +108,7 @@ def test_dwbc_visual_observation_and_delayed_actions(plant, variant, delay, prop
         action_slice = slice(41, 53)
     else:
         action_slice = slice(45, 63)
+        np.testing.assert_allclose(actor.observations[0][0, 67:70], sim.command[:3])
     np.testing.assert_array_equal(executed[-1], expected)
     # The observation sees the last GENERATED action, even while the plant
     # executes an older command from its delay buffer.

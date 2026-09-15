@@ -356,7 +356,8 @@ def _set_mpc_dog_command(sim, command: dict) -> np.ndarray:
     return velocity
 
 
-def _draw_trajectory(viewer, reference: FrozenReference, executed, target, base_position):
+def _draw_trajectory(viewer, reference: FrozenReference, executed, target, base_position,
+                     follower=None):
     """Draw orange reference and green executed paths in a passive MuJoCo viewer."""
     reference_points = reference.gamma_p
     if len(reference_points) > 101:
@@ -394,6 +395,26 @@ def _draw_trajectory(viewer, reference: FrozenReference, executed, target, base_
                 np.array([1.0, 0.9, 0.1, 1.0], np.float32),
             )
             scene.ngeom += 1
+        if follower is not None and follower.diagnostics is not None:
+            d = follower.diagnostics
+            waypoint = d["base_waypoint_world_m"].copy()
+            waypoint[2] = .025
+            tip = waypoint + np.r_[.25 * d["trajectory_tangent_world"], 0.]
+            color = np.array([.1, .65, 1., 1.], np.float32)
+            line(waypoint, tip, color)
+            cfg = follower.cfg
+            yaw = d["base_yaw_target_rad"]
+            c, s = np.cos(yaw), np.sin(yaw)
+            rotation = np.array([[c, -s], [s, c]])
+            corners = np.array([[-1., -1.], [1., -1.], [1., 1.], [-1., 1.], [-1., -1.]])
+            corners *= [cfg.footprint_half_length_m, cfg.footprint_half_width_m]
+            corners = corners @ rotation.T + waypoint[:2]
+            for start, end in zip(corners[:-1], corners[1:]):
+                line(np.r_[start, waypoint[2]], np.r_[end, waypoint[2]], color)
+            if scene.ngeom < scene.maxgeom:
+                mujoco.mjv_initGeom(scene.geoms[scene.ngeom], mujoco.mjtGeom.mjGEOM_SPHERE,
+                    np.array([.025] * 3), waypoint, np.eye(3).reshape(-1), color)
+                scene.ngeom += 1
     viewer.sync()
 
 
@@ -410,16 +431,23 @@ def run(args) -> Tuple[Path, dict]:
     if args.policy_adapter == "roboduet_raw":
         from benchmark.wbc.roboduet_raw_mujoco import RoboDuetRawMujoco
 
-        sim = RoboDuetRawMujoco(robot_dir, args.policy_key, scene, args.raw_run_root, seed=args.seed)
+        sim = RoboDuetRawMujoco(robot_dir, args.policy_key, scene, args.raw_run_root, seed=args.seed,
+                                base_mode=args.raw_base_mode, target_mode=args.raw_target_mode)
     elif args.policy_adapter == "umi":
         from benchmark.wbc.umi_mujoco import UmiMujoco  # pylint: disable=import-outside-toplevel
 
         sim = UmiMujoco(args.umi_checkpoint, scene)
-    elif args.policy_adapter in ("dwbc", "visual"):
+    elif args.policy_adapter == "visual":
+        from benchmark.wbc.visual_mujoco import VisualMujoco
+
+        sim = VisualMujoco(args.dwbc_root, args.dwbc_checkpoint, scene,
+                           base_mode=args.visual_base_mode,
+                           action_delay=args.visual_action_delay)
+    elif args.policy_adapter == "dwbc":
         from benchmark.wbc.dwbc_mujoco import DwbcMujoco  # pylint: disable=import-outside-toplevel
 
         sim = DwbcMujoco(args.dwbc_root, args.dwbc_checkpoint, scene,
-                         variant="visual" if args.policy_adapter == "visual" else "dwbc")
+                         base_mode=args.dwbc_base_mode)
     elif args.policy_adapter == "wb_locoman":
         from benchmark.wbc.wb_locoman_mujoco import WbLocomanMujoco  # pylint: disable=import-outside-toplevel
 
@@ -474,7 +502,13 @@ def run(args) -> Tuple[Path, dict]:
     sim.command = [0.0] * 6
 
     policy_dt = sim.policy_dt
-    deadline_steps = int(math.ceil(float(reference.task["deadline_s"]) / policy_dt))
+    playback_speed = float(getattr(args, "reference_speed_scale", 1.0))
+    if not 0.0 < playback_speed <= 1.0:
+        raise ValueError("reference speed scale must be in (0, 1]")
+    original_deadline = float(reference.task["deadline_s"])
+    hold_time = max(0.0, original_deadline - reference.duration)
+    playback_deadline_s = reference.duration / playback_speed + hold_time
+    deadline_steps = int(math.ceil(playback_deadline_s / policy_dt))
     requested_steps = min(
         deadline_steps,
         args.max_steps if args.max_steps > 0 else 2**31 - 1,
@@ -530,12 +564,14 @@ def run(args) -> Tuple[Path, dict]:
         if viewer is not None and not viewer.is_running():
             break
         q, dq, quat, gyro, base_pos, lin_vel = sim.read_state()
-        reference_time = min((step + 1) * policy_dt, reference.duration)
+        reference_time = min((step + 1) * policy_dt * playback_speed, reference.duration)
         arc, goal_position, goal_quaternion = reference.at(reference_time)
         if hasattr(sim, "set_reference"):
             sim.set_reference(reference, reference_time)
         mpc_command = None
         base_feedforward = np.zeros(3, dtype=np.float64)
+        if args.policy_adapter in ("visual", "roboduet_raw", "dwbc"):
+            base_feedforward[:] = sim.command[:3]
         if use_mpc:
             from benchmark.wbc.controllers import (  # pylint: disable=import-outside-toplevel
                 encode_ocs2_state_values,
@@ -708,10 +744,18 @@ def run(args) -> Tuple[Path, dict]:
             _add_scalar_column(trace, name, value, dtype)
         trace.setdefault("reference_ee_position_m", []).append(goal_position[None].astype(np.float32))
         trace.setdefault("reference_ee_quaternion_xyzw", []).append(goal_quaternion[None].astype(np.float32))
+        if args.policy_adapter in ("visual", "roboduet_raw"):
+            trace.setdefault("controller_ee_position_m", []).append(sim.goal_position[None].astype(np.float32))
+            trace.setdefault("controller_ee_quaternion_xyzw", []).append(sim.goal_quaternion[None].astype(np.float32))
+            _add_scalar_column(trace, "controller_target_projected", sim.target_projected, bool)
         trace.setdefault("actual_ee_state", []).append(actual_state[None].astype(np.float32))
         trace.setdefault("actual_ee_grasp_linear_velocity_mps", []).append(spatial_velocity[3:][None].astype(np.float32))
         trace.setdefault("environment_origin_m", []).append(np.zeros((1, 3), np.float32))
         trace.setdefault("base_root_state", []).append(base_state[None].astype(np.float32))
+        follower = getattr(sim, "follower", None)
+        if follower is not None and follower.diagnostics is not None:
+            for name, value in follower.diagnostics.items():
+                trace.setdefault("follower_" + name, []).append(np.asarray(value, dtype=np.float32)[None])
         for name, value in (("dof_position_rad", q), ("dof_velocity_rad_s", dq),
                             ("actuator_command", torque), ("joint_position_target_rad", q_target),
                             ("joint_velocity_target_rad_s", q_velocity_target),
@@ -756,8 +800,9 @@ def run(args) -> Tuple[Path, dict]:
                 "sim_time_s": float(sim.data.time), "deadline_steps": deadline_steps,
                 "fall": fall, "numerical_fault": numerical_fault}) + "\n")
         executed_path.append(actual_position.copy())
+        follower = getattr(sim, "follower", None)
         if viewer is not None:
-            _draw_trajectory(viewer, reference, executed_path, goal_position, sim.data.xpos[base])
+            _draw_trajectory(viewer, reference, executed_path, goal_position, sim.data.xpos[base], follower)
         if (args.realtime or viewer is not None) and not (
             use_mpc and args.ocs2_transport == "async"
         ):
@@ -817,9 +862,9 @@ def run(args) -> Tuple[Path, dict]:
         "controller_adapter": (
             "umi_on_legs_learned_joint_targets"
             if args.policy_adapter == "umi"
-            else "visual_wholebody_policy_plus_native_persistent_ik_arm"
+            else f"visual_wholebody_policy_plus_native_persistent_ik_arm_{sim.base_mode}"
             if args.policy_adapter == "visual"
-            else "deep_whole_body_control_learned_joint_targets"
+            else f"deep_whole_body_control_learned_joint_targets_{sim.base_mode}"
             if args.policy_adapter == "dwbc"
             else
             "wb_locoman_fatrop_direct_torque"
@@ -827,7 +872,7 @@ def run(args) -> Tuple[Path, dict]:
             else
             "ma2022_recurrent_student_plus_native_mpc_arm_reaction_horizon"
             if args.policy_adapter == "ma2022"
-            else "roboduet_raw_dual_actor_with_learned_posture_plan"
+            else f"roboduet_raw_dual_actor_with_learned_posture_plan_{sim.base_mode}"
             if args.policy_adapter == "roboduet_raw"
             else "rl_sar_dog_policy_plus_native_floating_base_ocs2_mpc"
             if use_mpc else "rl_sar_dog_policy_plus_scripted_dls_ik_arm"
@@ -904,6 +949,10 @@ def run(args) -> Tuple[Path, dict]:
         "integrator": args.integrator,
         "arm_drive": "implicit_position" if getattr(sim, "arm_position_drive", False) else "explicit_torque_pd",
         "policy_dt_s": policy_dt,
+        "reference_speed_scale": playback_speed,
+        "playback_deadline_s": playback_deadline_s,
+        "timing_semantics": ("frozen_taskspec_time_law" if playback_speed == 1.0 else
+                             "diagnostic_slow_playback_not_taskspec_timing_comparable"),
         "requested_steps": requested_steps,
         "deadline_steps": deadline_steps,
         "diagnostic_step_limit": requested_steps < deadline_steps,
@@ -949,11 +998,40 @@ def run(args) -> Tuple[Path, dict]:
             "ik_step_norm_rad": "MPC absolute arm target minus measured arm position",
             "ik_step_saturated": "false; joint-limit clipping is recorded separately",
         }
+    if args.policy_adapter in ("roboduet_raw", "visual", "dwbc"):
+        receipt["base_follower"] = dict(
+            algorithm=sim.follower.algorithm, enabled=sim.base_mode == "follow",
+            source=str(sim.follower_source), source_sha256=_sha256(sim.follower_source),
+            config=sim.follower_config,
+            target_semantics="EE ground projection minus footprint front extent and clearance along trajectory tangent",
+            velocity_semantics="measured world velocity plus reference tangent velocity, then waypoint PID; zero feedforward at stop",
+            scope="auxiliary planar command generator; native policy produces joint actions")
     if args.policy_adapter == "roboduet_raw":
         receipt["policy"].update(
             adapter="roboduet_raw_dual_actor", parameters_sha256=_sha256(sim.parameters_path),
             arm_models=[{"path": str(path), "sha256": _sha256(path)} for path in sim.arm_model_paths],
-            plan_vel=False, adapter_sha256=_sha256(Path(__file__).with_name("roboduet_raw_mujoco.py")))
+            plan_vel=False, base_mode=sim.base_mode, target_mode=sim.target_mode,
+            follower_source_sha256=_sha256(sim.follower_source), follower_config=sim.follower_config,
+            adapter_sha256=_sha256(Path(__file__).with_name("roboduet_raw_mujoco.py")))
+        receipt["reference_semantics"] = (
+            "Frozen world target scored unchanged; bounded actor input target is traced separately"
+        )
+    if args.policy_adapter == "visual":
+        receipt["policy"].update(
+            adapter_sha256=_sha256(Path(__file__).with_name("visual_mujoco.py")),
+            low_level_adapter_sha256=_sha256(Path(__file__).with_name("dwbc_mujoco.py")),
+            training_config_sha256=_sha256(sim.config_path),
+            training_config_path=str(sim.config_path),
+            action_delay_steps=sim.action_delay_steps,
+            action_delay_semantics="native play starts at global_steps=0; delay 1 is an explicit ablation",
+            base_mode=sim.base_mode, follower_source_sha256=_sha256(sim.follower_source),
+            follower_config=sim.follower_config, workspace_projection=vars(sim.workspace),
+            workspace_projection_source_sha256=_sha256(sim.workspace_source),
+            common_plant_transfer=True,
+        )
+        receipt["reference_semantics"] = (
+            "Frozen world target scored unchanged; controller workspace projection is traced separately"
+        )
     (output_dir / "receipt.json").write_text(json.dumps(receipt, indent=2, allow_nan=False) + "\n")
     return trace_path, receipt
 
@@ -966,6 +1044,9 @@ def main():
     parser.add_argument("--policy-key", required=True)
     parser.add_argument("--policy-adapter", choices=("rl_sar", "roboduet_raw", "ma2022", "wb_locoman", "dwbc", "visual", "umi"), default="rl_sar")
     parser.add_argument("--raw-run-root")
+    parser.add_argument("--raw-base-mode", choices=("follow", "stand"), default="follow")
+    parser.add_argument("--raw-target-mode", choices=("bounded", "native"), default="bounded")
+    parser.add_argument("--dwbc-base-mode", choices=("follow", "stand"), default="follow")
     parser.add_argument("--ma2022-deployment-root")
     parser.add_argument("--ma2022-policy")
     parser.add_argument("--ma2022-env-config")
@@ -974,11 +1055,14 @@ def main():
     parser.add_argument("--wb-locoman-python", default="/opt/miniconda3/envs/base312/bin/python")
     parser.add_argument("--dwbc-root")
     parser.add_argument("--dwbc-checkpoint")
+    parser.add_argument("--visual-base-mode", choices=("follow", "stand"), default="follow")
+    parser.add_argument("--visual-action-delay", type=int, choices=(0, 1), default=0)
     parser.add_argument("--umi-checkpoint")
     parser.add_argument("--scene", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max-steps", type=int, default=0)
+    parser.add_argument("--reference-speed-scale", type=float, default=1.0)
     parser.add_argument("--physics-dt", type=float, default=0.0025)
     parser.add_argument("--integrator", choices=("implicitfast", "Euler"), default="implicitfast")
     parser.add_argument("--ik-damping", type=float, default=0.05)

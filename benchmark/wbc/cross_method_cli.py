@@ -152,12 +152,16 @@ def preflight(method: str | None = None) -> dict:
                         DEFAULT_RL_SAR_ROOT / "policy/go2_x5/ma2022_student/env_cfg.json"]
         elif name == "visual_wholebody":
             required = [root / "benchmark_adapter/run.py",
+                        root / "low-level/legged_gym/utils/ee_base_follower.py",
+                        root / "low-level/logs/go2x5-visual-low/go2x5_low_v6_velocity_curriculum_tb_resume1000/run_config.json",
                         root / "low-level/logs/go2x5-visual-low/go2x5_low_v6_velocity_curriculum_tb_resume1000/model_24000.pt"]
         elif name == "umi":
             required = [root / "benchmark_adapter/run.py",
                         root / "checkpoints/tossing/ours-real/model.pt", root / "checkpoints/tossing/ours-real/config.pkl"]
         else:
             required = [root / "legged_gym/logs/go2_x5/1789388761_go2_x5_reward_fix/model_11000.pt"]
+        if name in ("roboduet_raw", "visual_wholebody", "deep_whole_body_control"):
+            required.append(Path(__file__).with_name("omni_waypoint_follower.py"))
         missing = [str(path) for path in required if not path.is_file()]
         ready = bool(contract["common_mujoco"] and not missing)
         result[name] = {
