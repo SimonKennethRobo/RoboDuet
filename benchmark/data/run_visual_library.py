@@ -16,6 +16,8 @@ REPO = Path(__file__).resolve().parents[2]
 STACK = Path("/home/simon/Projects/Simon/wbc_rl_mpc")
 VISUAL = STACK / "baselines/visual_wholebody"
 CHECKPOINT = VISUAL / "low-level/logs/go2x5-visual-low/go2x5_low_v6_velocity_curriculum_tb_resume1000/model_24000.pt"
+MA2022_DEPLOYMENT = STACK / "rl_sar/deploy/ma2022"
+MA2022_BUNDLE = STACK / "rl_sar/policy/go2_x5/ma2022_student"
 sys.path.insert(0, str(REPO))
 
 from benchmark.wbc.mujoco import FrozenReference, _sha256
@@ -56,7 +58,7 @@ def stop_process(process):
 
 
 def main(argv=None, *, method="visual"):
-    if method not in ("visual", "roboduet_raw"):
+    if method not in ("visual", "roboduet_raw", "ma2022"):
         raise ValueError(f"Unsupported library playback method: {method}")
     parser = argparse.ArgumentParser(description=f"Play {method} on the existing frozen library TaskSpecs.")
     parser.add_argument("--library", type=Path, default=REPO / "benchmark/data/frozen_trajectory_library2")
@@ -65,7 +67,7 @@ def main(argv=None, *, method="visual"):
         parser.add_argument("--checkpoint", type=Path, default=CHECKPOINT)
         parser.add_argument("--action-delay", type=int, choices=(0, 1), default=0,
                             help="Default 0 matches native playback; 1 is the delayed-control diagnostic.")
-    else:
+    elif method == "roboduet_raw":
         parser.add_argument("--run-root", type=Path, default=RAW_BUNDLE_ROOT.parent)
         parser.add_argument("--target-mode", choices=("bounded", "native"), default="bounded")
     parser.add_argument("--cell", type=int, nargs=2, action="append", metavar=("A", "B"))
@@ -77,7 +79,8 @@ def main(argv=None, *, method="visual"):
     parser.add_argument("--playback-speed", type=float, default=1.0,
                         help="Scale reference time; values below 1 are diagnostic slow playback.")
     parser.add_argument("--wall-timeout-s", type=float, default=600.)
-    parser.add_argument("--base-mode", choices=("follow", "stand"), default="follow")
+    if method in ("visual", "roboduet_raw"):
+        parser.add_argument("--base-mode", choices=("follow", "stand"), default="follow")
     args = parser.parse_args(argv)
     if args.max_tasks < 0 or args.max_steps < 0 or args.wall_timeout_s <= 0 or not 0 < args.playback_speed <= 1:
         parser.error("Step/task limits must be nonnegative and timeout positive")
@@ -105,8 +108,8 @@ def main(argv=None, *, method="visual"):
             "--policy-adapter", "visual", "--dwbc-root", str(VISUAL),
             "--dwbc-checkpoint", str(checkpoint),
             "--visual-base-mode", args.base_mode, "--visual-action-delay", str(args.action_delay)]
-        policy_settings = dict(action_delay=args.action_delay)
-    else:
+        policy_settings = dict(action_delay=args.action_delay, base_mode=args.base_mode)
+    elif method == "roboduet_raw":
         run_root = args.run_root.resolve()
         bundle = run_root / "rl_sar"
         checkpoint = bundle / "policy/go2_x5/roboduet_go2_x5/policy.pt"
@@ -117,7 +120,37 @@ def main(argv=None, *, method="visual"):
         policy_arguments = ["--rl-sar-root", str(bundle), "--policy-key", "roboduet_go2_x5",
             "--policy-adapter", "roboduet_raw", "--raw-run-root", str(run_root),
             "--raw-base-mode", args.base_mode, "--raw-target-mode", args.target_mode]
-        policy_settings = dict(run_root=str(run_root), target_mode=args.target_mode)
+        policy_settings = dict(run_root=str(run_root), target_mode=args.target_mode,
+                               base_mode=args.base_mode)
+    else:
+        checkpoint = MA2022_BUNDLE / "student_policy.pt"
+        env_config = MA2022_BUNDLE / "env_cfg.json"
+        deployment_config = MA2022_DEPLOYMENT / "config.yaml"
+        required = [checkpoint, env_config, deployment_config,
+                    MA2022_DEPLOYMENT / "adapter.py"]
+        policy_arguments = [
+            "--rl-sar-root", str(STACK / "rl_sar"),
+            "--policy-key", "ma2022_student",
+            "--policy-adapter", "ma2022",
+            "--ma2022-deployment-root", str(MA2022_DEPLOYMENT),
+            "--ma2022-policy", str(checkpoint),
+            "--ma2022-env-config", str(env_config),
+            "--ma2022-config", str(deployment_config),
+            "--upper-controller", "floating_base_ocs2_mpc",
+            "--ocs2-root", str(STACK),
+            "--ocs2-transport", "synchronous",
+            "--ocs2-task-profile", "native_ideal",
+            "--ocs2-command-mode", "full",
+        ]
+        policy_settings = dict(
+            deployment_root=str(MA2022_DEPLOYMENT),
+            env_config=str(env_config),
+            deployment_config=str(deployment_config),
+            upper_controller="floating_base_ocs2_mpc",
+            ocs2_transport="synchronous",
+            ocs2_task_profile="native_ideal",
+            ocs2_command_mode="full",
+        )
     missing = [str(path) for path in required if not path.is_file()]
     if missing:
         raise FileNotFoundError(f"Missing {method} playback inputs: {missing}")
@@ -135,7 +168,7 @@ def main(argv=None, *, method="visual"):
     state = dict(schema_version=f"{method}-library-playback-v1", status="running", method=method,
                  suite_sha256=suite["suite_sha256"], library=str(library),
                  checkpoint=str(checkpoint), checkpoint_sha256=_sha256(checkpoint),
-                 base_mode=args.base_mode, **policy_settings,
+                 **policy_settings,
                  playback_speed=args.playback_speed,
                  max_steps=args.max_steps, viewer=args.viewer,
                  requested_tasks=len(tasks), tasks={})

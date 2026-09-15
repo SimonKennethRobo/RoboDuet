@@ -11,6 +11,10 @@ RoboDuetRaw 的同类运行修复见第 29 节；A0/B0 底盘不动的后续修�
 **最新跟随算法见第 31 节**：按用户要求改为 EE 地面投影、footprint 偏移、
 切向 yaw 与共用全向 waypoint PID；第 28–30 节的旧跟随规则作为历史保留。
 
+`frozen_trajectory_library2` 的 A5/B3 跟随诊断见第 32 节；Visual/Raw 提交与
+仓库边界见第 33 节，MA2022 的最新修复见第 34 节。对于本轮 learned baseline
+工作，以第 31–34 节为准，第 0 节的早期 HEAD 和未提交文件清单仅作历史记录。
+
 部署仓库：`/home/simon/Projects/Simon/wbc_rl_mpc/rl_sar`。
 
 ## 0. 最新执行交接（2026-09-14 16:52 CST，以本节为准）
@@ -1184,3 +1188,81 @@ checkpoint 训练采样范围。原时间律 `tuned_v2` 完成 1272 步、无跌
 因低层策略出现反向自旋而退化，不推荐。当前证据说明调参能避免跌倒并减少
 落后，但 A5/B3 的曲率和原时间律超出该低层策略保持切向 yaw 的执行能力。
 结果位于 `benchmark/results/omni_cell53_diagnosis_20260915/`。
+
+## 33. 2026-09-15 当前提交与继续执行入口
+
+当前仓库为 `/home/simon/Projects/WBC/RoboDuet`，分支
+`integration/legged-manip-benchmark`，有效 HEAD 为
+`31acc4df0680702f8705a24367a94ecfabb9f0b1`：
+
+```text
+feat(benchmark): run learned baselines on frozen library
+```
+
+该提交包含 Visual WholeBody、RoboDuetRaw、共用全向 waypoint PID、冻结轨迹库
+批量入口、测试和第 28–32 节文档。提交后选取以下四个测试文件复查，结果为
+`29 passed`：
+
+```bash
+/opt/miniconda3/envs/isaacgym/bin/python -m pytest -q \
+  benchmark/wbc/test_omni_waypoint_follower.py \
+  benchmark/wbc/test_roboduet_raw_mujoco.py \
+  benchmark/wbc/test_visual_mujoco.py \
+  benchmark/wbc/test_mujoco_adapters.py
+```
+
+第 31 节记录的 `40 passed` 是此前范围更大的相关测试结果；这里的 29 项是
+提交前最后一次聚焦复查，两者测试选择不同。
+
+初始提交对象为 `b6c1169`，随后同一提交被两次 amend，故该短 hash 已失效。
+当前 `31acc4d` 还包含 amend 时原先已暂存的 `.gitignore`、
+`benchmark/data/README.md`、`benchmark/data/run.sh`，以及旧 frozen library v1、
+旧文档和 `scripts/job.pbs` 的删除。后续审查、分支操作和引用都应使用当前
+HEAD，并把这些清理改动视为该提交的实际组成部分。
+
+用户日常启动仍从 `/home/simon/Projects/Simon/wbc_rl_mpc` 执行：
+
+```bash
+./run_roboduet_raw_library.sh --viewer --cell 0 0
+./run_roboduet_raw_library.sh --viewer --cell 5 3
+./run_roboduet_raw_library.sh --viewer --cell 5 3 --playback-speed 0.15
+./run_visual_wholebody_library.sh --viewer --cell 0 0
+```
+
+上述两个 shell wrapper 位于外层 workspace，不属于 RoboDuet Git 仓库；仓库内
+已提交的 Python 入口为 `benchmark/data/run_raw_library.py` 和
+`benchmark/data/run_visual_library.py`。A5/B3 默认 1.0 倍运行能走完整段但仍有
+明显位置和 yaw 滞后；0.15 倍只适合目视诊断，不能作为 TaskSpec 时间律可比结果。
+
+## 34. 2026-09-15 MA2022 冻结轨迹库运行修复
+
+按同一冻结轨迹库播放契约新增 `benchmark/data/run_ma2022_library.py`，并扩展
+共用 batch runner。MA2022 保留原 dual-GRU student、50 Hz recurrent state、
+native synchronous floating-base MPC，以及与当前 MPC command 同帧的五点
+q/dq/ddq arm-reaction horizon；未替换为通用 waypoint PID、静止机械臂或 DLS IK，
+也未修改 policy、MPC task、TaskSpec、初态、参考、时间律和 scorer。
+
+用户入口位于外层 workspace：
+
+```bash
+cd /home/simon/Projects/Simon/wbc_rl_mpc
+./run_ma2022_library.sh --viewer --cell 0 0
+./run_ma2022_library.sh --viewer --cell 2 2
+./run_ma2022_library.sh --viewer --trajectory random-circle-009
+```
+
+结果位于 `benchmark/results/ma2022_repair_20260915/`。20-step plumbing smoke 和
+四条完整代表轨迹均完成且无跌倒/数值故障。代表集 A0/B0、A2/B2、随机直线
+000、随机圆 009 分别记录 935、497、908、1029 步；位置 RMSE 分别约为
+0.106、0.143、0.154、0.188 m，姿态 RMSE 分别约为 0.421、0.291、0.439、
+0.452 rad。前三条最终路径进度为 1.0，随机圆为 0.838。所有任务仍因严格
+tracking/endpoint/hold 判据为 `success=false`；按当前用户要求只证明能运行、
+底盘与机械臂实际参与并大致跟随，不能写成 benchmark tracking success 或完整
+Ma et al. 论文复现认证。
+
+A0/B0 另生成离线视频与 tracking plot，位于
+`benchmark/results/ma2022_repair_20260915/a0b0_video/20260915_193018/nominal/`；
+中段抽帧确认机器人持续步行、机械臂运动且实际 EE 与当前参考处于同一局部。
+Xvfb viewer 25-step smoke 也正常退出。最终公共 contract/MuJoCo/adapter/library
+相关选择共 `61 passed`，另有 IsaacGym 自带 `np.float` 弃用 warning；
+`py_compile` 与 `git diff --check` 通过。
