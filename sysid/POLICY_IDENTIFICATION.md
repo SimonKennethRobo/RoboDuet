@@ -32,6 +32,23 @@ go2_x5/
 可以用 `--robot-dir` 更换按名称查找策略的目录，用 `--stack-root` 更换 OCS2 工作区，
 用 `--scene` 指定 MJCF。文件路径可以是绝对路径；输出相对路径按当前 shell 目录解释。
 
+新实验在任何仿真之前自动把 policy 部署包冻结到结果目录：
+
+```text
+identify_MY_POLICY/
+└── policy_bundle/
+    ├── manifest.json
+    └── go2_x5/
+        ├── base.yaml
+        └── MY_POLICY/
+            ├── config.yaml
+            └── policy.pt
+```
+
+采集、续跑、MPC 导出和后续轨迹库评估均使用这份快照。`manifest.json` 保存源路径和
+三个文件的 SHA-256；续跑会先验证快照，源部署目录后来修改或切换默认 policy 不会改变
+已经开始的实验。旧实验没有 `policy_bundle/` 时保持旧的原路径及散列校验方式。
+
 ## 自动执行什么
 
 1. 检查策略配置、观测布局、网络输入输出和 MuJoCo 站立预检。
@@ -115,6 +132,82 @@ identify_coord_g_v1/
 `selected` 是开发集自动选中的模型。也可显式选择 `first_order`、`first_order_delay`、
 `gait` 或 `second_order` 做消融。每次闭环测试使用不同的 `--output`。
 辨识流程默认无窗口；上述 `--viewer` 打开 MPC 闭环的 MuJoCo 窗口。
+
+## 在冻结轨迹库上比较辨识开关
+
+下面从已有的 `frozen_trajectory_library2/suite` 无放回随机抽取相同的 10 条任务，
+对四个 policy 各运行 `ideal` 和 `selected`，共 80 次正式闭环测试：
+
+```bash
+/opt/miniconda3/envs/base312/bin/python sysid/run_policy_library_benchmark.py \
+  --experiments tmp/experiments/identify_iq_v2 \
+    tmp/experiments/identify_NH_D_s11 tmp/experiments/identify_robotlab_v2 \
+    tmp/experiments/identify_coord_I_26499 \
+  --library benchmark/data/frozen_trajectory_library2 \
+  --seed 20260915 --count 10 --workers 4 \
+  --output tmp/experiments/policy_sysid_library2_comparison
+```
+
+输出目录需全新；续跑同一目录追加 `--resume`。`--prepare-only` 只冻结输入，
+`--smoke-only` 对每个组合运行两步预检；预检不计入正式结果。
+`--resume --report-only` 根据已落盘的执行记录更新汇总。
+
+测试复用库内既有 TaskSpec、初始物理状态、时限、原始 trace 和离线 scorer。
+两侧统一使用辨识实验的部署限幅；F1_gait 接收策略在状态采样边界的实测步态相位。
+策略部署包和 MPC 配置复制到输出目录；若 `base.yaml` 改变，脚本仅在匹配散列的
+Git 历史中寻找采集时的版本，并恢复到输出目录。`selected` 固定为辨识开发集选型，
+不根据这 10 条轨迹重新选择或调参。保留各实验原有 MPC 导出参数，因此应优先
+解读同一 policy 内的成对差异；跨 policy 的基础代价差异记录于报告。
+
+`REPORT.md`、`results.json` 和 `per_trial.csv` 汇总位置／姿态 RMSE、成功、
+跌倒及运行失败。RMSE 包含有 trace 的失败轨迹，早停时仅覆盖已运行区间；
+`results.json/pairs` 另报告两侧共同时间前缀的成对位置 RMSE。
+所有失败仍计入每个组合的任务分母。
+
+## 多 policy 自动辨识并完成轨迹库评估
+
+统一入口 `sysid/run_policy_identification_benchmark.py` 接收一组 policy，依次完成完整辨识，
+待所有 policy 的 `collect/fit/report/export` 完成后，在同一批随机轨迹上运行每个 policy 的
+`ideal`（无辨识）和 `selected`（有辨识）：
+
+```bash
+/opt/miniconda3/envs/base312/bin/python \
+  sysid/run_policy_identification_benchmark.py \
+  --policies I_Q NH_D_s11 robot_lab_rear_r30o_s42_11497 coord_I_26499 \
+  --library benchmark/data/frozen_trajectory_library2 \
+  --seed 20260915 --count 10 \
+  --identification-workers 1 --evaluation-workers 4 \
+  --output tmp/experiments/policy_identification_library2
+```
+
+也可以提供文本清单（每行一个 policy，`#` 开头为注释）或 JSON 字符串数组：
+
+```bash
+/opt/miniconda3/envs/base312/bin/python \
+  sysid/run_policy_identification_benchmark.py \
+  --policies-file policies.txt \
+  --output tmp/experiments/policy_identification_library2
+```
+
+中断后使用完全相同的 policy 列表和参数追加 `--resume`。`--prepare-only` 只解析 policy、
+冻结轨迹库散列和执行计划，不开展辨识或仿真。输出结构为：
+
+```text
+policy_identification_library2/
+├── plan.json
+├── state.json
+├── logs/
+├── identification/<policy>/       # 含各自 policy_bundle 和完整辨识结果
+└── evaluation/
+    ├── REPORT.md
+    ├── results.json
+    ├── per_trial.csv
+    └── runs/<policy>/<ideal|selected>/<trajectory>/
+```
+
+辨识可并行，但每个 worker 都进行 MuJoCo 采集；默认使用一个辨识 worker，避免 CPU 争用。
+评估默认一条 policy 一个执行通道。只有所有辨识目录验证为 `all_complete` 后才会开始评估，
+任何失败都会写入 `state.json` 并保留日志和已有产物。
 
 RC_s17 的“根据预测结果修正参数”在这里实现为离线 prediction-error refinement：候选延迟离散搜索，
 `tau/omega` 连续优化，给定动态参数后以最小二乘重新估计 gain/bias，最后由 development 选型。

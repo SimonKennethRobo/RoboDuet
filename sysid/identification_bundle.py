@@ -1,6 +1,10 @@
-"""Policy bundle checks shared by collection and the identification pipeline."""
+"""Policy bundle checks and immutable experiment-local snapshots."""
+import hashlib
+import json
 from pathlib import Path
 import re
+import shutil
+import tempfile
 
 import numpy as np
 import yaml
@@ -8,6 +12,94 @@ import yaml
 from scripts.rl_sar_obs import RlSarObservation
 
 CANONICAL_CHANNELS = ["vx", "vy", "wz", "height", "pitch", "roll"]
+SNAPSHOT_SCHEMA = "rl-sar-policy-bundle-snapshot-v1"
+
+
+def _sha256(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def _write_json(path, value):
+    Path(path).write_text(json.dumps(value, indent=2, allow_nan=False) + "\n")
+
+
+def policy_argument_key(policy):
+    """Return the deployment key encoded by a key/directory/policy.pt argument."""
+    path = Path(policy).expanduser()
+    if path.name == "policy.pt":
+        return path.parent.name
+    return path.name
+
+
+def verify_bundle_snapshot(experiment_root, expected_key=None):
+    """Verify and return an existing experiment-local policy bundle."""
+    root = Path(experiment_root).resolve() / "policy_bundle"
+    manifest_path = root / "manifest.json"
+    if not manifest_path.is_file():
+        raise FileNotFoundError(manifest_path)
+    manifest = json.loads(manifest_path.read_text())
+    if manifest.get("schema") != SNAPSHOT_SCHEMA:
+        raise ValueError(f"unsupported policy bundle snapshot: {manifest.get('schema')!r}")
+    key = manifest.get("policy")
+    if not isinstance(key, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", key):
+        raise ValueError("invalid policy key in bundle snapshot")
+    if expected_key is not None and key != expected_key:
+        raise ValueError(f"bundle snapshot belongs to {key}, requested {expected_key}")
+    robot_dir = root / "go2_x5"
+    expected_files = {
+        "go2_x5/base.yaml", f"go2_x5/{key}/config.yaml", f"go2_x5/{key}/policy.pt"
+    }
+    if set(manifest.get("files", {})) != expected_files:
+        raise ValueError("bundle snapshot manifest has an unexpected file set")
+    for relative, digest in manifest["files"].items():
+        path = root / relative
+        if not path.is_file() or _sha256(path) != digest:
+            raise ValueError(f"bundle snapshot changed: {path}")
+    return robot_dir, key, manifest
+
+
+def snapshot_policy_bundle(robot_dir, policy_key, experiment_root):
+    """Atomically copy the exact RL-SAR deployment bundle into an experiment."""
+    source = Path(robot_dir).expanduser().resolve()
+    experiment_root = Path(experiment_root).expanduser().resolve()
+    target = experiment_root / "policy_bundle"
+    if target.exists():
+        snap_robot, key, manifest = verify_bundle_snapshot(experiment_root, policy_key)
+        if Path(manifest["source_robot_dir"]).resolve() != source:
+            raise ValueError(
+                f"bundle snapshot source differs: {manifest['source_robot_dir']} != {source}"
+            )
+        return snap_robot, key, manifest
+    experiment_root.mkdir(parents=True, exist_ok=True)
+    required = {
+        "go2_x5/base.yaml": source / "base.yaml",
+        f"go2_x5/{policy_key}/config.yaml": source / policy_key / "config.yaml",
+        f"go2_x5/{policy_key}/policy.pt": source / policy_key / "policy.pt",
+    }
+    for path in required.values():
+        if not path.is_file():
+            raise FileNotFoundError(path)
+    staging = Path(tempfile.mkdtemp(prefix=".policy_bundle.", dir=experiment_root))
+    try:
+        files = {}
+        for relative, path in required.items():
+            destination = staging / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, destination)
+            files[relative] = _sha256(destination)
+        manifest = {
+            "schema": SNAPSHOT_SCHEMA,
+            "policy": policy_key,
+            "source_robot_dir": str(source),
+            "source_policy_dir": str(source / policy_key),
+            "files": files,
+        }
+        _write_json(staging / "manifest.json", manifest)
+        staging.replace(target)
+    except Exception:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    return verify_bundle_snapshot(experiment_root, policy_key)
 
 
 def command_contract(params):

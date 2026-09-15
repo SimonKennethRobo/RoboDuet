@@ -339,10 +339,16 @@ def _foot_observation(model, data) -> tuple[np.ndarray, np.ndarray]:
     return velocity, force
 
 
-def _set_mpc_dog_command(sim, command: dict) -> np.ndarray:
+def _set_mpc_dog_command(sim, command: dict, command_limits=None) -> np.ndarray:
     """Apply the physical OCS2 command at rl_sar's six-command boundary."""
     velocity = np.asarray(command["base_velocity_body"], dtype=np.float64).copy()
     posture = np.asarray(command["body_posture"], dtype=np.float64).copy()
+    if command_limits is not None:
+        limits = np.asarray(command_limits, dtype=np.float64)
+        if limits.shape != (6,) or not np.isfinite(limits).all() or np.any(limits < 0):
+            raise ValueError("command limits require six finite nonnegative values")
+        velocity = np.clip(velocity, -limits[:3], limits[:3])
+        posture = np.clip(posture, -limits[3:], limits[3:])
     for index, key in enumerate(("limit_vel_x", "limit_vel_y", "limit_vel_yaw")):
         if key in sim.p:
             velocity[index] = np.clip(velocity[index], *sim.p[key])
@@ -600,8 +606,11 @@ def run(args) -> Tuple[Path, dict]:
             )
             mpc_command = transport.exchange(
                 state_payload, window_times, window_poses,
+                **({"gait_phase_rad": float(sim.gait_indices * 2.0 * np.pi)}
+                   if args.policy_adapter == "rl_sar" else {}),
             )
-            base_feedforward = _set_mpc_dog_command(sim, mpc_command)
+            base_feedforward = _set_mpc_dog_command(
+                sim, mpc_command, getattr(args, "ocs2_command_limits", None))
             if hasattr(sim, "set_mpc_command"):
                 sim.set_mpc_command(mpc_command)
         actions = sim.forward(q, dq, quat, gyro, base_pos, lin_vel)
@@ -768,6 +777,12 @@ def run(args) -> Tuple[Path, dict]:
         trace.setdefault("base_feedforward_command", []).append(
             base_feedforward[None].astype(np.float32)
         )
+        if use_mpc and args.policy_adapter == "rl_sar":
+            trace.setdefault("mpc_raw_command", []).append(np.r_[
+                mpc_command["base_velocity_body"], mpc_command["body_posture"]
+            ][None].astype(np.float32))
+            trace.setdefault("mpc_applied_command", []).append(
+                np.asarray(sim.command, np.float32)[[0, 1, 2, 5, 3, 4]][None])
         if hasattr(sim, "diagnostics"):
             _add_scalar_column(trace, "controller_solver_failed", sim.diagnostics["solver_failed"], bool)
             for key in ("solve_time_ms", "constraint_violation"):
@@ -982,6 +997,9 @@ def run(args) -> Tuple[Path, dict]:
             "base_height_target_m": transport.base_height_target,
             "arm_target_speed_limit_rad_s": args.arm_max_speed,
             "arm_velocity_feedforward": True,
+            "deployment_command_limits_vx_vy_wz_height_pitch_roll": getattr(args, "ocs2_command_limits", None),
+            "gait_phase_source": ("measured_policy_clock_at_state_boundary"
+                                  if args.policy_adapter == "rl_sar" else "not_sent"),
             "arm_plan_horizon": bool(transport.arm_plan),
             "model_urdf_sha256": _sha256(transport.urdf_file),
             "bridge_core_sha256": _sha256(Path(args.ocs2_root) / "go2_x5_ocs2_bridge/src/WbcBridgeCore.cpp"),
@@ -1099,6 +1117,9 @@ def main():
     parser.add_argument("--ocs2-reference-window-dt-s", type=float, default=0.02)
     parser.add_argument("--ocs2-task-profile", choices=("native_ideal", "legacy_benchmark"), default="native_ideal")
     parser.add_argument("--ocs2-task-file")
+    parser.add_argument("--ocs2-command-limits", type=float, nargs=6,
+                        metavar=("VX", "VY", "WZ", "HEIGHT", "PITCH", "ROLL"),
+                        help="Symmetric deployment limits, also applicable to ideal MPC")
     parser.add_argument("--arm-max-speed", type=float, default=1.5)
     parser.add_argument(
         "--ocs2-command-mode", choices=("full", "pose_only"), default="full"

@@ -22,7 +22,13 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from sysid.identification_bundle import resolve_bundle, load_bundle_contract
+from sysid.identification_bundle import (
+    load_bundle_contract,
+    policy_argument_key,
+    resolve_bundle,
+    snapshot_policy_bundle,
+    verify_bundle_snapshot,
+)
 
 
 # User-editable defaults. All relative output paths are relative to your shell.
@@ -87,12 +93,34 @@ def main():
     from sysid.identify_iq_mujoco import IdentificationPlant, sha, write_json
 
     stack = args.stack_root.expanduser().resolve()
-    robot_dir, key = resolve_bundle(args.policy, args.robot_dir or stack / "rl_sar/policy/go2_x5")
+    output = (args.output or DEFAULT_RESULTS_DIR /
+              f"identify_{policy_argument_key(args.policy)}_{datetime.now():%Y%m%d_%H%M%S_%f}").expanduser().resolve()
+    snapshot_manifest = output / "policy_bundle/manifest.json"
+    legacy_identity = output / "pipeline_inputs.json"
+    if snapshot_manifest.is_file():
+        if not args.resume:
+            raise FileExistsError(f"Experiment exists: {output}; use --resume or a new --output")
+        robot_dir, key, bundle_snapshot = verify_bundle_snapshot(
+            output, policy_argument_key(args.policy))
+    elif legacy_identity.is_file():
+        if not args.resume:
+            raise FileExistsError(f"Experiment exists: {output}; use --resume or a new --output")
+        # Existing experiments predate bundle snapshots. Preserve their exact
+        # identity instead of inserting a current bundle into old evidence.
+        robot_dir, key = resolve_bundle(
+            args.policy, args.robot_dir or stack / "rl_sar/policy/go2_x5")
+        bundle_snapshot = None
+    else:
+        if output.exists() and any(output.iterdir()):
+            raise FileExistsError(f"Output is not an identification pipeline directory: {output}")
+        source_robot_dir, key = resolve_bundle(
+            args.policy, args.robot_dir or stack / "rl_sar/policy/go2_x5")
+        robot_dir, key, bundle_snapshot = snapshot_policy_bundle(
+            source_robot_dir, key, output)
     contract = load_bundle_contract(robot_dir, key)
     scene = (args.scene or stack / "rl_sar/src/rl_sar_zoo/go2_x5_description/mjcf/scene.xml").expanduser().resolve()
     if not scene.is_file():
         raise FileNotFoundError(scene)
-    output = (args.output or DEFAULT_RESULTS_DIR / f"identify_{key}_{datetime.now():%Y%m%d_%H%M%S_%f}").expanduser().resolve()
     source_files = [ROOT / "sysid" / name for name in [
         "__init__.py", "identify_policy.py", "identification_bundle.py", "identify_iq_mujoco.py",
         "identification_models.py", "iq_response_model.py", "report_identification_quality.py",
@@ -104,20 +132,22 @@ def main():
     inputs += sorted(scene.parent.glob("*.xml"))
     identity = dict(contract=contract, scene=str(scene), stack_root=str(stack),
                     files={str(p): sha(p) for p in inputs})
+    if bundle_snapshot is not None:
+        identity["policy_bundle_snapshot"] = bundle_snapshot
     identity_path = output / "pipeline_inputs.json"
     if identity_path.exists():
         if not args.resume:
             raise FileExistsError(f"Experiment exists: {output}; use --resume or a new --output")
         if read_json(identity_path) != identity:
             raise ValueError("Policy/config/scene/source changed; use a new experiment directory")
-    elif output.exists() and any(output.iterdir()):
+    elif output.exists() and any(path.name != "policy_bundle" for path in output.iterdir()):
         raise FileExistsError(f"Output is not an identification pipeline directory: {output}")
     else:
         output.mkdir(parents=True, exist_ok=True)
         write_json(identity_path, identity)
     state_path = output / "pipeline_state.json"
     state = read_json(state_path) if state_path.exists() else dict(policy=key, output=str(output), completed_stages=[])
-    print(f"Policy: {robot_dir/key}\nOutput: {output}\n"
+    print(f"Policy snapshot: {robot_dir/key}\nOutput: {output}\n"
           f"Observation: {contract['num_observations']} x {len(contract['history_indices'])}; "
           f"gait: {contract['gait_frequency_hz']:g} Hz", flush=True)
     torch.set_num_threads(1)
