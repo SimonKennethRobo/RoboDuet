@@ -20,6 +20,7 @@ import torch
 
 from benchmark.metadata import git_snapshot, runtime_snapshot
 from benchmark.wbc.scoring import (
+    DEVELOPMENT_KINEMATIC_PROTOCOL,
     DEVELOPMENT_TIMED_TRAJECTORY_PROTOCOL,
     PROTOCOL_VERSION,
 )
@@ -32,7 +33,7 @@ from benchmark.wbc.evaluation import (
     load_wbc_policies,
 )
 from benchmark.wbc.scenarios import run_wbc_aggregate
-from benchmark.wbc.suite import write_reference_archive
+from benchmark.wbc.suite import SUITE_VERSION, write_reference_archive
 from go1_gym.envs.config.core import cfg_to_dict
 
 
@@ -68,6 +69,12 @@ def parse_args(argv: Optional[List[str]] = None):
         help="Run only curriculum cell (0, 0) for a quick end-to-end GPU check",
     )
     parser.add_argument(
+        "--cells",
+        nargs="+",
+        metavar="A,B",
+        help="Evaluate only explicit curriculum cells, for example --cells 5,0 5,5",
+    )
+    parser.add_argument(
         "--validate_only",
         action="store_true",
         help="Validate config grouping and load both checkpoints on CPU without creating IsaacGym",
@@ -83,6 +90,11 @@ def parse_args(argv: Optional[List[str]] = None):
         action="store_true",
         help="Replay selected trajectories with reference and actual EE overlays",
     )
+    parser.add_argument(
+        "--record_raw_traces",
+        action="store_true",
+        help="Write per-wave backend-neutral NPZ traces for offline rescoring",
+    )
     parser.add_argument("--num_representative_videos", type=int, default=6)
     parser.add_argument(
         "--video_bank_rows",
@@ -92,6 +104,29 @@ def parse_args(argv: Optional[List[str]] = None):
         help="Optional explicit representative bank rows (overrides automatic selection)",
     )
     return parser.parse_args(argv)
+
+
+def _selected_cells(args, n_levels_a: int, n_levels_b: int):
+    if args.smoke and args.cells:
+        raise ValueError("--smoke and --cells cannot be used together")
+    if args.smoke:
+        return [(0, 0)]
+    if not args.cells:
+        return None
+    cells = []
+    for value in args.cells:
+        try:
+            cell_a, cell_b = (int(part) for part in value.split(",", maxsplit=1))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"invalid curriculum cell {value!r}; expected A,B") from exc
+        if not (0 <= cell_a < n_levels_a and 0 <= cell_b < n_levels_b):
+            raise ValueError(
+                f"curriculum cell {(cell_a, cell_b)} is outside "
+                f"0..{n_levels_a - 1} x 0..{n_levels_b - 1}"
+            )
+        if (cell_a, cell_b) not in cells:
+            cells.append((cell_a, cell_b))
+    return cells
 
 
 def _validate_wbc_logdir(logdir: str, ckpt_id: str):
@@ -192,6 +227,11 @@ def _git_snapshot_at(path):
 
 
 def main(argv: Optional[List[str]] = None):
+    if argv is not None and "--system_matrix" in argv:
+        from benchmark.wbc.system_cli import main as system_main
+
+        system_main([value for value in argv if value != "--system_matrix"])
+        return
     args = parse_args(argv)
     n_runs = len(args.logdirs)
     names = _normalized(args.names, n_runs, lambda i: Path(args.logdirs[i]).name[:24])
@@ -264,13 +304,11 @@ def main(argv: Optional[List[str]] = None):
         group_names = [names[index] for index in run_indices]
         base_index = run_indices[0]
         preview_cfg = _load_cfg_from_pkl(args.logdirs[base_index], robot=args.robot)
+        n_levels_a = int(preview_cfg.wbc.goal_reaching.trajectory.n_levels_A)
+        n_levels_b = int(preview_cfg.wbc.goal_reaching.trajectory.n_levels_B)
+        selected_cells = _selected_cells(args, n_levels_a, n_levels_b)
         n_cells_preview = (
-            1
-            if args.smoke
-            else int(
-                preview_cfg.wbc.goal_reaching.trajectory.n_levels_A
-                * preview_cfg.wbc.goal_reaching.trajectory.n_levels_B
-            )
+            len(selected_cells) if selected_cells is not None else n_levels_a * n_levels_b
         )
         rows_per_cell = min(
             args.suite_rows_per_cell or args.bank_per_cell, args.bank_per_cell
@@ -307,9 +345,7 @@ def main(argv: Optional[List[str]] = None):
         resolved_config_path = os.path.join(run_dir, resolved_config_name)
         _dump_json(resolved_config_path, cfg_to_dict(cfg))
         control_dts.append(float(base.dt))
-        n_cells = (
-            1 if args.smoke else int(base.traj_curriculum.nA * base.traj_curriculum.nB)
-        )
+        n_cells = n_cells_preview
         n_curriculum_cells.append(n_cells)
         group_video_tasks = []
         try:
@@ -355,9 +391,15 @@ def main(argv: Optional[List[str]] = None):
                     settle_steps=args.settle_steps,
                     device=args.sim_device,
                     suite_rows_per_cell=args.suite_rows_per_cell,
-                    cells=[(0, 0)] if args.smoke else None,
-                    validate_feature_coverage=not args.smoke,
+                    cells=selected_cells,
+                    validate_feature_coverage=selected_cells is None,
                     progress_callback=save_wave_progress,
+                    raw_trace_dir=(
+                        os.path.join(run_dir, "raw_traces")
+                        if args.record_raw_traces
+                        else None
+                    ),
+                    trace_prefix=f"group_{group_number:02d}",
                 )
             except Exception as exc:
                 _dump_json(
@@ -465,7 +507,8 @@ def main(argv: Optional[List[str]] = None):
         "mode": "wbc",
         "protocol": PROTOCOL_VERSION,
         "evaluation_protocol": dict(DEVELOPMENT_TIMED_TRAJECTORY_PROTOCOL),
-        "task_suite_version": "wbc-task-spec-v1",
+        "kinematic_reporting_protocol": dict(DEVELOPMENT_KINEMATIC_PROTOCOL),
+        "task_suite_version": SUITE_VERSION,
         "names": names,
         "logdirs": args.logdirs,
         "ckptids": ckptids,
@@ -481,13 +524,16 @@ def main(argv: Optional[List[str]] = None):
         "settle_steps": args.settle_steps,
         "suite_rows_per_cell": args.suite_rows_per_cell,
         "smoke": args.smoke,
+        "selected_cells": args.cells,
         "n_curriculum_cells": n_curriculum_cells,
         "num_layout_groups": len(groups),
         "layout_groups": group_metadata,
         "representative_videos": representative_video_records,
         "representative_video_errors": representative_video_errors,
+        "raw_traces_recorded": bool(args.record_raw_traces),
         "power_sampling": {
             "rate": "control_step",
+            "leg_energy_integration": "physics_substep",
             "arm_and_whole_body_available_when": "control.control_type == P",
             "electrical_energy_model": False,
         },

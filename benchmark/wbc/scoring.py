@@ -24,6 +24,19 @@ DEVELOPMENT_TIMED_TRAJECTORY_PROTOCOL = {
     "hold_time_s": 0.50,
 }
 
+# These are development reporting thresholds, frozen into every raw archive.
+# They classify observed configurations; they are not a proof that an unseen
+# target has an IK solution.  The rotational Jacobian threshold matches the
+# reach-table builder's documented default and remains comparable because its
+# rows are dimensionless.
+DEVELOPMENT_KINEMATIC_PROTOCOL = {
+    "status": "development_thresholds",
+    "reach_model_limit_ratio": 1.0,
+    "rho_comfort_hi": 0.85,
+    "joint_limit_margin_fraction": 0.02,
+    "rot_jacobian_sigma_min": 0.05,
+}
+
 
 def timed_trajectory_success(metrics: Mapping[str, object], protocol=None) -> dict:
     """Apply the public timed-trajectory success contract to one task row."""

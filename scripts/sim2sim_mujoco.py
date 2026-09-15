@@ -108,6 +108,8 @@ class RlSarMujoco:
             "cmd_height": self.command[5],
             "gait_indices": self.gait_indices,
         }
+        if hasattr(self, "arm_commands"):
+            state["arm_commands"] = self.arm_commands
         # ComputeObservation() advances the gait clock as a side effect, in the
         # same call that reads the commands -- matching training, where
         # _step_contact_targets() and compute_observations() see one command.

@@ -239,6 +239,8 @@ class LeggedRobot(BaseTask):
             self.render_gui()
         randomize_action_delay = getattr(self.cfg.domain_rand, "randomize_action_delay", False)
         self.step_locomotion_power.zero_()
+        self.step_locomotion_abs_energy_j.zero_()
+        self.step_locomotion_positive_energy_j.zero_()
         if randomize_action_delay:
             actions_start_decimation = torch.randint(
                 0,
@@ -262,13 +264,19 @@ class LeggedRobot(BaseTask):
             # if self.device == 'cpu':
             self.gym.fetch_results(self.sim, True)
             self.gym.refresh_dof_state_tensor(self.sim)
-            self.step_locomotion_power += torch.sum(
-                torch.abs(
-                    self.torques[:, : self.num_actions_loco]
-                    * self.dof_vel[:, : self.num_actions_loco]
-                ),
-                dim=-1,
-            ) / float(self.cfg.control.decimation)
+            leg_joint_power = (
+                self.torques[:, : self.num_actions_loco]
+                * self.dof_vel[:, : self.num_actions_loco]
+            )
+            leg_abs_power = torch.sum(torch.abs(leg_joint_power), dim=-1)
+            self.step_locomotion_power += leg_abs_power / float(
+                self.cfg.control.decimation
+            )
+            physics_dt = float(self.cfg.sim.dt)
+            self.step_locomotion_abs_energy_j += leg_abs_power * physics_dt
+            self.step_locomotion_positive_energy_j += torch.sum(
+                torch.clamp_min(leg_joint_power, 0.0), dim=-1
+            ) * physics_dt
         self.post_physics_step()
 
         return self.rew_buf_dog, self.rew_buf_arm, self.reset_buf, self.extras
@@ -359,6 +367,15 @@ class LeggedRobot(BaseTask):
         """Append arm/WBC episode metrics to ``extras['train/episode']``."""
         pass
 
+    def _arm_pre_reset_capture_hook(self, env_ids):
+        """Capture read-only terminal state before ``reset_idx`` mutates tensors.
+
+        The training environment intentionally leaves this as a no-op. Evaluation
+        subclasses can use it to retain the final physical sample without moving
+        any simulator-state writes out of the canonical reset path.
+        """
+        pass
+
     def post_physics_step(self):
         """check terminations, compute observations and rewards
         calls self._post_physics_step_callback() for common computations
@@ -400,6 +417,7 @@ class LeggedRobot(BaseTask):
         if getattr(self, "coordination_commands", None) is not None:
             self.coordination_commands.after_reward(self, global_switch.count)
         env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
+        self._arm_pre_reset_capture_hook(env_ids)
         self.reset_idx(env_ids)
 
         if getattr(self.cfg.env, "arm_policy_enabled", True):
@@ -1198,6 +1216,12 @@ class LeggedRobot(BaseTask):
             dtype=torch.float,
             device=self.device,
             requires_grad=False,
+        )
+        self.step_locomotion_abs_energy_j = torch.zeros_like(
+            self.step_locomotion_power
+        )
+        self.step_locomotion_positive_energy_j = torch.zeros_like(
+            self.step_locomotion_power
         )
         self._arm_init_performance_metrics_hook()
 

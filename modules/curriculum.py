@@ -15,6 +15,8 @@ Standalone (no IsaacGym). Two pieces:
   running CPU/scipy generation on the hot path.
 """
 
+import math
+
 import numpy as np
 import torch
 
@@ -28,26 +30,42 @@ def _lerp(a, b, alpha):
     return a + (b - a) * alpha
 
 
-# Difficulty presets. level_A interpolates geometry (path shape) difficulty;
-# level_B interpolates timing (traversal speed) difficulty. Kept reach-feasible
-# (small amplitude, workspace-centered) so rho stays mostly within the comfort
-# band -- see the plan's rho risk note.
+# Difficulty presets. level_A interpolates geometry (path shape and sustained
+# planar travel) difficulty; level_B interpolates timing difficulty. The easy
+# end remains local, while the hardest level requires 5 m of continuous XY
+# travel so whole-body evaluation cannot be solved by arm motion alone.
 # center=[0,0,0]: paths are generated around the origin and translated to a
 # reachable anchor in front of the shoulder at env reset (see wbc_env
-# _arm_post_reset_refresh_hook). Kept reach-feasible (small amplitude) so rho
-# stays mostly within the comfort band -- see the plan's rho risk note.
+# _arm_post_reset_refresh_hook). The base must move with long trajectories to
+# keep the instantaneous target near the reachable comfort band.
 EASY_GEOM = dict(
     f_max=0.15, amplitude=0.04, f_rot_max=0.10, f_rot_amplitude=0.20,
-    tangent_align_ratio=0.6, drift_speed=0.0, drift_dir=[1.0, 0.0],
+    tangent_align_ratio=0.6, drift_speed=0.0, xy_displacement=0.25,
+    drift_dir=[1.0, 0.0], drift_direction_spread=0.0,
+    planar_curve_amplitude=0.02, planar_curve_cycles=0.5,
+    z_min=0.35, z_max=0.65, vertical_cycles=1.0,
     center=[0.0, 0.0, 0.0], duration=8.0, dt=0.02, n_freqs=8, lam=0.15, ds_grid=0.01,
 )
 HARD_GEOM = dict(
     f_max=0.6, amplitude=0.16, f_rot_max=0.5, f_rot_amplitude=0.8,
-    tangent_align_ratio=0.6, drift_speed=0.05, drift_dir=[1.0, 0.2],
+    tangent_align_ratio=0.6, drift_speed=0.05, xy_displacement=5.0,
+    drift_dir=[1.0, 0.2], drift_direction_spread=math.pi,
+    planar_curve_amplitude=0.55, planar_curve_cycles=3.0,
+    z_min=0.0, z_max=1.5, vertical_cycles=1.0,
     center=[0.0, 0.0, 0.0], duration=8.0, dt=0.02, n_freqs=8, lam=0.15, ds_grid=0.01,
 )
-EASY_TIMING = dict(f_max=0.10, v_max=0.06, T=8.0, dt=0.02, n_freqs=6)
-HARD_TIMING = dict(f_max=0.40, v_max=0.30, T=8.0, dt=0.02, n_freqs=6)
+# Timing limits are expressed in the metre-equivalent SE(3) arc metric. T is
+# the minimum duration; long paths are extended rather than silently exceeding
+# v_max/a_max. The resulting Cartesian reference speed is measured separately
+# in benchmark manifests.
+EASY_TIMING = dict(
+    f_max=0.10, v_max=0.25, a_max=0.20, T=8.0, dt=0.02,
+    linear_a_max=0.75, n_freqs=6, min_speed_fraction=0.25,
+)
+HARD_TIMING = dict(
+    f_max=0.40, v_max=0.75, a_max=1.20, T=8.0, dt=0.02,
+    linear_a_max=2.50, n_freqs=6, min_speed_fraction=0.25,
+)
 
 
 class CurriculumManager:

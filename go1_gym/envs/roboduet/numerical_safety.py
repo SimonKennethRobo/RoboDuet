@@ -87,5 +87,9 @@ def quarantine_physics(env):
     rigid[ids, :, 6] = 1
     contacts[ids] = 0
     env.step_locomotion_power[ids] = 0
+    if hasattr(env, "step_locomotion_abs_energy_j"):
+        env.step_locomotion_abs_energy_j[ids] = 0
+    if hasattr(env, "step_locomotion_positive_energy_j"):
+        env.step_locomotion_positive_energy_j[ids] = 0
     env.torques[ids] = 0
     env.actions[ids] = 0

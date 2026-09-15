@@ -1,5 +1,8 @@
 # Benchmark Configs
 
+跨方法 MuJoCo 入口和 qm_control 接入见
+[`wbc/CROSS_METHOD_MUJOCO.md`](wbc/CROSS_METHOD_MUJOCO.md)。
+
 这个目录存放 benchmark 运行配置和长期保留的 candidate checkpoints。
 
 更长期的设计记录和后续计划见 [docs/benchmark_roadmap.md](../docs/benchmark_roadmap.md)。
@@ -41,6 +44,15 @@ benchmark/candidates/
 
 ## Run Dog-Only Benchmark
 
+先激活本仓库的 IsaacGym 环境；下列命令均从仓库根目录执行：
+
+```bash
+source /opt/miniconda3/etc/profile.d/conda.sh
+conda activate isaacgym
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}"
+export PYTHONPATH="$(pwd):${PYTHONPATH:-}"
+```
+
 当前已实现的是 dog-only benchmark：
 
 ```bash
@@ -68,7 +80,7 @@ python -m benchmark.cli \
 IsaacGym simulation 并行评估，不兼容的 layout 会自动拆组、依次运行并汇总到同一报告：
 
 ```bash
-conda run -n roboduet python -m benchmark.cli \
+python -m benchmark \
   --dog_only \
   --candidate_dir benchmark/candidates \
   --profile benchmark/profiles/dog_policy_standard.json \
@@ -78,7 +90,7 @@ conda run -n roboduet python -m benchmark.cli \
 更慢但更完整的 velocity grid 可以使用：
 
 ```bash
-conda run -n roboduet python -m benchmark.cli \
+python -m benchmark \
   --dog_only \
   --candidate_dir benchmark/candidates \
   --profile benchmark/profiles/dog_policy_full.json \
@@ -92,17 +104,21 @@ conda run -n roboduet python -m benchmark.cli \
 可用的 Stage-2 WBC 模式：
 
 ```bash
-conda run -n roboduet python -m benchmark.cli --wbc \
+python -m benchmark --wbc \
   --logdirs runs/run_A runs/run_B --names A B --headless \
   --total_envs 4096 --bank_seed 12345 --bank_per_cell 8
 ```
 
 `--total_envs` 是同一个 layout group 的总环境预算。benchmark 会把 `难度 cell × bank row` 展平成逻辑任务，并在兼容方法之间自动平均分配容量；一个物理 env 只跑一条具体轨迹。默认完整 suite 是 `6 × 6 × 8 = 288` 个任务，所以单方法只创建 288 env、两个兼容方法创建 576 env，并在一个 wave 内完成；预算不足时才拆成多个 wave。旧的 `--num_envs_per_policy` 仍可作为兼容覆盖参数，但新实验建议统一使用 `--total_envs`。
 
+几何难度 A=0..5 将首尾 XY 净位移从 `0.25 m` 增加到 `5.0 m`。A=5 在整个 XY 平面采样方向，包含显式高曲率横向片段，并覆盖相对每个参考点局部地面的 `0..1.5 m` 高度。suite manifest 会记录实测 XY 位移、Z 范围和曲率，并在最高难度未达到这些覆盖要求时直接失败。现有旧 checkpoint 在 A=5 上属于长程/大高度分布外测评。
+
+时序难度 B=0..5 使用有界 SE(3) 弧长时间律。`v_max` / `a_max` 分别是 metre-equivalent 弧长速度与切向加速度硬上限，`linear_a_max` 另行限制高曲率引起的笛卡尔 reference 加速度；`T=8 s` 是最短时长，路径较长或曲率较高时 duration 自动延长。manifest 同时记录实测弧长 mean/P95/peak、弧长加速度及笛卡尔 reference 速度/加速度，避免把弧长量误称为纯平移速度。只验证特定 cell 时可使用 `--cells 5,0 5,5 --suite_rows_per_cell 1`；benchmark 会禁用训练配置中的 20 s episode timeout，由 TaskSpec deadline 决定任务结束。
+
 同时录制 6 条代表性轨迹：
 
 ```bash
-conda run -n roboduet python -m benchmark.cli --wbc \
+python -m benchmark --wbc \
   --logdirs runs/run_A runs/run_B --names A B --headless \
   --total_envs 4096 --record_representative_videos \
   --num_representative_videos 6
@@ -112,12 +128,147 @@ conda run -n roboduet python -m benchmark.cli --wbc \
 
 WBC benchmark 会输出 `results.json`、`metadata.json`、`trajectory_suite.json`；开启录像后还会输出 `representative_videos.json`、`videos/<method>/*.mp4`、poster 图片，并把视频矩阵加入 HTML。`metadata.json` 中的 `layout_groups[*].schedule` 记录逻辑任务数、每 wave 数量、实际容量和 wave 数。录像是在定量测评结束后用单环境逐条回放，不会给 288/4096 个测评环境同时创建相机。`--suite_rows_per_cell 0` 表示评估 bank 中每个 cell 的所有轨迹。`--arm_only` 仍是预留模式。
 
+需要保留可离线重算的逐步数据时加 `--record_raw_traces`。每个 policy/wave 会写一个 `raw_traces/*.npz`，包含 reference/actual EE pose、base state、关节状态、控制量/力矩限值、足端接触力/速度和终止事件；逐任务结果通过 `raw_trace.task_index` 引用归档中的列。当前 v3 scorer 可离线重算成功事件、精度 P95/peak/残差方差、coordination、运动学诊断、腿部 torque RMS/peak/saturation、足端 slip/support、base path/coverage 及既有 energy/smoothness 指标，并兼容读取 v1/v2 archive：
+
+```bash
+python -m benchmark.wbc.trace benchmark/results/<run>/raw_traces/*.npz \
+  --output benchmark/results/<run>/rescored.json
+```
+
+### Upper controller × locomotion policy system matrix
+
+Use `--system_matrix` when the upper controller and dog policy must be selected
+as independent dimensions. The current adapters are `floating_base_ocs2_mpc`
+(native C++ OCS2 SQP/MRT with synchronous and asynchronous ZMQ transports) and
+`ik` (the environment's DLS IK plus base staging):
+
+```bash
+python -m benchmark --wbc --system_matrix \
+  --env-logdir runs/<trajectory-env-run> \
+  --loco-logdirs runs/<dog-A> runs/<dog-B> --loco-names A B \
+  --upper-controllers floating_base_ocs2_mpc ik \
+  --scenarios nominal push --headless --cells 0,0 \
+  --bank_per_cell 1 --suite_rows_per_cell 1 --num_eval_steps 500
+```
+
+To inspect a bounded run in the IsaacGym viewer, omit `--headless` and add
+`--visualize-trajectories`. The full reference path is orange and the executed
+end-effector trail is green; the trail is cleared at every task boundary. The
+current target, preview poses and tracking-error segment remain available from
+the existing WBC overlay. Visualization is limited to viewer environment 0 and
+is recorded in `metadata.json`:
+
+```bash
+python -m benchmark --wbc --system_matrix \
+  --env-logdir runs/<trajectory-env-run> \
+  --loco-logdirs runs/<dog-A> --loco-names A \
+  --upper-controllers floating_base_ocs2_mpc \
+  --scenarios nominal --cells 0,0 --suite_rows_per_cell 1 \
+  --num_eval_steps 500 --visualize-trajectories --ocs2-transport async \
+  --ocs2-command-mode full
+```
+
+`--visualize-trajectories --headless` is rejected because no IsaacGym viewer
+exists in that mode. `--ocs2-transport async` starts MPC as an independent C++
+process with the same PUB/SUB, `CONFLATE=1` latest-state/latest-command pattern
+used by `wbc_rl_mpc`. IsaacGym is paced at the 50 Hz control rate and reuses the
+newest valid command when an SQP update takes longer than one control period.
+The complete time-stamped trajectory is still delivered once at every task
+boundary. Keep the default `synchronous` transport for deterministic quantitative
+benchmark receipts; async results record command reuse and maximum command lag
+in controller provenance.
+
+Use `--ocs2-command-mode pose_only` for the bridge's deployment pose-only
+contract. It forces commanded `vx=vy=0` while retaining yaw rate, body
+height/pitch/roll and X5 joint targets. This suppresses active planar base
+translation; it does not lock the physical root against contact-induced drift.
+
+The native OCS2 adapter is sequential (one IsaacGym env per process). Both
+adapters still consume the same frozen TaskSpec/reference contract and emit the
+same trace-v3/scorer result. Metadata records controller resources separately
+from each locomotion bundle's `parameters.pkl` and dog-checkpoint hashes.
+At task sequence zero the adapter sends the complete time-stamped SE(3)
+reference (`tl_t` plus interpolated xyz+xyzw poses) in one request. Later
+requests contain state only; the native runner rejects per-step reference
+replacement. System-matrix tasks use the OCS2-safe arm home
+`[0, 0.9, 0.9, 0, 0, 0]` and TaskSpec v3 translates/reorients each frozen path
+so its first pose equals the post-settle TCP pose. This removes acquisition
+error from timed tracking while retaining the generated path shape and time
+law. The runtime OCS2 task profile records its patched tracking weights and
+disabled arm nominal-posture bias through the copied task-file hash.
+
+Add `--workspace` to execute `workspace-probe-v1` after each controller/policy
+pair. Targets are cell-centred voxels in the post-settle initial shoulder frame;
+all attempted targets, including timeouts and resets, remain in the volume
+denominator. Scope semantics are recorded in `workspace_results.json`:
+
+- `fixed_base`: lock the six-DoF root state at the post-settle state.
+- `bounded_posture`: command zero planar/yaw motion while retaining bounded
+  height, pitch and roll commands.
+- `bounded_whole_body`: retain bounded planar/yaw and posture commands.
+
+For example, this runs one 0.1 m voxel in all three scopes:
+
+```bash
+python -m benchmark --wbc --system_matrix ... --workspace \
+  --workspace-bounds-m 0.30 0.40 -0.05 0.05 -0.05 0.05 \
+  --workspace-spacing-m 0.10 --workspace-steps 100
+```
+
+The default synchronous benchmark OCS2 path owns `SqpMpc` and
+`MPC_MRT_Interface` in one C++ process. Each blocking request carries the state,
+reference, sequence and simulator-derived controller time; the reply must echo
+the sequence and exact policy-observation time before IsaacGym advances. Each
+task restarts the sequence and resets the MPC node, so solver warm starts do not
+cross task boundaries. The runtime task pins both solver thread counts to one
+and records the runner source/executable, task copy and URDF hashes. Keep a
+measured forward/reverse trace comparison with the receipt when claiming
+deterministic ordering.
+
+### MuJoCo TaskSpec runner
+
+`benchmark.wbc.mujoco` 直接读取 IsaacGym 生成的 `trajectory_suite.json` 和对应 reference NPZ，核对 suite、TaskSpec 和 reference archive 哈希后，在 rl_sar 的 MuJoCo 模型与导出 dog-policy 接口上执行同一任务，并写出可由上述 scorer 读取的 trace-v3：
+
+```bash
+python -m benchmark.wbc.mujoco \
+  --suite benchmark/results/<isaac_run>/trajectory_suite.json \
+  --task-id timed-trajectory-<id> \
+  --rl-sar-root /path/to/rl_sar \
+  --policy-key <go2_x5-policy-directory> \
+  --scene /path/to/rl_sar/src/rl_sar_zoo/go2_x5_description/mjcf/scene.xml \
+  --output benchmark/results/<mujoco_run>
+```
+
+默认 adapter 的腿部由真实 rl_sar TorchScript bundle 驱动，机械臂由确定性的
+DLS IK joint-target controller 驱动。要运行与 IsaacGym system matrix 相同的
+floating-base OCS2 上层控制器，使用独立进程异步 ZMQ 模式：
+
+```bash
+python -m benchmark.wbc.mujoco \
+  --suite benchmark/results/<isaac-system-run>/trajectory_suite.json \
+  --task-id timed-trajectory-<id> \
+  --rl-sar-root /home/simon/Projects/Simon/wbc_rl_mpc/rl_sar \
+  --policy-key smooth_S_s11_selected_20260914 \
+  --scene /home/simon/Projects/Simon/wbc_rl_mpc/rl_sar/src/rl_sar_zoo/go2_x5_description/mjcf/scene.xml \
+  --upper-controller floating_base_ocs2_mpc \
+  --ocs2-root /home/simon/Projects/Simon/wbc_rl_mpc \
+  --ocs2-transport async --ocs2-command-mode pose_only --viewer \
+  --output benchmark/results/mujoco_ocs2
+```
+
+该模式在任务开始时把完整的 time-law SE(3) reference 交给独立 C++ MPC
+进程，稳态使用 latest-state/latest-command ZMQ。橙色是 reference，绿色是
+实际 TCP 轨迹，黄色球是当前目标。去掉 `--viewer` 可运行 headless；添加
+`--max-steps N` 可做有界 smoke。定量确定性对照可改用
+`--ocs2-transport synchronous`。MuJoCo 尚未采集的足端接触与 reach-table
+字段保持缺失/null，不以零值替代。
+
 ### WBC GPU 测试顺序
 
 先运行小规模 smoke（只测 `(0,0)` cell 的 8 条轨迹，并录 1 条代表视频）：
 
 ```bash
-conda run -n roboduet python -m benchmark.cli --wbc \
+python -m benchmark --wbc \
   --logdirs runs/<date>/<run> --names main_policy --headless \
   --total_envs 4096 --smoke --num_eval_steps 500 --settle_steps 10 \
   --record_representative_videos
@@ -126,7 +277,7 @@ conda run -n roboduet python -m benchmark.cli --wbc \
 确认结果目录中有 `results.json`、`trajectory_suite.json`、`index.html` 和可播放的 `videos/main_policy/*.mp4` 后，再跑完整 288 条：
 
 ```bash
-conda run -n roboduet python -m benchmark.cli --wbc \
+python -m benchmark --wbc \
   --logdirs runs/<date>/<run> --names main_policy --headless \
   --total_envs 4096 --bank_seed 12345 --bank_per_cell 8 \
   --num_eval_steps 500 --settle_steps 20 \

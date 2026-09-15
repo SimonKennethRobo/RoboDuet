@@ -1,0 +1,4721 @@
+{
+  "archive_schema": {
+    "height_reference": "geometry-local z; bind an execution anchor when materializing TaskSpec",
+    "padding": "terminal samples repeated; slice with gamma_points/time_law_points",
+    "quaternion_order": "xyzw"
+  },
+  "artifacts": {
+    "README.md": {
+      "sha256": "982067db3bc22865467a971845e72a6fe1f09f4b64a527e6fd8b736755bb734e"
+    },
+    "trajectories.npz": {
+      "sha256": "7d44630dbf840549864a9342f923a3b13eac4dd1879fe4b8ec5b96aaff8135f7"
+    },
+    "trajectory_library.rrd": {
+      "sha256": "913bd176d6446149c022e65162dd62d893240f2103ebb9f4ad39b40c63cacfe7"
+    }
+  },
+  "constraints": {
+    "circle_closure": "position, height and orientation close at progress 1",
+    "circle_radius_m": {
+      "max": 3.0,
+      "min": 0.25
+    },
+    "height_m": {
+      "max": 1.0,
+      "min": 0.05
+    },
+    "height_sampling": "seeded random control knots with smoothstep interpolation",
+    "line_length_m": {
+      "max": 3.0,
+      "min": 0.25
+    },
+    "orientation_sampling": "seeded uniform SO(3) control quaternions with smooth SLERP",
+    "se3_arc_lambda_m_per_rad": 0.15
+  },
+  "curriculum_grid": {
+    "curriculum": "modules.curriculum.CurriculumManager.params_for_cell",
+    "generator": "modules.trajectory_generator.TrajectoryFactory",
+    "levels_A": 6,
+    "levels_B": 6,
+    "mode": "generated_from_roboduet_source",
+    "sample_count": 36,
+    "seed": 12345
+  },
+  "family_counts": {
+    "circle": 16,
+    "curriculum": 36,
+    "line": 16
+  },
+  "generator": {
+    "path": "/home/simon/Projects/WBC/RoboDuet/benchmark/data/build_frozen_trajectory_library.py",
+    "sha256": "312bec3c14da37a69908168f74a7f9581e7f8bef821e93ebcda32a12e30341a1"
+  },
+  "rerun": {
+    "ground": {
+      "grid_spacing_m": 1.0,
+      "robot_visual_min_z_m": 0.0,
+      "slab_thickness_m": 0.02,
+      "surface_z_m": 0.0,
+      "xy_bounds_m": {
+        "max": [
+          143.0,
+          45.0
+        ],
+        "min": [
+          -3.0,
+          -7.0
+        ]
+      }
+    },
+    "preview_timeline_s": 12.0,
+    "sdk_version": "0.19.0",
+    "viewer": "/opt/miniconda3/envs/isaacgym/bin/rerun"
+  },
+  "sample_count": 68,
+  "scale_reference_model": {
+    "bounds_base_frame_m": {
+      "max": [
+        0.33195799589157104,
+        0.1620129942893982,
+        0.34299999475479126
+      ],
+      "min": [
+        -0.24186201393604279,
+        -0.1620129942893982,
+        -0.4489150047302246
+      ]
+    },
+    "compiled_visual_mesh_sha256": "1bc5a9027d4854eddc1e4df294f3d47759b44d39caeae64b500b26d5618abf39",
+    "instance_scale": 1.0,
+    "material_group_count": 5,
+    "model": "Go2+X5",
+    "placement": "0.75 m in negative gallery-y from each trajectory start; feet on z=0",
+    "scene": "/home/simon/Projects/Simon/wbc_rl_mpc/rl_sar/src/rl_sar_zoo/go2_x5_description/mjcf/scene.xml",
+    "scene_sha256": "f85a5138ea76e4f60fead6281dc6b03b91455c738e4a0266875d3854aef7cec1",
+    "triangle_count": 575300,
+    "vertex_count": 506807,
+    "visual_geom_count": 42
+  },
+  "schema_version": "roboduet-frozen-trajectory-library-v4",
+  "seed": 20260915,
+  "status": "frozen",
+  "trajectories": [
+    {
+      "cell_A": 0,
+      "cell_B": 0,
+      "content_sha256": "2c26e068d3f24088f74750142b3523a5824c881d1816b1c341634ac64293d2c7",
+      "duration_s": 17.690706253051758,
+      "family": "curriculum",
+      "gamma_points": 257,
+      "geometry_params": {
+        "amplitude": 0.04,
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "drift_dir": [
+          1.0,
+          0.0
+        ],
+        "drift_direction_spread": 0.0,
+        "drift_speed": 0.0,
+        "ds_grid": 0.01,
+        "dt": 0.02,
+        "duration": 8.0,
+        "f_max": 0.15,
+        "f_rot_amplitude": 0.2,
+        "f_rot_max": 0.1,
+        "lam": 0.15,
+        "n_freqs": 8.0,
+        "planar_curve_amplitude": 0.02,
+        "planar_curve_cycles": 0.5,
+        "tangent_align_ratio": 0.6,
+        "vertical_cycles": 1.0,
+        "xy_displacement": 0.25,
+        "z_max": 0.65,
+        "z_min": 0.35
+      },
+      "geometry_seed": 12345,
+      "max_height_m": 0.6499996781349182,
+      "min_height_m": 0.3500000834465027,
+      "path_length_m": 2.5665597915649414,
+      "time_law_points": 401,
+      "timing_params": {
+        "T": 8.0,
+        "a_max": 0.2,
+        "dt": 0.02,
+        "f_max": 0.1,
+        "linear_a_max": 0.75,
+        "min_speed_fraction": 0.25,
+        "n_freqs": 6.0,
+        "v_max": 0.25
+      },
+      "timing_seed": 112345,
+      "trajectory_id": "curriculum-a0-b0"
+    },
+    {
+      "cell_A": 0,
+      "cell_B": 1,
+      "content_sha256": "b162a3821afeef6731364a33edc8122c71a35a941a40e2946feb02ef94498d2f",
+      "duration_s": 30.43730926513672,
+      "family": "curriculum",
+      "gamma_points": 333,
+      "geometry_params": {
+        "amplitude": 0.04,
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "drift_dir": [
+          1.0,
+          0.0
+        ],
+        "drift_direction_spread": 0.0,
+        "drift_speed": 0.0,
+        "ds_grid": 0.01,
+        "dt": 0.02,
+        "duration": 8.0,
+        "f_max": 0.15,
+        "f_rot_amplitude": 0.2,
+        "f_rot_max": 0.1,
+        "lam": 0.15,
+        "n_freqs": 8.0,
+        "planar_curve_amplitude": 0.02,
+        "planar_curve_cycles": 0.5,
+        "tangent_align_ratio": 0.6,
+        "vertical_cycles": 1.0,
+        "xy_displacement": 0.25,
+        "z_max": 0.65,
+        "z_min": 0.35
+      },
+      "geometry_seed": 12346,
+      "max_height_m": 0.6499972343444824,
+      "min_height_m": 0.3500024676322937,
+      "path_length_m": 3.3251824378967285,
+      "time_law_points": 401,
+      "timing_params": {
+        "T": 8.0,
+        "a_max": 0.4,
+        "dt": 0.02,
+        "f_max": 0.16000000000000003,
+        "linear_a_max": 1.1,
+        "min_speed_fraction": 0.25,
+        "n_freqs": 6.0,
+        "v_max": 0.35
+      },
+      "timing_seed": 112346,
+      "trajectory_id": "curriculum-a0-b1"
+    },
+    {
+      "cell_A": 0,
+      "cell_B": 2,
+      "content_sha256": "6432300d2e6c6ce01ab4983e632ce94c12f2af76ba2e6959d42fce639d0f3870",
+      "duration_s": 21.183103561401367,
+      "family": "curriculum",
+      "gamma_points": 341,
+      "geometry_params": {
+        "amplitude": 0.04,
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "drift_dir": [
+          1.0,
+          0.0
+        ],
+        "drift_direction_spread": 0.0,
+        "drift_speed": 0.0,
+        "ds_grid": 0.01,
+        "dt": 0.02,
+        "duration": 8.0,
+        "f_max": 0.15,
+        "f_rot_amplitude": 0.2,
+        "f_rot_max": 0.1,
+        "lam": 0.15,
+        "n_freqs": 8.0,
+        "planar_curve_amplitude": 0.02,
+        "planar_curve_cycles": 0.5,
+        "tangent_align_ratio": 0.6,
+        "vertical_cycles": 1.0,
+        "xy_displacement": 0.25,
+        "z_max": 0.65,
+        "z_min": 0.35
+      },
+      "geometry_seed": 12347,
+      "max_height_m": 0.6499954462051392,
+      "min_height_m": 0.3500003516674042,
+      "path_length_m": 3.403752565383911,
+      "time_law_points": 401,
+      "timing_params": {
+        "T": 8.0,
+        "a_max": 0.6000000000000001,
+        "dt": 0.02,
+        "f_max": 0.22000000000000003,
+        "linear_a_max": 1.4500000000000002,
+        "min_speed_fraction": 0.25,
+        "n_freqs": 6.0,
+        "v_max": 0.45
+      },
+      "timing_seed": 112347,
+      "trajectory_id": "curriculum-a0-b2"
+    },
+    {
+      "cell_A": 0,
+      "cell_B": 3,
+      "content_sha256": "c4831b46d158fca9f68285eb361d857b85fe6305aa4b31e7d17e1bc32d37e257",
+      "duration_s": 12.234975814819336,
+      "family": "curriculum",
+      "gamma_points": 221,
+      "geometry_params": {
+        "amplitude": 0.04,
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "drift_dir": [
+          1.0,
+          0.0
+        ],
+        "drift_direction_spread": 0.0,
+        "drift_speed": 0.0,
+        "ds_grid": 0.01,
+        "dt": 0.02,
+        "duration": 8.0,
+        "f_max": 0.15,
+        "f_rot_amplitude": 0.2,
+        "f_rot_max": 0.1,
+        "lam": 0.15,
+        "n_freqs": 8.0,
+        "planar_curve_amplitude": 0.02,
+        "planar_curve_cycles": 0.5,
+        "tangent_align_ratio": 0.6,
+        "vertical_cycles": 1.0,
+        "xy_displacement": 0.25,
+        "z_max": 0.65,
+        "z_min": 0.35
+      },
+      "geometry_seed": 12348,
+      "max_height_m": 0.6499919891357422,
+      "min_height_m": 0.35000544786453247,
+      "path_length_m": 2.201082229614258,
+      "time_law_points": 401,
+      "timing_params": {
+        "T": 8.0,
+        "a_max": 0.8,
+        "dt": 0.02,
+        "f_max": 0.28,
+        "linear_a_max": 1.8,
+        "min_speed_fraction": 0.25,
+        "n_freqs": 6.0,
+        "v_max": 0.55
+      },
+      "timing_seed": 112348,
+      "trajectory_id": "curriculum-a0-b3"
+    },
+    {
+      "cell_A": 0,
+      "cell_B": 4,
+      "content_sha256": "047ec85debbff5d99d05c7fa58e178f190dca3f98dd6d8c8d5a376323587a342",
+      "duration_s": 16.085926055908203,
+      "family": "curriculum",
+      "gamma_points": 345,
+      "geometry_params": {
+        "amplitude": 0.04,
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "drift_dir": [
+          1.0,
+          0.0
+        ],
+        "drift_direction_spread": 0.0,
+        "drift_speed": 0.0,
+        "ds_grid": 0.01,
+        "dt": 0.02,
+        "duration": 8.0,
+        "f_max": 0.15,
+        "f_rot_amplitude": 0.2,
+        "f_rot_max": 0.1,
+        "lam": 0.15,
+        "n_freqs": 8.0,
+        "planar_curve_amplitude": 0.02,
+        "planar_curve_cycles": 0.5,
+        "tangent_align_ratio": 0.6,
+        "vertical_cycles": 1.0,
+        "xy_displacement": 0.25,
+        "z_max": 0.65,
+        "z_min": 0.35
+      },
+      "geometry_seed": 12349,
+      "max_height_m": 0.6499997973442078,
+      "min_height_m": 0.35000017285346985,
+      "path_length_m": 3.4472169876098633,
+      "time_law_points": 401,
+      "timing_params": {
+        "T": 8.0,
+        "a_max": 1.0,
+        "dt": 0.02,
+        "f_max": 0.3400000000000001,
+        "linear_a_max": 2.1500000000000004,
+        "min_speed_fraction": 0.25,
+        "n_freqs": 6.0,
+        "v_max": 0.65
+      },
+      "timing_seed": 112349,
+      "trajectory_id": "curriculum-a0-b4"
+    },
+    {
+      "cell_A": 0,
+      "cell_B": 5,
+      "content_sha256": "ce2326ad61fcd22b40f1c3d188f5775a9f18dee40a71eb231639ebb2db4e4453",
+      "duration_s": 14.367473602294922,
+      "family": "curriculum",
+      "gamma_points": 356,
+      "geometry_params": {
+        "amplitude": 0.04,
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "drift_dir": [
+          1.0,
+          0.0
+        ],
+        "drift_direction_spread": 0.0,
+        "drift_speed": 0.0,
+        "ds_grid": 0.01,
+        "dt": 0.02,
+        "duration": 8.0,
+        "f_max": 0.15,
+        "f_rot_amplitude": 0.2,
+        "f_rot_max": 0.1,
+        "lam": 0.15,
+        "n_freqs": 8.0,
+        "planar_curve_amplitude": 0.02,
+        "planar_curve_cycles": 0.5,
+        "tangent_align_ratio": 0.6,
+        "vertical_cycles": 1.0,
+        "xy_displacement": 0.25,
+        "z_max": 0.65,
+        "z_min": 0.35
+      },
+      "geometry_seed": 12350,
+      "max_height_m": 0.6499993801116943,
+      "min_height_m": 0.3500007688999176,
+      "path_length_m": 3.5575919151306152,
+      "time_law_points": 401,
+      "timing_params": {
+        "T": 8.0,
+        "a_max": 1.2,
+        "dt": 0.02,
+        "f_max": 0.4,
+        "linear_a_max": 2.5,
+        "min_speed_fraction": 0.25,
+        "n_freqs": 6.0,
+        "v_max": 0.75
+      },
+      "timing_seed": 112350,
+      "trajectory_id": "curriculum-a0-b5"
+    },
+    {
+      "cell_A": 1,
+      "cell_B": 0,
+      "content_sha256": "b0e251e554904ae7c3b219d743d15e8e55f591c116f07f9008b06625c1a5b9d1",
+      "duration_s": 25.787994384765625,
+      "family": "curriculum",
+      "gamma_points": 287,
+      "geometry_params": {
+        "amplitude": 0.064,
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "drift_dir": [
+          1.0,
+          0.04000000000000001
+        ],
+        "drift_direction_spread": 0.6283185307179586,
+        "drift_speed": 0.010000000000000002,
+        "ds_grid": 0.01,
+        "dt": 0.02,
+        "duration": 8.0,
+        "f_max": 0.24,
+        "f_rot_amplitude": 0.32000000000000006,
+        "f_rot_max": 0.18000000000000002,
+        "lam": 0.15,
+        "n_freqs": 8.0,
+        "planar_curve_amplitude": 0.126,
+        "planar_curve_cycles": 1.0,
+        "tangent_align_ratio": 0.6,
+        "vertical_cycles": 1.0,
+        "xy_displacement": 1.2000000000000002,
+        "z_max": 0.8200000000000001,
+        "z_min": 0.27999999999999997
+      },
+      "geometry_seed": 12351,
+      "max_height_m": 0.8199922442436218,
+      "min_height_m": 0.2800162136554718,
+      "path_length_m": 2.8617894649505615,
+      "time_law_points": 401,
+      "timing_params": {
+        "T": 8.0,
+        "a_max": 0.2,
+        "dt": 0.02,
+        "f_max": 0.1,
+        "linear_a_max": 0.75,
+        "min_speed_fraction": 0.25,
+        "n_freqs": 6.0,
+        "v_max": 0.25
+      },
+      "timing_seed": 112351,
+      "trajectory_id": "curriculum-a1-b0"
+    },
+    {
+      "cell_A": 1,
+      "cell_B": 1,
+      "content_sha256": "b7188a3d484acec4aba7987473c566d5a9b0a810bbbbc481d9c100254ed748aa",
+      "duration_s": 24.825397491455078,
+      "family": "curriculum",
+      "gamma_points": 287,
+      "geometry_params": {
+        "amplitude": 0.064,
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "drift_dir": [
+          1.0,
+          0.04000000000000001
+        ],
+        "drift_direction_spread": 0.6283185307179586,
+        "drift_speed": 0.010000000000000002,
+        "ds_grid": 0.01,
+        "dt": 0.02,
+        "duration": 8.0,
+        "f_max": 0.24,
+        "f_rot_amplitude": 0.32000000000000006,
+        "f_rot_max": 0.18000000000000002,
+        "lam": 0.15,
+        "n_freqs": 8.0,
+        "planar_curve_amplitude": 0.126,
+        "planar_curve_cycles": 1.0,
+        "tangent_align_ratio": 0.6,
+        "vertical_cycles": 1.0,
+        "xy_displacement": 1.2000000000000002,
+        "z_max": 0.8200000000000001,
+        "z_min": 0.27999999999999997
+      },
+      "geometry_seed": 12352,
+      "max_height_m": 0.8199997544288635,
+      "min_height_m": 0.28001734614372253,
+      "path_length_m": 2.8693230152130127,
+      "time_law_points": 401,
+      "timing_params": {
+        "T": 8.0,
+        "a_max": 0.4,
+        "dt": 0.02,
+        "f_max": 0.16000000000000003,
+        "linear_a_max": 1.1,
+        "min_speed_fraction": 0.25,
+        "n_freqs": 6.0,
+        "v_max": 0.35
+      },
+      "timing_seed": 112352,
+      "trajectory_id": "curriculum-a1-b1"
+    },
+    {
+      "cell_A": 1,
+      "cell_B": 2,
+      "content_sha256": "3e8368683eed7d9bd8c444f0c762870a722092a3945e6adfda3a7eccacea12fd",
+      "duration_s": 8.830432891845703,
+      "family": "curriculum",
+      "gamma_points": 219,
+      "geometry_params": {
+        "amplitude": 0.064,
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "drift_dir": [
+          1.0,
+          0.04000000000000001
+        ],
+        "drift_direction_spread": 0.6283185307179586,
+        "drift_speed": 0.010000000000000002,
+        "ds_grid": 0.01,
+        "dt": 0.02,
+        "duration": 8.0,
+        "f_max": 0.24,
+        "f_rot_amplitude": 0.32000000000000006,
+        "f_rot_max": 0.18000000000000002,
+        "lam": 0.15,
+        "n_freqs": 8.0,
+        "planar_curve_amplitude": 0.126,
+        "planar_curve_cycles": 1.0,
+        "tangent_align_ratio": 0.6,
+        "vertical_cycles": 1.0,
+        "xy_displacement": 1.2000000000000002,
+        "z_max": 0.8200000000000001,
+        "z_min": 0.27999999999999997
+      },
+      "geometry_seed": 12353,
+      "max_height_m": 0.8199833035469055,
+      "min_height_m": 0.28000757098197937,
+      "path_length_m": 2.181835651397705,
+      "time_law_points": 401,
+      "timing_params": {
+        "T": 8.0,
+        "a_max": 0.6000000000000001,
+        "dt": 0.02,
+        "f_max": 0.22000000000000003,
+        "linear_a_max": 1.4500000000000002,
+        "min_speed_fraction": 0.25,
+        "n_freqs": 6.0,
+        "v_max": 0.45
+      },
+      "timing_seed": 112353,
+      "trajectory_id": "curriculum-a1-b2"
+    },
+    {
+      "cell_A": 1,
+      "cell_B": 3,
+      "content_sha256": "cbc069d2fce8b952995dc1b8d3fdb20c74dcfaae2a48bceafb2be4e00a102eda",
+      "duration_s": 20.97177505493164,
+      "family": "curriculum",
+      "gamma_points": 347,
+      "geometry_params": {
+        "amplitude": 0.064,
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "drift_dir": [
+          1.0,
+          0.04000000000000001
+        ],
+        "drift_direction_spread": 0.6283185307179586,
+        "drift_speed": 0.010000000000000002,
+        "ds_grid": 0.01,
+        "dt": 0.02,
+        "duration": 8.0,
+        "f_max": 0.24,
+        "f_rot_amplitude": 0.32000000000000006,
+        "f_rot_max": 0.18000000000000002,
+        "lam": 0.15,
+        "n_freqs": 8.0,
+        "planar_curve_amplitude": 0.126,
+        "planar_curve_cycles": 1.0,
+        "tangent_align_ratio": 0.6,
+        "vertical_cycles": 1.0,
+        "xy_displacement": 1.2000000000000002,
+        "z_max": 0.8200000000000001,
+        "z_min": 0.27999999999999997
+      },
+      "geometry_seed": 12354,
+      "max_height_m": 0.8199830651283264,
+      "min_height_m": 0.28002259135246277,
+      "path_length_m": 3.469162702560425,
+      "time_law_points": 401,
+      "timing_params": {
+        "T": 8.0,
+        "a_max": 0.8,
+        "dt": 0.02,
+        "f_max": 0.28,
+        "linear_a_max": 1.8,
+        "min_speed_fraction": 0.25,
+        "n_freqs": 6.0,
+        "v_max": 0.55
+      },
+      "timing_seed": 112354,
+      "trajectory_id": "curriculum-a1-b3"
+    },
+    {
+      "cell_A": 1,
+      "cell_B": 4,
+      "content_sha256": "926baa29af0b91e0614f52300d2a24f4926d5b7ab1c8606955bee52c7fba3c8f",
+      "duration_s": 8.0,
+      "family": "curriculum",
+      "gamma_points": 207,
+      "geometry_params": {
+        "amplitude": 0.064,
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "drift_dir": [
+          1.0,
+          0.04000000000000001
+        ],
+        "drift_direction_spread": 0.6283185307179586,
+        "drift_speed": 0.010000000000000002,
+        "ds_grid": 0.01,
+        "dt": 0.02,
+        "duration": 8.0,
+        "f_max": 0.24,
+        "f_rot_amplitude": 0.32000000000000006,
+        "f_rot_max": 0.18000000000000002,
+        "lam": 0.15,
+        "n_freqs": 8.0,
+        "planar_curve_amplitude": 0.126,
+        "planar_curve_cycles": 1.0,
+        "tangent_align_ratio": 0.6,
+        "vertical_cycles": 1.0,
+        "xy_displacement": 1.2000000000000002,
+        "z_max": 0.8200000000000001,
+        "z_min": 0.27999999999999997
+      },
+      "geometry_seed": 12355,
+      "max_height_m": 0.8199899792671204,
+      "min_height_m": 0.2800000011920929,
+      "path_length_m": 2.0619640350341797,
+      "time_law_points": 401,
+      "timing_params": {
+        "T": 8.0,
+        "a_max": 1.0,
+        "dt": 0.02,
+        "f_max": 0.3400000000000001,
+        "linear_a_max": 2.1500000000000004,
+        "min_speed_fraction": 0.25,
+        "n_freqs": 6.0,
+        "v_max": 0.65
+      },
+      "timing_seed": 112355,
+      "trajectory_id": "curriculum-a1-b4"
+    },
+    {
+      "cell_A": 1,
+      "cell_B": 5,
+      "content_sha256": "58a55ef4a6d0ba8a453bac02c0ca3b324d8a8b1ca91106c3e4943dbfcde1174f",
+      "duration_s": 9.460257530212402,
+      "family": "curriculum",
+      "gamma_points": 216,
+      "geometry_params": {
+        "amplitude": 0.064,
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "drift_dir": [
+          1.0,
+          0.04000000000000001
+        ],
+        "drift_direction_spread": 0.6283185307179586,
+        "drift_speed": 0.010000000000000002,
+        "ds_grid": 0.01,
+        "dt": 0.02,
+        "duration": 8.0,
+        "f_max": 0.24,
+        "f_rot_amplitude": 0.32000000000000006,
+        "f_rot_max": 0.18000000000000002,
+        "lam": 0.15,
+        "n_freqs": 8.0,
+        "planar_curve_amplitude": 0.126,
+        "planar_curve_cycles": 1.0,
+        "tangent_align_ratio": 0.6,
+        "vertical_cycles": 1.0,
+        "xy_displacement": 1.2000000000000002,
+        "z_max": 0.8200000000000001,
+        "z_min": 0.27999999999999997
+      },
+      "geometry_seed": 12356,
+      "max_height_m": 0.8199973106384277,
+      "min_height_m": 0.28000810742378235,
+      "path_length_m": 2.1512858867645264,
+      "time_law_points": 401,
+      "timing_params": {
+        "T": 8.0,
+        "a_max": 1.2,
+        "dt": 0.02,
+        "f_max": 0.4,
+        "linear_a_max": 2.5,
+        "min_speed_fraction": 0.25,
+        "n_freqs": 6.0,
+        "v_max": 0.75
+      },
+      "timing_seed": 112356,
+      "trajectory_id": "curriculum-a1-b5"
+    },
+    {
+      "cell_A": 2,
+      "cell_B": 0,
+      "content_sha256": "a525340f1d6678eca9a60ec6ce04e82eef47634fbd3954baca6fc8ecda209283",
+      "duration_s": 39.370506286621094,
+      "family": "curriculum",
+      "gamma_points": 583,
+      "geometry_params": {
+        "amplitude": 0.088,
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "drift_dir": [
+          1.0,
+          0.08000000000000002
+        ],
+        "drift_direction_spread": 1.2566370614359172,
+        "drift_speed": 0.020000000000000004,
+        "ds_grid": 0.01,
+        "dt": 0.02,
+        "duration": 8.0,
+        "f_max": 0.32999999999999996,
+        "f_rot_amplitude": 0.44000000000000006,
+        "f_rot_max": 0.26,
+        "lam": 0.15,
+        "n_freqs": 8.0,
+        "planar_curve_amplitude": 0.232,
+        "planar_curve_cycles": 1.5,
+        "tangent_align_ratio": 0.6,
+        "vertical_cycles": 1.0,
+        "xy_displacement": 2.1500000000000004,
+        "z_max": 0.99,
+        "z_min": 0.21
+      },
+      "geometry_seed": 12357,
+      "max_height_m": 0.9899997711181641,
+      "min_height_m": 0.20999999344348907,
+      "path_length_m": 5.820700645446777,
+      "time_law_points": 401,
+      "timing_params": {
+        "T": 8.0,
+        "a_max": 0.2,
+        "dt": 0.02,
+        "f_max": 0.1,
+        "linear_a_max": 0.75,
+        "min_speed_fraction": 0.25,
+        "n_freqs": 6.0,
+        "v_max": 0.25
+      },
+      "timing_seed": 112357,
+      "trajectory_id": "curriculum-a2-b0"
+    },
+    {
+      "cell_A": 2,
+      "cell_B": 1,
+      "content_sha256": "2a3061e9205ba5ada0da370173e442ba20b86b5eb19011f5b2e9ec09a06bc068",
+      "duration_s": 14.353744506835938,
+      "family": "curriculum",
+      "gamma_points": 347,
+      "geometry_params": {
+        "amplitude": 0.088,
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "drift_dir": [
+          1.0,
+          0.08000000000000002
+        ],
+        "drift_direction_spread": 1.2566370614359172,
+        "drift_speed": 0.020000000000000004,
+        "ds_grid": 0.01,
+        "dt": 0.02,
+        "duration": 8.0,
+        "f_max": 0.32999999999999996,
+        "f_rot_amplitude": 0.44000000000000006,
+        "f_rot_max": 0.26,
+        "lam": 0.15,
+        "n_freqs": 8.0,
+        "planar_curve_amplitude": 0.232,
+        "planar_curve_cycles": 1.5,
+        "tangent_align_ratio": 0.6,
+        "vertical_cycles": 1.0,
+        "xy_displacement": 2.1500000000000004,
+        "z_max": 0.99,
+        "z_min": 0.21
+      },
+      "geometry_seed": 12358,
+      "max_height_m": 0.989995002746582,
+      "min_height_m": 0.21001356840133667,
+      "path_length_m": 3.460054636001587,
+      "time_law_points": 401,
+      "timing_params": {
+        "T": 8.0,
+        "a_max": 0.4,
+        "dt": 0.02,
+        "f_max": 0.16000000000000003,
+        "linear_a_max": 1.1,
+        "min_speed_fraction": 0.25,
+        "n_freqs": 6.0,
+        "v_max": 0.35
+      },
+      "timing_seed": 112358,
+      "trajectory_id": "curriculum-a2-b1"
+    },
+    {
+      "cell_A": 2,
+      "cell_B": 2,
+      "content_sha256": "48ff38536969060866aa43ae0f5fc70e2ad1ce3f7484c5c1c1da6898593ca400",
+      "duration_s": 8.921683311462402,
+      "family": "curriculum",
+      "gamma_points": 344,
+      "geometry_params": {
+        "amplitude": 0.088,
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "drift_dir": [
+          1.0,
+          0.08000000000000002
+        ],
+        "drift_direction_spread": 1.2566370614359172,
+        "drift_speed": 0.020000000000000004,
+        "ds_grid": 0.01,
+        "dt": 0.02,
+        "duration": 8.0,
+        "f_max": 0.32999999999999996,
+        "f_rot_amplitude": 0.44000000000000006,
+        "f_rot_max": 0.26,
+        "lam": 0.15,
+        "n_freqs": 8.0,
+        "planar_curve_amplitude": 0.232,
+        "planar_curve_cycles": 1.5,
+        "tangent_align_ratio": 0.6,
+        "vertical_cycles": 1.0,
+        "xy_displacement": 2.1500000000000004,
+        "z_max": 0.99,
+        "z_min": 0.21
+      },
+      "geometry_seed": 12359,
+      "max_height_m": 0.9899976253509521,
+      "min_height_m": 0.210007444024086,
+      "path_length_m": 3.4331963062286377,
+      "time_law_points": 401,
+      "timing_params": {
+        "T": 8.0,
+        "a_max": 0.6000000000000001,
+        "dt": 0.02,
+        "f_max": 0.22000000000000003,
+        "linear_a_max": 1.4500000000000002,
+        "min_speed_fraction": 0.25,
+        "n_freqs": 6.0,
+        "v_max": 0.45
+      },
+      "timing_seed": 112359,
+      "trajectory_id": "curriculum-a2-b2"
+    },
+    {
+      "cell_A": 2,
+      "cell_B": 3,
+      "content_sha256": "6ff2857346727582ec3ede32ee97be3a62824d852c855118b69c1c2ae8e26a8a",
+      "duration_s": 12.72098159790039,
+      "family": "curriculum",
+      "gamma_points": 383,
+      "geometry_params": {
+        "amplitude": 0.088,
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "drift_dir": [
+          1.0,
+          0.08000000000000002
+        ],
+        "drift_direction_spread": 1.2566370614359172,
+        "drift_speed": 0.020000000000000004,
+        "ds_grid": 0.01,
+        "dt": 0.02,
+        "duration": 8.0,
+        "f_max": 0.32999999999999996,
+        "f_rot_amplitude": 0.44000000000000006,
+        "f_rot_max": 0.26,
+        "lam": 0.15,
+        "n_freqs": 8.0,
+        "planar_curve_amplitude": 0.232,
+        "planar_curve_cycles": 1.5,
+        "tangent_align_ratio": 0.6,
+        "vertical_cycles": 1.0,
+        "xy_displacement": 2.1500000000000004,
+        "z_max": 0.99,
+        "z_min": 0.21
+      },
+      "geometry_seed": 12360,
+      "max_height_m": 0.9899980425834656,
+      "min_height_m": 0.21000036597251892,
+      "path_length_m": 3.8200223445892334,
+      "time_law_points": 401,
+      "timing_params": {
+        "T": 8.0,
+        "a_max": 0.8,
+        "dt": 0.02,
+        "f_max": 0.28,
+        "linear_a_max": 1.8,
+        "min_speed_fraction": 0.25,
+        "n_freqs": 6.0,
+        "v_max": 0.55
+      },
+      "timing_seed": 112360,
+      "trajectory_id": "curriculum-a2-b3"
+    },
+    {
+      "cell_A": 2,
+      "cell_B": 4,
+      "content_sha256": "4b7ab06b1630ac20a263f9d9fb349d51489ecdcf04fd41068856724af952b764",
+      "duration_s": 11.520512580871582,
+      "family": "curriculum",
+      "gamma_points": 457,
+      "geometry_params": {
+        "amplitude": 0.088,
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "drift_dir": [
+          1.0,
+          0.08000000000000002
+        ],
+        "drift_direction_spread": 1.2566370614359172,
+        "drift_speed": 0.020000000000000004,
+        "ds_grid": 0.01,
+        "dt": 0.02,
+        "duration": 8.0,
+        "f_max": 0.32999999999999996,
+        "f_rot_amplitude": 0.44000000000000006,
+        "f_rot_max": 0.26,
+        "lam": 0.15,
+        "n_freqs": 8.0,
+        "planar_curve_amplitude": 0.232,
+        "planar_curve_cycles": 1.5,
+        "tangent_align_ratio": 0.6,
+        "vertical_cycles": 1.0,
+        "xy_displacement": 2.1500000000000004,
+        "z_max": 0.99,
+        "z_min": 0.21
+      },
+      "geometry_seed": 12361,
+      "max_height_m": 0.9899942874908447,
+      "min_height_m": 0.21000312268733978,
+      "path_length_m": 4.562771797180176,
+      "time_law_points": 401,
+      "timing_params": {
+        "T": 8.0,
+        "a_max": 1.0,
+        "dt": 0.02,
+        "f_max": 0.3400000000000001,
+        "linear_a_max": 2.1500000000000004,
+        "min_speed_fraction": 0.25,
+        "n_freqs": 6.0,
+        "v_max": 0.65
+      },
+      "timing_seed": 112361,
+      "trajectory_id": "curriculum-a2-b4"
+    },
+    {
+      "cell_A": 2,
+      "cell_B": 5,
+      "content_sha256": "c45a08da72bdcc83932e4479ce67946f68e00fd88d0903f94df08b37924c0d17",
+      "duration_s": 8.718811988830566,
+      "family": "curriculum",
+      "gamma_points": 382,
+      "geometry_params": {
+        "amplitude": 0.088,
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "drift_dir": [
+          1.0,
+          0.08000000000000002
+        ],
+        "drift_direction_spread": 1.2566370614359172,
+        "drift_speed": 0.020000000000000004,
+        "ds_grid": 0.01,
+        "dt": 0.02,
+        "duration": 8.0,
+        "f_max": 0.32999999999999996,
+        "f_rot_amplitude": 0.44000000000000006,
+        "f_rot_max": 0.26,
+        "lam": 0.15,
+        "n_freqs": 8.0,
+        "planar_curve_amplitude": 0.232,
+        "planar_curve_cycles": 1.5,
+        "tangent_align_ratio": 0.6,
+        "vertical_cycles": 1.0,
+        "xy_displacement": 2.1500000000000004,
+        "z_max": 0.99,
+        "z_min": 0.21
+      },
+      "geometry_seed": 12362,
+      "max_height_m": 0.9899977445602417,
+      "min_height_m": 0.21001029014587402,
+      "path_length_m": 3.8108479976654053,
+      "time_law_points": 401,
+      "timing_params": {
+        "T": 8.0,
+        "a_max": 1.2,
+        "dt": 0.02,
+        "f_max": 0.4,
+        "linear_a_max": 2.5,
+        "min_speed_fraction": 0.25,
+        "n_freqs": 6.0,
+        "v_max": 0.75
+      },
+      "timing_seed": 112362,
+      "trajectory_id": "curriculum-a2-b5"
+    },
+    {
+      "cell_A": 3,
+      "cell_B": 0,
+      "content_sha256": "d97cbe86e3148438271e7b4858b52270c4388f091549b5128645ea3c28db9bda",
+      "duration_s": 27.436723709106445,
+      "family": "curriculum",
+      "gamma_points": 500,
+      "geometry_params": {
+        "amplitude": 0.11199999999999999,
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "drift_dir": [
+          1.0,
+          0.12
+        ],
+        "drift_direction_spread": 1.8849555921538759,
+        "drift_speed": 0.03,
+        "ds_grid": 0.01,
+        "dt": 0.02,
+        "duration": 8.0,
+        "f_max": 0.41999999999999993,
+        "f_rot_amplitude": 0.56,
+        "f_rot_max": 0.33999999999999997,
+        "lam": 0.15,
+        "n_freqs": 8.0,
+        "planar_curve_amplitude": 0.338,
+        "planar_curve_cycles": 2.0,
+        "tangent_align_ratio": 0.6,
+        "vertical_cycles": 1.0,
+        "xy_displacement": 3.1,
+        "z_max": 1.1600000000000001,
+        "z_min": 0.13999999999999999
+      },
+      "geometry_seed": 12363,
+      "max_height_m": 1.159996747970581,
+      "min_height_m": 0.14000579714775085,
+      "path_length_m": 4.9945526123046875,
+      "time_law_points": 401,
+      "timing_params": {
+        "T": 8.0,
+        "a_max": 0.2,
+        "dt": 0.02,
+        "f_max": 0.1,
+        "linear_a_max": 0.75,
+        "min_speed_fraction": 0.25,
+        "n_freqs": 6.0,
+        "v_max": 0.25
+      },
+      "timing_seed": 112363,
+      "trajectory_id": "curriculum-a3-b0"
+    },
+    {
+      "cell_A": 3,
+      "cell_B": 1,
+      "content_sha256": "afd6f532721747f0c6b953233f7738fc6fc39ef3473d4cdbd284b5552320df3f",
+      "duration_s": 25.331218719482422,
+      "family": "curriculum",
+      "gamma_points": 517,
+      "geometry_params": {
+        "amplitude": 0.11199999999999999,
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "drift_dir": [
+          1.0,
+          0.12
+        ],
+        "drift_direction_spread": 1.8849555921538759,
+        "drift_speed": 0.03,
+        "ds_grid": 0.01,
+        "dt": 0.02,
+        "duration": 8.0,
+        "f_max": 0.41999999999999993,
+        "f_rot_amplitude": 0.56,
+        "f_rot_max": 0.33999999999999997,
+        "lam": 0.15,
+        "n_freqs": 8.0,
+        "planar_curve_amplitude": 0.338,
+        "planar_curve_cycles": 2.0,
+        "tangent_align_ratio": 0.6,
+        "vertical_cycles": 1.0,
+        "xy_displacement": 3.1,
+        "z_max": 1.1600000000000001,
+        "z_min": 0.13999999999999999
+      },
+      "geometry_seed": 12364,
+      "max_height_m": 1.159996509552002,
+      "min_height_m": 0.14000017940998077,
+      "path_length_m": 5.167391300201416,
+      "time_law_points": 401,
+      "timing_params": {
+        "T": 8.0,
+        "a_max": 0.4,
+        "dt": 0.02,
+        "f_max": 0.16000000000000003,
+        "linear_a_max": 1.1,
+        "min_speed_fraction": 0.25,
+        "n_freqs": 6.0,
+        "v_max": 0.35
+      },
+      "timing_seed": 112364,
+      "trajectory_id": "curriculum-a3-b1"
+    },
+    {
+      "cell_A": 3,
+      "cell_B": 2,
+      "content_sha256": "79677a370d47bc845455f85a0f06ac889bdcf6f990e21d72fdf2492cbc218d17",
+      "duration_s": 16.518985748291016,
+      "family": "curriculum",
+      "gamma_points": 534,
+      "geometry_params": {
+        "amplitude": 0.11199999999999999,
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "drift_dir": [
+          1.0,
+          0.12
+        ],
+        "drift_direction_spread": 1.8849555921538759,
+        "drift_speed": 0.03,
+        "ds_grid": 0.01,
+        "dt": 0.02,
+        "duration": 8.0,
+        "f_max": 0.41999999999999993,
+        "f_rot_amplitude": 0.56,
+        "f_rot_max": 0.33999999999999997,
+        "lam": 0.15,
+        "n_freqs": 8.0,
+        "planar_curve_amplitude": 0.338,
+        "planar_curve_cycles": 2.0,
+        "tangent_align_ratio": 0.6,
+        "vertical_cycles": 1.0,
+        "xy_displacement": 3.1,
+        "z_max": 1.1600000000000001,
+        "z_min": 0.13999999999999999
+      },
+      "geometry_seed": 12365,
+      "max_height_m": 1.159986972808838,
+      "min_height_m": 0.14000020921230316,
+      "path_length_m": 5.331056118011475,
+      "time_law_points": 401,
+      "timing_params": {
+        "T": 8.0,
+        "a_max": 0.6000000000000001,
+        "dt": 0.02,
+        "f_max": 0.22000000000000003,
+        "linear_a_max": 1.4500000000000002,
+        "min_speed_fraction": 0.25,
+        "n_freqs": 6.0,
+        "v_max": 0.45
+      },
+      "timing_seed": 112365,
+      "trajectory_id": "curriculum-a3-b2"
+    },
+    {
+      "cell_A": 3,
+      "cell_B": 3,
+      "content_sha256": "a1aeb35dc36c21404580e9f8af923bb4fda51288c98e352f1d7513ac9bfe4cd8",
+      "duration_s": 13.530275344848633,
+      "family": "curriculum",
+      "gamma_points": 543,
+      "geometry_params": {
+        "amplitude": 0.11199999999999999,
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "drift_dir": [
+          1.0,
+          0.12
+        ],
+        "drift_direction_spread": 1.8849555921538759,
+        "drift_speed": 0.03,
+        "ds_grid": 0.01,
+        "dt": 0.02,
+        "duration": 8.0,
+        "f_max": 0.41999999999999993,
+        "f_rot_amplitude": 0.56,
+        "f_rot_max": 0.33999999999999997,
+        "lam": 0.15,
+        "n_freqs": 8.0,
+        "planar_curve_amplitude": 0.338,
+        "planar_curve_cycles": 2.0,
+        "tangent_align_ratio": 0.6,
+        "vertical_cycles": 1.0,
+        "xy_displacement": 3.1,
+        "z_max": 1.1600000000000001,
+        "z_min": 0.13999999999999999
+      },
+      "geometry_seed": 12366,
+      "max_height_m": 1.1599996089935303,
+      "min_height_m": 0.14000117778778076,
+      "path_length_m": 5.420496940612793,
+      "time_law_points": 401,
+      "timing_params": {
+        "T": 8.0,
+        "a_max": 0.8,
+        "dt": 0.02,
+        "f_max": 0.28,
+        "linear_a_max": 1.8,
+        "min_speed_fraction": 0.25,
+        "n_freqs": 6.0,
+        "v_max": 0.55
+      },
+      "timing_seed": 112366,
+      "trajectory_id": "curriculum-a3-b3"
+    },
+    {
+      "cell_A": 3,
+      "cell_B": 4,
+      "content_sha256": "a199bbe7fcaf5719165c09f5c1ed0b942002021cc922f2279e0b78cff89855f5",
+      "duration_s": 18.794776916503906,
+      "family": "curriculum",
+      "gamma_points": 605,
+      "geometry_params": {
+        "amplitude": 0.11199999999999999,
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "drift_dir": [
+          1.0,
+          0.12
+        ],
+        "drift_direction_spread": 1.8849555921538759,
+        "drift_speed": 0.03,
+        "ds_grid": 0.01,
+        "dt": 0.02,
+        "duration": 8.0,
+        "f_max": 0.41999999999999993,
+        "f_rot_amplitude": 0.56,
+        "f_rot_max": 0.33999999999999997,
+        "lam": 0.15,
+        "n_freqs": 8.0,
+        "planar_curve_amplitude": 0.338,
+        "planar_curve_cycles": 2.0,
+        "tangent_align_ratio": 0.6,
+        "vertical_cycles": 1.0,
+        "xy_displacement": 3.1,
+        "z_max": 1.1600000000000001,
+        "z_min": 0.13999999999999999
+      },
+      "geometry_seed": 12367,
+      "max_height_m": 1.1599957942962646,
+      "min_height_m": 0.14000017940998077,
+      "path_length_m": 6.046992301940918,
+      "time_law_points": 401,
+      "timing_params": {
+        "T": 8.0,
+        "a_max": 1.0,
+        "dt": 0.02,
+        "f_max": 0.3400000000000001,
+        "linear_a_max": 2.1500000000000004,
+        "min_speed_fraction": 0.25,
+        "n_freqs": 6.0,
+        "v_max": 0.65
+      },
+      "timing_seed": 112367,
+      "trajectory_id": "curriculum-a3-b4"
+    },
+    {
+      "cell_A": 3,
+      "cell_B": 5,
+      "content_sha256": "dac24e4e31e363fbd4087306f240f8d74feb9a4844fd30e73de9002168687b9c",
+      "duration_s": 11.404949188232422,
+      "family": "curriculum",
+      "gamma_points": 523,
+      "geometry_params": {
+        "amplitude": 0.11199999999999999,
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "drift_dir": [
+          1.0,
+          0.12
+        ],
+        "drift_direction_spread": 1.8849555921538759,
+        "drift_speed": 0.03,
+        "ds_grid": 0.01,
+        "dt": 0.02,
+        "duration": 8.0,
+        "f_max": 0.41999999999999993,
+        "f_rot_amplitude": 0.56,
+        "f_rot_max": 0.33999999999999997,
+        "lam": 0.15,
+        "n_freqs": 8.0,
+        "planar_curve_amplitude": 0.338,
+        "planar_curve_cycles": 2.0,
+        "tangent_align_ratio": 0.6,
+        "vertical_cycles": 1.0,
+        "xy_displacement": 3.1,
+        "z_max": 1.1600000000000001,
+        "z_min": 0.13999999999999999
+      },
+      "geometry_seed": 12368,
+      "max_height_m": 1.1599997282028198,
+      "min_height_m": 0.14000742137432098,
+      "path_length_m": 5.225245475769043,
+      "time_law_points": 401,
+      "timing_params": {
+        "T": 8.0,
+        "a_max": 1.2,
+        "dt": 0.02,
+        "f_max": 0.4,
+        "linear_a_max": 2.5,
+        "min_speed_fraction": 0.25,
+        "n_freqs": 6.0,
+        "v_max": 0.75
+      },
+      "timing_seed": 112368,
+      "trajectory_id": "curriculum-a3-b5"
+    },
+    {
+      "cell_A": 4,
+      "cell_B": 0,
+      "content_sha256": "f1e1cbdc774a6dbd456abddc68ce19c9cbdbb970e55740bdf0c3a34533b1def9",
+      "duration_s": 53.926082611083984,
+      "family": "curriculum",
+      "gamma_points": 832,
+      "geometry_params": {
+        "amplitude": 0.136,
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "drift_dir": [
+          1.0,
+          0.16000000000000003
+        ],
+        "drift_direction_spread": 2.5132741228718345,
+        "drift_speed": 0.04000000000000001,
+        "ds_grid": 0.01,
+        "dt": 0.02,
+        "duration": 8.0,
+        "f_max": 0.51,
+        "f_rot_amplitude": 0.6800000000000002,
+        "f_rot_max": 0.42000000000000004,
+        "lam": 0.15,
+        "n_freqs": 8.0,
+        "planar_curve_amplitude": 0.44400000000000006,
+        "planar_curve_cycles": 2.5,
+        "tangent_align_ratio": 0.6,
+        "vertical_cycles": 1.0,
+        "xy_displacement": 4.050000000000001,
+        "z_max": 1.33,
+        "z_min": 0.07
+      },
+      "geometry_seed": 12369,
+      "max_height_m": 1.3299998044967651,
+      "min_height_m": 0.0700007826089859,
+      "path_length_m": 8.319260597229004,
+      "time_law_points": 401,
+      "timing_params": {
+        "T": 8.0,
+        "a_max": 0.2,
+        "dt": 0.02,
+        "f_max": 0.1,
+        "linear_a_max": 0.75,
+        "min_speed_fraction": 0.25,
+        "n_freqs": 6.0,
+        "v_max": 0.25
+      },
+      "timing_seed": 112369,
+      "trajectory_id": "curriculum-a4-b0"
+    },
+    {
+      "cell_A": 4,
+      "cell_B": 1,
+      "content_sha256": "96c46e11b8edd2b90602134fd9078a5327b31ca88c24e21212c1d6e941584f62",
+      "duration_s": 34.085693359375,
+      "family": "curriculum",
+      "gamma_points": 825,
+      "geometry_params": {
+        "amplitude": 0.136,
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "drift_dir": [
+          1.0,
+          0.16000000000000003
+        ],
+        "drift_direction_spread": 2.5132741228718345,
+        "drift_speed": 0.04000000000000001,
+        "ds_grid": 0.01,
+        "dt": 0.02,
+        "duration": 8.0,
+        "f_max": 0.51,
+        "f_rot_amplitude": 0.6800000000000002,
+        "f_rot_max": 0.42000000000000004,
+        "lam": 0.15,
+        "n_freqs": 8.0,
+        "planar_curve_amplitude": 0.44400000000000006,
+        "planar_curve_cycles": 2.5,
+        "tangent_align_ratio": 0.6,
+        "vertical_cycles": 1.0,
+        "xy_displacement": 4.050000000000001,
+        "z_max": 1.33,
+        "z_min": 0.07
+      },
+      "geometry_seed": 12370,
+      "max_height_m": 1.3300000429153442,
+      "min_height_m": 0.07000450789928436,
+      "path_length_m": 8.246210098266602,
+      "time_law_points": 401,
+      "timing_params": {
+        "T": 8.0,
+        "a_max": 0.4,
+        "dt": 0.02,
+        "f_max": 0.16000000000000003,
+        "linear_a_max": 1.1,
+        "min_speed_fraction": 0.25,
+        "n_freqs": 6.0,
+        "v_max": 0.35
+      },
+      "timing_seed": 112370,
+      "trajectory_id": "curriculum-a4-b1"
+    },
+    {
+      "cell_A": 4,
+      "cell_B": 2,
+      "content_sha256": "8180d222b28b0b67e664ea4a31c1a967681f15a0355af80dc7b1d62775c56f08",
+      "duration_s": 35.342811584472656,
+      "family": "curriculum",
+      "gamma_points": 877,
+      "geometry_params": {
+        "amplitude": 0.136,
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "drift_dir": [
+          1.0,
+          0.16000000000000003
+        ],
+        "drift_direction_spread": 2.5132741228718345,
+        "drift_speed": 0.04000000000000001,
+        "ds_grid": 0.01,
+        "dt": 0.02,
+        "duration": 8.0,
+        "f_max": 0.51,
+        "f_rot_amplitude": 0.6800000000000002,
+        "f_rot_max": 0.42000000000000004,
+        "lam": 0.15,
+        "n_freqs": 8.0,
+        "planar_curve_amplitude": 0.44400000000000006,
+        "planar_curve_cycles": 2.5,
+        "tangent_align_ratio": 0.6,
+        "vertical_cycles": 1.0,
+        "xy_displacement": 4.050000000000001,
+        "z_max": 1.33,
+        "z_min": 0.07
+      },
+      "geometry_seed": 12371,
+      "max_height_m": 1.3299970626831055,
+      "min_height_m": 0.07000009715557098,
+      "path_length_m": 8.768571853637695,
+      "time_law_points": 401,
+      "timing_params": {
+        "T": 8.0,
+        "a_max": 0.6000000000000001,
+        "dt": 0.02,
+        "f_max": 0.22000000000000003,
+        "linear_a_max": 1.4500000000000002,
+        "min_speed_fraction": 0.25,
+        "n_freqs": 6.0,
+        "v_max": 0.45
+      },
+      "timing_seed": 112371,
+      "trajectory_id": "curriculum-a4-b2"
+    },
+    {
+      "cell_A": 4,
+      "cell_B": 3,
+      "content_sha256": "0ebcc784aa1b97d7247e0e2cd4801964eb979cbef87e38312ffd492da5f5d7c1",
+      "duration_s": 26.621746063232422,
+      "family": "curriculum",
+      "gamma_points": 716,
+      "geometry_params": {
+        "amplitude": 0.136,
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "drift_dir": [
+          1.0,
+          0.16000000000000003
+        ],
+        "drift_direction_spread": 2.5132741228718345,
+        "drift_speed": 0.04000000000000001,
+        "ds_grid": 0.01,
+        "dt": 0.02,
+        "duration": 8.0,
+        "f_max": 0.51,
+        "f_rot_amplitude": 0.6800000000000002,
+        "f_rot_max": 0.42000000000000004,
+        "lam": 0.15,
+        "n_freqs": 8.0,
+        "planar_curve_amplitude": 0.44400000000000006,
+        "planar_curve_cycles": 2.5,
+        "tangent_align_ratio": 0.6,
+        "vertical_cycles": 1.0,
+        "xy_displacement": 4.050000000000001,
+        "z_max": 1.33,
+        "z_min": 0.07
+      },
+      "geometry_seed": 12372,
+      "max_height_m": 1.3299983739852905,
+      "min_height_m": 0.07000023871660233,
+      "path_length_m": 7.159035682678223,
+      "time_law_points": 401,
+      "timing_params": {
+        "T": 8.0,
+        "a_max": 0.8,
+        "dt": 0.02,
+        "f_max": 0.28,
+        "linear_a_max": 1.8,
+        "min_speed_fraction": 0.25,
+        "n_freqs": 6.0,
+        "v_max": 0.55
+      },
+      "timing_seed": 112372,
+      "trajectory_id": "curriculum-a4-b3"
+    },
+    {
+      "cell_A": 4,
+      "cell_B": 4,
+      "content_sha256": "d532d19c3f6980a712837e5bd01583e4e882a0b3936e11426893a55d5a27dcf5",
+      "duration_s": 31.45701789855957,
+      "family": "curriculum",
+      "gamma_points": 839,
+      "geometry_params": {
+        "amplitude": 0.136,
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "drift_dir": [
+          1.0,
+          0.16000000000000003
+        ],
+        "drift_direction_spread": 2.5132741228718345,
+        "drift_speed": 0.04000000000000001,
+        "ds_grid": 0.01,
+        "dt": 0.02,
+        "duration": 8.0,
+        "f_max": 0.51,
+        "f_rot_amplitude": 0.6800000000000002,
+        "f_rot_max": 0.42000000000000004,
+        "lam": 0.15,
+        "n_freqs": 8.0,
+        "planar_curve_amplitude": 0.44400000000000006,
+        "planar_curve_cycles": 2.5,
+        "tangent_align_ratio": 0.6,
+        "vertical_cycles": 1.0,
+        "xy_displacement": 4.050000000000001,
+        "z_max": 1.33,
+        "z_min": 0.07
+      },
+      "geometry_seed": 12373,
+      "max_height_m": 1.3299909830093384,
+      "min_height_m": 0.0700003057718277,
+      "path_length_m": 8.381051063537598,
+      "time_law_points": 401,
+      "timing_params": {
+        "T": 8.0,
+        "a_max": 1.0,
+        "dt": 0.02,
+        "f_max": 0.3400000000000001,
+        "linear_a_max": 2.1500000000000004,
+        "min_speed_fraction": 0.25,
+        "n_freqs": 6.0,
+        "v_max": 0.65
+      },
+      "timing_seed": 112373,
+      "trajectory_id": "curriculum-a4-b4"
+    },
+    {
+      "cell_A": 4,
+      "cell_B": 5,
+      "content_sha256": "84df17e4cda73f8b1a6c6b05cf75feff5e23aeeaa3f40e0b13df53021d892a13",
+      "duration_s": 19.68972396850586,
+      "family": "curriculum",
+      "gamma_points": 788,
+      "geometry_params": {
+        "amplitude": 0.136,
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "drift_dir": [
+          1.0,
+          0.16000000000000003
+        ],
+        "drift_direction_spread": 2.5132741228718345,
+        "drift_speed": 0.04000000000000001,
+        "ds_grid": 0.01,
+        "dt": 0.02,
+        "duration": 8.0,
+        "f_max": 0.51,
+        "f_rot_amplitude": 0.6800000000000002,
+        "f_rot_max": 0.42000000000000004,
+        "lam": 0.15,
+        "n_freqs": 8.0,
+        "planar_curve_amplitude": 0.44400000000000006,
+        "planar_curve_cycles": 2.5,
+        "tangent_align_ratio": 0.6,
+        "vertical_cycles": 1.0,
+        "xy_displacement": 4.050000000000001,
+        "z_max": 1.33,
+        "z_min": 0.07
+      },
+      "geometry_seed": 12374,
+      "max_height_m": 1.3299999237060547,
+      "min_height_m": 0.07000148296356201,
+      "path_length_m": 7.878708839416504,
+      "time_law_points": 401,
+      "timing_params": {
+        "T": 8.0,
+        "a_max": 1.2,
+        "dt": 0.02,
+        "f_max": 0.4,
+        "linear_a_max": 2.5,
+        "min_speed_fraction": 0.25,
+        "n_freqs": 6.0,
+        "v_max": 0.75
+      },
+      "timing_seed": 112374,
+      "trajectory_id": "curriculum-a4-b5"
+    },
+    {
+      "cell_A": 5,
+      "cell_B": 0,
+      "content_sha256": "dbae57d64d95a87c421cb0f0917632279f6ba70601040e099efaf8f24cc320d8",
+      "duration_s": 81.40779113769531,
+      "family": "curriculum",
+      "gamma_points": 931,
+      "geometry_params": {
+        "amplitude": 0.16,
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "drift_dir": [
+          1.0,
+          0.2
+        ],
+        "drift_direction_spread": 3.141592653589793,
+        "drift_speed": 0.05,
+        "ds_grid": 0.01,
+        "dt": 0.02,
+        "duration": 8.0,
+        "f_max": 0.6,
+        "f_rot_amplitude": 0.8,
+        "f_rot_max": 0.5,
+        "lam": 0.15,
+        "n_freqs": 8.0,
+        "planar_curve_amplitude": 0.55,
+        "planar_curve_cycles": 3.0,
+        "tangent_align_ratio": 0.6,
+        "vertical_cycles": 1.0,
+        "xy_displacement": 5.0,
+        "z_max": 1.5,
+        "z_min": 0.0
+      },
+      "geometry_seed": 12375,
+      "max_height_m": 1.499983549118042,
+      "min_height_m": 1.5821754004718969e-06,
+      "path_length_m": 9.301502227783203,
+      "time_law_points": 401,
+      "timing_params": {
+        "T": 8.0,
+        "a_max": 0.2,
+        "dt": 0.02,
+        "f_max": 0.1,
+        "linear_a_max": 0.75,
+        "min_speed_fraction": 0.25,
+        "n_freqs": 6.0,
+        "v_max": 0.25
+      },
+      "timing_seed": 112375,
+      "trajectory_id": "curriculum-a5-b0"
+    },
+    {
+      "cell_A": 5,
+      "cell_B": 1,
+      "content_sha256": "2874c21338eedfac5d66994badc7ebd52e4080eb370a262d95f4cb1ee300bba8",
+      "duration_s": 49.74906539916992,
+      "family": "curriculum",
+      "gamma_points": 1210,
+      "geometry_params": {
+        "amplitude": 0.16,
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "drift_dir": [
+          1.0,
+          0.2
+        ],
+        "drift_direction_spread": 3.141592653589793,
+        "drift_speed": 0.05,
+        "ds_grid": 0.01,
+        "dt": 0.02,
+        "duration": 8.0,
+        "f_max": 0.6,
+        "f_rot_amplitude": 0.8,
+        "f_rot_max": 0.5,
+        "lam": 0.15,
+        "n_freqs": 8.0,
+        "planar_curve_amplitude": 0.55,
+        "planar_curve_cycles": 3.0,
+        "tangent_align_ratio": 0.6,
+        "vertical_cycles": 1.0,
+        "xy_displacement": 5.0,
+        "z_max": 1.5,
+        "z_min": 0.0
+      },
+      "geometry_seed": 12376,
+      "max_height_m": 1.499982476234436,
+      "min_height_m": 9.13730309548555e-06,
+      "path_length_m": 12.097174644470215,
+      "time_law_points": 401,
+      "timing_params": {
+        "T": 8.0,
+        "a_max": 0.4,
+        "dt": 0.02,
+        "f_max": 0.16000000000000003,
+        "linear_a_max": 1.1,
+        "min_speed_fraction": 0.25,
+        "n_freqs": 6.0,
+        "v_max": 0.35
+      },
+      "timing_seed": 112376,
+      "trajectory_id": "curriculum-a5-b1"
+    },
+    {
+      "cell_A": 5,
+      "cell_B": 2,
+      "content_sha256": "8a6e67cd42c8f97123d84f9fb1c408c714110ab02d36ab46237847a3baba7baf",
+      "duration_s": 38.42924880981445,
+      "family": "curriculum",
+      "gamma_points": 1022,
+      "geometry_params": {
+        "amplitude": 0.16,
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "drift_dir": [
+          1.0,
+          0.2
+        ],
+        "drift_direction_spread": 3.141592653589793,
+        "drift_speed": 0.05,
+        "ds_grid": 0.01,
+        "dt": 0.02,
+        "duration": 8.0,
+        "f_max": 0.6,
+        "f_rot_amplitude": 0.8,
+        "f_rot_max": 0.5,
+        "lam": 0.15,
+        "n_freqs": 8.0,
+        "planar_curve_amplitude": 0.55,
+        "planar_curve_cycles": 3.0,
+        "tangent_align_ratio": 0.6,
+        "vertical_cycles": 1.0,
+        "xy_displacement": 5.0,
+        "z_max": 1.5,
+        "z_min": 0.0
+      },
+      "geometry_seed": 12377,
+      "max_height_m": 1.4999890327453613,
+      "min_height_m": 5.962300747341942e-06,
+      "path_length_m": 10.218441009521484,
+      "time_law_points": 401,
+      "timing_params": {
+        "T": 8.0,
+        "a_max": 0.6000000000000001,
+        "dt": 0.02,
+        "f_max": 0.22000000000000003,
+        "linear_a_max": 1.4500000000000002,
+        "min_speed_fraction": 0.25,
+        "n_freqs": 6.0,
+        "v_max": 0.45
+      },
+      "timing_seed": 112377,
+      "trajectory_id": "curriculum-a5-b2"
+    },
+    {
+      "cell_A": 5,
+      "cell_B": 3,
+      "content_sha256": "8b89379fb93e3c01e564193089c51adfa968e925a75f2984d466ab0ca38ed3d5",
+      "duration_s": 24.429100036621094,
+      "family": "curriculum",
+      "gamma_points": 944,
+      "geometry_params": {
+        "amplitude": 0.16,
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "drift_dir": [
+          1.0,
+          0.2
+        ],
+        "drift_direction_spread": 3.141592653589793,
+        "drift_speed": 0.05,
+        "ds_grid": 0.01,
+        "dt": 0.02,
+        "duration": 8.0,
+        "f_max": 0.6,
+        "f_rot_amplitude": 0.8,
+        "f_rot_max": 0.5,
+        "lam": 0.15,
+        "n_freqs": 8.0,
+        "planar_curve_amplitude": 0.55,
+        "planar_curve_cycles": 3.0,
+        "tangent_align_ratio": 0.6,
+        "vertical_cycles": 1.0,
+        "xy_displacement": 5.0,
+        "z_max": 1.5,
+        "z_min": 0.0
+      },
+      "geometry_seed": 12378,
+      "max_height_m": 1.4999980926513672,
+      "min_height_m": 1.749981129250955e-05,
+      "path_length_m": 9.43330192565918,
+      "time_law_points": 401,
+      "timing_params": {
+        "T": 8.0,
+        "a_max": 0.8,
+        "dt": 0.02,
+        "f_max": 0.28,
+        "linear_a_max": 1.8,
+        "min_speed_fraction": 0.25,
+        "n_freqs": 6.0,
+        "v_max": 0.55
+      },
+      "timing_seed": 112378,
+      "trajectory_id": "curriculum-a5-b3"
+    },
+    {
+      "cell_A": 5,
+      "cell_B": 4,
+      "content_sha256": "c1808c0b10e653aa5ac5963febaaeb93aaeaa49b9764d5c3bb77460a537c2f1f",
+      "duration_s": 22.5119686126709,
+      "family": "curriculum",
+      "gamma_points": 995,
+      "geometry_params": {
+        "amplitude": 0.16,
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "drift_dir": [
+          1.0,
+          0.2
+        ],
+        "drift_direction_spread": 3.141592653589793,
+        "drift_speed": 0.05,
+        "ds_grid": 0.01,
+        "dt": 0.02,
+        "duration": 8.0,
+        "f_max": 0.6,
+        "f_rot_amplitude": 0.8,
+        "f_rot_max": 0.5,
+        "lam": 0.15,
+        "n_freqs": 8.0,
+        "planar_curve_amplitude": 0.55,
+        "planar_curve_cycles": 3.0,
+        "tangent_align_ratio": 0.6,
+        "vertical_cycles": 1.0,
+        "xy_displacement": 5.0,
+        "z_max": 1.5,
+        "z_min": 0.0
+      },
+      "geometry_seed": 12379,
+      "max_height_m": 1.499999761581421,
+      "min_height_m": 8.142189145132761e-09,
+      "path_length_m": 9.940256118774414,
+      "time_law_points": 401,
+      "timing_params": {
+        "T": 8.0,
+        "a_max": 1.0,
+        "dt": 0.02,
+        "f_max": 0.3400000000000001,
+        "linear_a_max": 2.1500000000000004,
+        "min_speed_fraction": 0.25,
+        "n_freqs": 6.0,
+        "v_max": 0.65
+      },
+      "timing_seed": 112379,
+      "trajectory_id": "curriculum-a5-b4"
+    },
+    {
+      "cell_A": 5,
+      "cell_B": 5,
+      "content_sha256": "45daf3f926a0267d31193b5393f507166b8e55fd2234883c5376daf333541737",
+      "duration_s": 27.978059768676758,
+      "family": "curriculum",
+      "gamma_points": 1099,
+      "geometry_params": {
+        "amplitude": 0.16,
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "drift_dir": [
+          1.0,
+          0.2
+        ],
+        "drift_direction_spread": 3.141592653589793,
+        "drift_speed": 0.05,
+        "ds_grid": 0.01,
+        "dt": 0.02,
+        "duration": 8.0,
+        "f_max": 0.6,
+        "f_rot_amplitude": 0.8,
+        "f_rot_max": 0.5,
+        "lam": 0.15,
+        "n_freqs": 8.0,
+        "planar_curve_amplitude": 0.55,
+        "planar_curve_cycles": 3.0,
+        "tangent_align_ratio": 0.6,
+        "vertical_cycles": 1.0,
+        "xy_displacement": 5.0,
+        "z_max": 1.5,
+        "z_min": 0.0
+      },
+      "geometry_seed": 12380,
+      "max_height_m": 1.499996304512024,
+      "min_height_m": 4.514553893386619e-06,
+      "path_length_m": 10.981192588806152,
+      "time_law_points": 401,
+      "timing_params": {
+        "T": 8.0,
+        "a_max": 1.2,
+        "dt": 0.02,
+        "f_max": 0.4,
+        "linear_a_max": 2.5,
+        "min_speed_fraction": 0.25,
+        "n_freqs": 6.0,
+        "v_max": 0.75
+      },
+      "timing_seed": 112380,
+      "trajectory_id": "curriculum-a5-b5"
+    },
+    {
+      "content_sha256": "4849f3ec79450204f2067b1754adebc8b3e0f6f6022ea50c12efdad253426fe7",
+      "duration_s": 17.15447425842285,
+      "family": "line",
+      "gamma_points": 301,
+      "heading_rad": -0.4298476373054969,
+      "height_control_knots_m": [
+        0.26388826966285706,
+        0.7438163757324219,
+        0.073993980884552,
+        0.9044042825698853,
+        0.6207897067070007,
+        0.3291400671005249,
+        0.29474443197250366,
+        0.1282321959733963,
+        0.44138601422309875
+      ],
+      "line_length_m": 2.271688141902071,
+      "max_height_m": 0.9042543172836304,
+      "min_height_m": 0.073993980884552,
+      "orientation_control_knots_xyzw": [
+        [
+          0.5660061836242676,
+          -0.7842043042182922,
+          -0.16831038892269135,
+          0.19061018526554108
+        ],
+        [
+          0.07901968061923981,
+          -0.6424567699432373,
+          0.530122697353363,
+          0.5476998686790466
+        ],
+        [
+          -0.7297351956367493,
+          -0.6354580521583557,
+          0.24746321141719818,
+          0.04941230267286301
+        ],
+        [
+          0.07703379541635513,
+          -0.546054482460022,
+          0.0326961986720562,
+          0.8335593938827515
+        ],
+        [
+          0.15240994095802307,
+          0.018822651356458664,
+          0.9742194414138794,
+          0.1652676910161972
+        ],
+        [
+          0.7014265656471252,
+          0.40335696935653687,
+          0.4790576994419098,
+          -0.34030523896217346
+        ],
+        [
+          0.9110140204429626,
+          0.04736756160855293,
+          0.40250563621520996,
+          -0.07615122944116592
+        ],
+        [
+          0.6765230894088745,
+          0.6383239030838013,
+          -0.3490537405014038,
+          -0.11410751193761826
+        ],
+        [
+          0.40475034713745117,
+          0.05969981476664543,
+          0.18185485899448395,
+          0.8941710591316223
+        ]
+      ],
+      "path_length_m": 4.956310272216797,
+      "seed": 20270915,
+      "time_law_points": 401,
+      "trajectory_id": "random-line-000"
+    },
+    {
+      "content_sha256": "fdc5d31d80e818569245bde9052cfa9145b20ec933b01c16ceeba29658eb442a",
+      "duration_s": 19.8979434967041,
+      "family": "line",
+      "gamma_points": 301,
+      "heading_rad": 3.1075200206494307,
+      "height_control_knots_m": [
+        0.6226814389228821,
+        0.9883106350898743,
+        0.3481409549713135,
+        0.11706998199224472,
+        0.8694080114364624,
+        0.06234382465481758,
+        0.6493355631828308,
+        0.064213827252388,
+        0.32773932814598083
+      ],
+      "line_length_m": 1.3516170894639061,
+      "max_height_m": 0.9881173968315125,
+      "min_height_m": 0.06265410780906677,
+      "orientation_control_knots_xyzw": [
+        [
+          -0.4967484772205353,
+          0.6433166861534119,
+          0.33222824335098267,
+          0.4785488545894623
+        ],
+        [
+          -0.001362163689918816,
+          0.01350488793104887,
+          0.9014626741409302,
+          -0.43264397978782654
+        ],
+        [
+          0.06093916669487953,
+          0.13948124647140503,
+          0.8211197853088379,
+          0.550085186958313
+        ],
+        [
+          0.4825229048728943,
+          0.24950726330280304,
+          0.7885432839393616,
+          -0.28830063343048096
+        ],
+        [
+          0.10288101434707642,
+          -0.26807019114494324,
+          -0.18241330981254578,
+          -0.9403612613677979
+        ],
+        [
+          0.5357373356819153,
+          0.34718209505081177,
+          -0.73481684923172,
+          -0.22911643981933594
+        ],
+        [
+          0.508017897605896,
+          0.40023016929626465,
+          -0.7303773760795593,
+          0.21973270177841187
+        ],
+        [
+          0.24795006215572357,
+          0.3159049451351166,
+          -0.49684852361679077,
+          0.7693285346031189
+        ],
+        [
+          -0.3790132403373718,
+          -0.0871463492512703,
+          0.4918385148048401,
+          0.7790053486824036
+        ]
+      ],
+      "path_length_m": 5.384516716003418,
+      "seed": 20270925,
+      "time_law_points": 401,
+      "trajectory_id": "random-line-001"
+    },
+    {
+      "content_sha256": "dac6ac0a39db28752adf61feca21b6ea61efa20cc898764f4464332618d1fab1",
+      "duration_s": 19.913616180419922,
+      "family": "line",
+      "gamma_points": 301,
+      "heading_rad": 1.2934196707012013,
+      "height_control_knots_m": [
+        0.9801552295684814,
+        0.4022578001022339,
+        0.35817646980285645,
+        0.6335861086845398,
+        0.0792812779545784,
+        0.4954684376716614,
+        0.13104914128780365,
+        0.4501200318336487,
+        0.7052909135818481
+      ],
+      "line_length_m": 2.815574762028769,
+      "max_height_m": 0.9801552295684814,
+      "min_height_m": 0.0792812779545784,
+      "orientation_control_knots_xyzw": [
+        [
+          0.17458944022655487,
+          0.5146844983100891,
+          0.03472789376974106,
+          0.8386968374252319
+        ],
+        [
+          0.2078353315591812,
+          -0.40661877393722534,
+          0.11320412158966064,
+          0.8824117183685303
+        ],
+        [
+          0.26281532645225525,
+          -0.047281526029109955,
+          0.9628702998161316,
+          0.039665594696998596
+        ],
+        [
+          -0.25643953680992126,
+          -0.6138603091239929,
+          0.16595222055912018,
+          -0.7279245853424072
+        ],
+        [
+          0.2735006511211395,
+          0.5182338356971741,
+          0.6987414956092834,
+          -0.4103552997112274
+        ],
+        [
+          0.4565417170524597,
+          0.7244876027107239,
+          0.11026854813098907,
+          -0.5045078992843628
+        ],
+        [
+          0.4549831449985504,
+          -0.26862385869026184,
+          -0.8133164048194885,
+          -0.24361443519592285
+        ],
+        [
+          0.0585639663040638,
+          -0.8043385744094849,
+          -0.5796323418617249,
+          0.11677365750074387
+        ],
+        [
+          -0.8797048926353455,
+          -0.2008758783340454,
+          -0.3886053264141083,
+          0.1864243745803833
+        ]
+      ],
+      "path_length_m": 5.220853805541992,
+      "seed": 20270935,
+      "time_law_points": 401,
+      "trajectory_id": "random-line-002"
+    },
+    {
+      "content_sha256": "572b96027b6b78712ac185bed2d526efc2024f78f7ab4c46292b1aa5fb6a2f62",
+      "duration_s": 16.426189422607422,
+      "family": "line",
+      "gamma_points": 301,
+      "heading_rad": -0.8322922815711342,
+      "height_control_knots_m": [
+        0.5987597703933716,
+        0.9116739630699158,
+        0.5290449857711792,
+        0.6431037187576294,
+        0.5897397994995117,
+        0.33277586102485657,
+        0.9715607166290283,
+        0.8660514950752258,
+        0.3987588882446289
+      ],
+      "line_length_m": 1.9858977966651683,
+      "max_height_m": 0.9715607166290283,
+      "min_height_m": 0.3329117000102997,
+      "orientation_control_knots_xyzw": [
+        [
+          -0.09037847816944122,
+          -0.6770387291908264,
+          0.3400481343269348,
+          0.646388053894043
+        ],
+        [
+          -0.21773862838745117,
+          -0.9688918590545654,
+          -0.09605351090431213,
+          0.06791313737630844
+        ],
+        [
+          -0.6341350078582764,
+          0.009211277589201927,
+          -0.7651631832122803,
+          0.11096517741680145
+        ],
+        [
+          0.6093171238899231,
+          0.020368142053484917,
+          -0.6880096197128296,
+          0.3936503231525421
+        ],
+        [
+          -0.08465223759412766,
+          0.7199183702468872,
+          0.24008381366729736,
+          0.645686686038971
+        ],
+        [
+          0.7356536388397217,
+          -0.08909616619348526,
+          0.433982789516449,
+          0.5123812556266785
+        ],
+        [
+          0.9699522256851196,
+          0.11535070836544037,
+          -0.03715505078434944,
+          0.21096549928188324
+        ],
+        [
+          0.35101690888404846,
+          -0.5859664082527161,
+          -0.26994532346725464,
+          -0.6786457300186157
+        ],
+        [
+          0.269595205783844,
+          0.7329379916191101,
+          0.21270202100276947,
+          -0.5872633457183838
+        ]
+      ],
+      "path_length_m": 4.661535739898682,
+      "seed": 20270945,
+      "time_law_points": 401,
+      "trajectory_id": "random-line-003"
+    },
+    {
+      "content_sha256": "17cd97fa3c51ee193e8207328f5fa713d88240fd0362e7ec4c533a9c893d573a",
+      "duration_s": 20.134666442871094,
+      "family": "line",
+      "gamma_points": 301,
+      "heading_rad": -1.7455183028501902,
+      "height_control_knots_m": [
+        0.23745834827423096,
+        0.27120086550712585,
+        0.604184627532959,
+        0.6500966548919678,
+        0.061535630375146866,
+        0.7723187208175659,
+        0.0764676034450531,
+        0.9216713309288025,
+        0.6080015897750854
+      ],
+      "line_length_m": 0.876843579741835,
+      "max_height_m": 0.9215055108070374,
+      "min_height_m": 0.061535630375146866,
+      "orientation_control_knots_xyzw": [
+        [
+          -0.3040495216846466,
+          0.0568363256752491,
+          0.9446218609809875,
+          -0.1096041202545166
+        ],
+        [
+          0.23670066893100739,
+          -0.41996851563453674,
+          0.6751649379730225,
+          -0.5583471655845642
+        ],
+        [
+          -0.070246122777462,
+          -0.9489539861679077,
+          -0.14990860223770142,
+          -0.2684757113456726
+        ],
+        [
+          0.13325755298137665,
+          -0.7119790315628052,
+          -0.671596109867096,
+          -0.15584290027618408
+        ],
+        [
+          0.13438357412815094,
+          0.5192456841468811,
+          -0.8023248910903931,
+          0.26191553473472595
+        ],
+        [
+          -0.07684381306171417,
+          -0.8146913647651672,
+          -0.4740695357322693,
+          0.3250093460083008
+        ],
+        [
+          0.34321272373199463,
+          -0.7184503078460693,
+          -0.2760789394378662,
+          -0.5383443236351013
+        ],
+        [
+          0.9659658074378967,
+          -0.02019757591187954,
+          0.09226049482822418,
+          -0.24081137776374817
+        ],
+        [
+          0.43723806738853455,
+          -0.7151733636856079,
+          -0.4890105724334717,
+          0.24128520488739014
+        ]
+      ],
+      "path_length_m": 4.8227996826171875,
+      "seed": 20270955,
+      "time_law_points": 401,
+      "trajectory_id": "random-line-004"
+    },
+    {
+      "content_sha256": "31b09826c3dbb121d6d0a8041412d581d0e7421b18b5a2ef0e13eeb7b47599a1",
+      "duration_s": 15.859549522399902,
+      "family": "line",
+      "gamma_points": 301,
+      "heading_rad": -0.8005140275875737,
+      "height_control_knots_m": [
+        0.12089904397726059,
+        0.5905495882034302,
+        0.11142517626285553,
+        0.332981675863266,
+        0.9966574907302856,
+        0.8493092656135559,
+        0.768258810043335,
+        0.8801627159118652,
+        0.7563672661781311
+      ],
+      "line_length_m": 0.9797986774616105,
+      "max_height_m": 0.9966574907302856,
+      "min_height_m": 0.11142517626285553,
+      "orientation_control_knots_xyzw": [
+        [
+          0.5551999807357788,
+          0.6427103281021118,
+          -0.09000136703252792,
+          0.5201693773269653
+        ],
+        [
+          0.49088403582572937,
+          -0.5374965667724609,
+          -0.6395251154899597,
+          0.2472609281539917
+        ],
+        [
+          -0.3012370765209198,
+          -0.7236950993537903,
+          -0.6130045652389526,
+          0.09872700273990631
+        ],
+        [
+          -0.11369679123163223,
+          -0.31678467988967896,
+          -0.6519158482551575,
+          -0.67950439453125
+        ],
+        [
+          -0.456332266330719,
+          0.4244106709957123,
+          -0.7732394337654114,
+          0.11720599979162216
+        ],
+        [
+          -0.976565957069397,
+          -0.0013463303912431002,
+          0.03314098343253136,
+          -0.21264708042144775
+        ],
+        [
+          -0.6937406659126282,
+          0.13782691955566406,
+          -0.48103320598602295,
+          0.5180103182792664
+        ],
+        [
+          -0.5851329565048218,
+          0.45799773931503296,
+          0.6375107765197754,
+          0.2035621851682663
+        ],
+        [
+          -0.6981673240661621,
+          -0.31891220808029175,
+          0.5397659540176392,
+          0.3457023799419403
+        ]
+      ],
+      "path_length_m": 3.8657937049865723,
+      "seed": 20270965,
+      "time_law_points": 401,
+      "trajectory_id": "random-line-005"
+    },
+    {
+      "content_sha256": "9b1d4cab3e0b613efc9fd393e0d19ce0ee7b55da78bd82e504e132f4c6433af8",
+      "duration_s": 24.766925811767578,
+      "family": "line",
+      "gamma_points": 301,
+      "heading_rad": 3.026426914259032,
+      "height_control_knots_m": [
+        0.8466907143592834,
+        0.1448257863521576,
+        0.2756081521511078,
+        0.7808563113212585,
+        0.9357894659042358,
+        0.7927119135856628,
+        0.6197149157524109,
+        0.06742794811725616,
+        0.9695340394973755
+      ],
+      "line_length_m": 2.6381962182787433,
+      "max_height_m": 0.9695340394973755,
+      "min_height_m": 0.06771988421678543,
+      "orientation_control_knots_xyzw": [
+        [
+          -0.7428022027015686,
+          0.5772373080253601,
+          0.24756580591201782,
+          0.23184727132320404
+        ],
+        [
+          -0.20106136798858643,
+          -0.019030151888728142,
+          0.8468058705329895,
+          0.4920690655708313
+        ],
+        [
+          0.4475041329860687,
+          -0.4118461608886719,
+          0.6194260716438293,
+          -0.49642133712768555
+        ],
+        [
+          0.5393154621124268,
+          0.32301944494247437,
+          -0.4858768582344055,
+          -0.6072239875793457
+        ],
+        [
+          -0.6338188052177429,
+          0.09616823494434357,
+          -0.5429449081420898,
+          -0.5424354672431946
+        ],
+        [
+          -0.5543901920318604,
+          -0.5041475892066956,
+          0.1788274645805359,
+          -0.6375793814659119
+        ],
+        [
+          0.19117970764636993,
+          0.3370538651943207,
+          0.4787139296531677,
+          -0.78783118724823
+        ],
+        [
+          0.1918032467365265,
+          -0.15898799896240234,
+          0.9537554979324341,
+          -0.16818086802959442
+        ],
+        [
+          -0.3422524929046631,
+          0.22031421959400177,
+          0.7559795379638672,
+          0.51265949010849
+        ]
+      ],
+      "path_length_m": 5.510495662689209,
+      "seed": 20270975,
+      "time_law_points": 401,
+      "trajectory_id": "random-line-006"
+    },
+    {
+      "content_sha256": "b164a3ab7909f53fcaddb94387794054373c3bba148138696c5defdf6513e2e6",
+      "duration_s": 20.046995162963867,
+      "family": "line",
+      "gamma_points": 301,
+      "heading_rad": -1.2463139884431038,
+      "height_control_knots_m": [
+        0.8494192361831665,
+        0.33627232909202576,
+        0.09825616329908371,
+        0.4998266100883484,
+        0.5193132758140564,
+        0.21268469095230103,
+        0.6698881387710571,
+        0.4538365602493286,
+        0.5995202660560608
+      ],
+      "line_length_m": 1.742018268100987,
+      "max_height_m": 0.8494192361831665,
+      "min_height_m": 0.09825616329908371,
+      "orientation_control_knots_xyzw": [
+        [
+          -0.37479400634765625,
+          0.3337058126926422,
+          -0.23277342319488525,
+          0.8330584764480591
+        ],
+        [
+          0.8928399085998535,
+          -0.010696068406105042,
+          -0.0912170484662056,
+          0.44091033935546875
+        ],
+        [
+          0.40171512961387634,
+          0.25118520855903625,
+          -0.2653452455997467,
+          -0.8397159576416016
+        ],
+        [
+          0.14220432937145233,
+          0.7146776914596558,
+          -0.6271268129348755,
+          0.27518296241760254
+        ],
+        [
+          -0.04766881465911865,
+          -0.358885794878006,
+          -0.5192328095436096,
+          0.7741614580154419
+        ],
+        [
+          -0.12393148243427277,
+          -0.5960725545883179,
+          -0.5378929376602173,
+          -0.5831035375595093
+        ],
+        [
+          -0.6611183285713196,
+          -0.42689990997314453,
+          -0.28969550132751465,
+          0.5447527170181274
+        ],
+        [
+          0.4896566867828369,
+          -0.6163013577461243,
+          -0.614176869392395,
+          -0.056530967354774475
+        ],
+        [
+          0.06281707435846329,
+          0.04228895157575607,
+          -0.9455981254577637,
+          0.3164013922214508
+        ]
+      ],
+      "path_length_m": 4.636881351470947,
+      "seed": 20270985,
+      "time_law_points": 401,
+      "trajectory_id": "random-line-007"
+    },
+    {
+      "content_sha256": "39e8d7da796bfdaae1abb7d35f5d524315908ba37b4eb88088668422508bf1e0",
+      "duration_s": 14.509454727172852,
+      "family": "line",
+      "gamma_points": 301,
+      "heading_rad": -2.5245526640766958,
+      "height_control_knots_m": [
+        0.19795513153076172,
+        0.5897887945175171,
+        0.2107410877943039,
+        0.8015145659446716,
+        0.37128305435180664,
+        0.21589042246341705,
+        0.8021454215049744,
+        0.7781019806861877,
+        0.7746333479881287
+      ],
+      "line_length_m": 2.387980811786977,
+      "max_height_m": 0.8021454215049744,
+      "min_height_m": 0.19795513153076172,
+      "orientation_control_knots_xyzw": [
+        [
+          -0.30106663703918457,
+          0.6540064215660095,
+          -0.6939886212348938,
+          0.0037831696681678295
+        ],
+        [
+          -0.5221710205078125,
+          0.609544575214386,
+          0.4248776435852051,
+          -0.41865482926368713
+        ],
+        [
+          -0.31050294637680054,
+          -0.2743922173976898,
+          -0.4838063716888428,
+          -0.7708619832992554
+        ],
+        [
+          0.13158197700977325,
+          -0.6425521373748779,
+          0.5769618153572083,
+          -0.486752450466156
+        ],
+        [
+          -0.016851646825671196,
+          -0.6257128715515137,
+          0.7792091369628906,
+          0.032133616507053375
+        ],
+        [
+          -0.24545800685882568,
+          0.0059750135987997055,
+          0.7001105546951294,
+          0.6704922318458557
+        ],
+        [
+          -0.003535579890012741,
+          -0.6790568828582764,
+          0.622565746307373,
+          -0.3889487385749817
+        ],
+        [
+          -0.1141304224729538,
+          -0.1227971687912941,
+          -0.009773897007107735,
+          -0.9857989549636841
+        ],
+        [
+          0.6922171115875244,
+          -0.27467161417007446,
+          -0.6005555987358093,
+          -0.2910737693309784
+        ]
+      ],
+      "path_length_m": 4.902402400970459,
+      "seed": 20270995,
+      "time_law_points": 401,
+      "trajectory_id": "random-line-008"
+    },
+    {
+      "content_sha256": "b81843550c7f1a8ac9396c95f6bccd37f48c17eb39cd9e2d694fcc17baedab62",
+      "duration_s": 12.723651885986328,
+      "family": "line",
+      "gamma_points": 301,
+      "heading_rad": -0.20789225731379402,
+      "height_control_knots_m": [
+        0.37446722388267517,
+        0.24439963698387146,
+        0.49555641412734985,
+        0.43881651759147644,
+        0.9941898584365845,
+        0.7144692540168762,
+        0.8848074674606323,
+        0.13886582851409912,
+        0.5321937799453735
+      ],
+      "line_length_m": 0.62670109358093,
+      "max_height_m": 0.9941898584365845,
+      "min_height_m": 0.13907374441623688,
+      "orientation_control_knots_xyzw": [
+        [
+          -0.23815812170505524,
+          -0.5893052220344543,
+          0.38615551590919495,
+          0.6684938669204712
+        ],
+        [
+          -0.92891526222229,
+          0.2905867397785187,
+          0.0645352154970169,
+          0.22025202214717865
+        ],
+        [
+          -0.76034015417099,
+          0.07836457341909409,
+          -0.08306992053985596,
+          -0.6394069194793701
+        ],
+        [
+          -0.49432745575904846,
+          0.13343803584575653,
+          0.8509231209754944,
+          0.1173221692442894
+        ],
+        [
+          0.24514798820018768,
+          -0.33427971601486206,
+          0.46238231658935547,
+          0.7838125824928284
+        ],
+        [
+          -0.7010841965675354,
+          -0.1829848438501358,
+          0.5405248999595642,
+          0.4275866746902466
+        ],
+        [
+          -0.5585612058639526,
+          0.2784040570259094,
+          0.3250068426132202,
+          0.7105428576469421
+        ],
+        [
+          -0.840833306312561,
+          -0.01644706539809704,
+          0.540982723236084,
+          0.008158311247825623
+        ],
+        [
+          -0.7623368501663208,
+          -0.12784601747989655,
+          0.3061964213848114,
+          0.5556452870368958
+        ]
+      ],
+      "path_length_m": 3.8650076389312744,
+      "seed": 20271005,
+      "time_law_points": 401,
+      "trajectory_id": "random-line-009"
+    },
+    {
+      "content_sha256": "31ee63501c350d4a1b1d2ceb112a2f33697f56e0f6cc87dc562c38c7ecb4f182",
+      "duration_s": 14.443716049194336,
+      "family": "line",
+      "gamma_points": 301,
+      "heading_rad": 1.2277491078125715,
+      "height_control_knots_m": [
+        0.5923724174499512,
+        0.9660428166389465,
+        0.6803622841835022,
+        0.3426530361175537,
+        0.409835547208786,
+        0.2537253797054291,
+        0.6752022504806519,
+        0.11228041350841522,
+        0.8240575790405273
+      ],
+      "line_length_m": 0.5232878093232431,
+      "max_height_m": 0.9658918380737305,
+      "min_height_m": 0.11257796734571457,
+      "orientation_control_knots_xyzw": [
+        [
+          -0.20676614344120026,
+          -0.9530348181724548,
+          -0.03875935822725296,
+          0.21787628531455994
+        ],
+        [
+          0.031945351511240005,
+          -0.624478280544281,
+          -0.028110802173614502,
+          -0.7798821926116943
+        ],
+        [
+          -0.3094145953655243,
+          -0.777157723903656,
+          0.17714665830135345,
+          0.5185629725456238
+        ],
+        [
+          -0.18586596846580505,
+          -0.6432312726974487,
+          -0.39594998955726624,
+          -0.6284353137016296
+        ],
+        [
+          -0.48835399746894836,
+          0.05834786221385002,
+          -0.7782853841781616,
+          -0.3903559148311615
+        ],
+        [
+          -0.05735788121819496,
+          0.11718328297138214,
+          -0.9691267013549805,
+          0.2092166543006897
+        ],
+        [
+          -0.129868283867836,
+          0.8238434195518494,
+          -0.47437652945518494,
+          -0.28175023198127747
+        ],
+        [
+          -0.5452014803886414,
+          0.7998561859130859,
+          0.19144336879253387,
+          -0.1622800976037979
+        ],
+        [
+          0.2825322151184082,
+          0.30180537700653076,
+          0.8393725752830505,
+          0.35290613770484924
+        ]
+      ],
+      "path_length_m": 4.168172359466553,
+      "seed": 20271015,
+      "time_law_points": 401,
+      "trajectory_id": "random-line-010"
+    },
+    {
+      "content_sha256": "5d09562bab6219d2d6dc8a9d40bb851bbbf20ac0c2c7aef2ce3df558f21352bc",
+      "duration_s": 13.048548698425293,
+      "family": "line",
+      "gamma_points": 301,
+      "heading_rad": 0.2611697531889572,
+      "height_control_knots_m": [
+        0.6260791420936584,
+        0.5428618788719177,
+        0.4978625476360321,
+        0.05929016321897507,
+        0.3584722578525543,
+        0.42065101861953735,
+        0.5760505199432373,
+        0.8132126927375793,
+        0.8119965195655823
+      ],
+      "line_length_m": 1.2133241018186554,
+      "max_height_m": 0.8132120370864868,
+      "min_height_m": 0.05944830924272537,
+      "orientation_control_knots_xyzw": [
+        [
+          0.1411317139863968,
+          0.31423959136009216,
+          -0.9387599229812622,
+          0.008070430718362331
+        ],
+        [
+          -0.13450908660888672,
+          0.887037456035614,
+          -0.43574708700180054,
+          -0.07208593934774399
+        ],
+        [
+          -0.07759369164705276,
+          0.46254047751426697,
+          -0.8391345143318176,
+          -0.275479257106781
+        ],
+        [
+          -0.059365201741456985,
+          -0.416742742061615,
+          -0.5176454782485962,
+          -0.7448788285255432
+        ],
+        [
+          -0.8424713611602783,
+          -0.1040029376745224,
+          -0.39859873056411743,
+          0.34719517827033997
+        ],
+        [
+          -0.03624739870429039,
+          -0.07282086461782455,
+          0.04352841526269913,
+          0.9957351684570312
+        ],
+        [
+          -0.5168258547782898,
+          -0.4541199505329132,
+          -0.6729886531829834,
+          0.27157390117645264
+        ],
+        [
+          -0.10891731828451157,
+          0.5070398449897766,
+          -0.8398180603981018,
+          0.16047823429107666
+        ],
+        [
+          -0.8994307518005371,
+          0.10501304268836975,
+          -0.24950280785560608,
+          0.3431398570537567
+        ]
+      ],
+      "path_length_m": 3.4078221321105957,
+      "seed": 20271025,
+      "time_law_points": 401,
+      "trajectory_id": "random-line-011"
+    },
+    {
+      "content_sha256": "8c014cd7db3f00dc37c2c37aa566f64a981455cf40cb7189ef77ae1593272c8b",
+      "duration_s": 16.88883399963379,
+      "family": "line",
+      "gamma_points": 301,
+      "heading_rad": 1.8589180364897624,
+      "height_control_knots_m": [
+        0.2575327455997467,
+        0.06189294531941414,
+        0.422392338514328,
+        0.42471417784690857,
+        0.49742600321769714,
+        0.4084480404853821,
+        0.6256390810012817,
+        0.3772142231464386,
+        0.10684548318386078
+      ],
+      "line_length_m": 3.0,
+      "max_height_m": 0.6256390810012817,
+      "min_height_m": 0.06199635937809944,
+      "orientation_control_knots_xyzw": [
+        [
+          -0.3977348804473877,
+          0.8832632899284363,
+          -0.1635548323392868,
+          -0.18682274222373962
+        ],
+        [
+          -0.8758018612861633,
+          0.29814234375953674,
+          0.2573475241661072,
+          0.2790241539478302
+        ],
+        [
+          -0.916496753692627,
+          0.2581888735294342,
+          -0.26541534066200256,
+          0.15141618251800537
+        ],
+        [
+          -0.5078368782997131,
+          -0.6013105511665344,
+          0.6147499084472656,
+          -0.05108699947595596
+        ],
+        [
+          -0.32302454113960266,
+          -0.2659597396850586,
+          0.33861956000328064,
+          0.8427676558494568
+        ],
+        [
+          0.4844729006290436,
+          -0.344264417886734,
+          -0.5987380146980286,
+          0.5369179248809814
+        ],
+        [
+          0.244001105427742,
+          0.1680034101009369,
+          0.4836706221103668,
+          0.8235903382301331
+        ],
+        [
+          -0.4772290885448456,
+          -0.14401312172412872,
+          0.1754661202430725,
+          0.8489547967910767
+        ],
+        [
+          -0.873594343662262,
+          -0.29404217004776,
+          -0.35142382979393005,
+          -0.16393110156059265
+        ]
+      ],
+      "path_length_m": 4.55906343460083,
+      "seed": 20271035,
+      "time_law_points": 401,
+      "trajectory_id": "random-line-012"
+    },
+    {
+      "content_sha256": "f371c382708ab29855de6b919abd3d4590fdf79ca3824efa87bccf566b24934f",
+      "duration_s": 22.979944229125977,
+      "family": "line",
+      "gamma_points": 301,
+      "heading_rad": 2.5390471637712286,
+      "height_control_knots_m": [
+        0.6802360415458679,
+        0.5112730264663696,
+        0.17720749974250793,
+        0.29039403796195984,
+        0.43528398871421814,
+        0.45998406410217285,
+        0.14955970644950867,
+        0.7117180228233337,
+        0.21036173403263092
+      ],
+      "line_length_m": 0.3777826799054703,
+      "max_height_m": 0.7114530205726624,
+      "min_height_m": 0.14955970644950867,
+      "orientation_control_knots_xyzw": [
+        [
+          -0.4788386821746826,
+          -0.8001734614372253,
+          -0.29931914806365967,
+          0.20209896564483643
+        ],
+        [
+          0.5770372748374939,
+          -0.8111084699630737,
+          -0.07395373284816742,
+          0.06051347032189369
+        ],
+        [
+          0.2062319666147232,
+          -0.8545772433280945,
+          -0.23066964745521545,
+          0.417082279920578
+        ],
+        [
+          0.005815092474222183,
+          -0.5770365595817566,
+          -0.5786438584327698,
+          -0.5763387084007263
+        ],
+        [
+          0.4744524657726288,
+          -0.7706573605537415,
+          -0.410070538520813,
+          -0.11324425786733627
+        ],
+        [
+          0.9411801695823669,
+          0.06334833055734634,
+          0.150047168135643,
+          -0.2960619330406189
+        ],
+        [
+          0.2732422649860382,
+          0.5152146816253662,
+          -0.039991457015275955,
+          0.8113527297973633
+        ],
+        [
+          0.1573285460472107,
+          0.5687301754951477,
+          0.8014692068099976,
+          0.09716369211673737
+        ],
+        [
+          -0.08627737313508987,
+          0.7480464577674866,
+          0.5913606882095337,
+          -0.2885744869709015
+        ]
+      ],
+      "path_length_m": 3.5258982181549072,
+      "seed": 20271045,
+      "time_law_points": 401,
+      "trajectory_id": "random-line-013"
+    },
+    {
+      "content_sha256": "6ee05d4998f2a652c8e50ef6b4442293bd54e7624f792b57dbda173e773a3483",
+      "duration_s": 19.149072647094727,
+      "family": "line",
+      "gamma_points": 301,
+      "heading_rad": -0.7524314738973636,
+      "height_control_knots_m": [
+        0.1647675782442093,
+        0.670417070388794,
+        0.419009268283844,
+        0.2911250591278076,
+        0.8738902807235718,
+        0.6146069765090942,
+        0.1681811362504959,
+        0.6913588643074036,
+        0.3877439796924591
+      ],
+      "line_length_m": 1.5990081337049205,
+      "max_height_m": 0.8738902807235718,
+      "min_height_m": 0.1647675782442093,
+      "orientation_control_knots_xyzw": [
+        [
+          0.17152495682239532,
+          0.9000128507614136,
+          0.2317979633808136,
+          0.32684212923049927
+        ],
+        [
+          0.1501738578081131,
+          0.5246312022209167,
+          0.8276824355125427,
+          -0.1309642195701599
+        ],
+        [
+          0.475877046585083,
+          -0.030351677909493446,
+          0.6494078636169434,
+          0.5923590064048767
+        ],
+        [
+          0.7926418781280518,
+          0.32354506850242615,
+          0.11849948018789291,
+          0.5029864311218262
+        ],
+        [
+          0.6389790773391724,
+          -0.35851815342903137,
+          -0.321327805519104,
+          0.5999324321746826
+        ],
+        [
+          -0.20671695470809937,
+          -0.9242494106292725,
+          -0.30863338708877563,
+          -0.08818504214286804
+        ],
+        [
+          0.38708269596099854,
+          -0.1585075706243515,
+          -0.6732181906700134,
+          0.6097701191902161
+        ],
+        [
+          -0.7754512429237366,
+          -0.2643827199935913,
+          -0.08586448431015015,
+          0.5669254064559937
+        ],
+        [
+          -0.6156843304634094,
+          0.5637707114219666,
+          -0.13229450583457947,
+          0.5344095826148987
+        ]
+      ],
+      "path_length_m": 4.434184551239014,
+      "seed": 20271055,
+      "time_law_points": 401,
+      "trajectory_id": "random-line-014"
+    },
+    {
+      "content_sha256": "553149b82dfa489dc3a335da5ed964dcf0b4702fe9e58a01e8318e867f4d9b57",
+      "duration_s": 16.91875457763672,
+      "family": "line",
+      "gamma_points": 301,
+      "heading_rad": 1.058578339196563,
+      "height_control_knots_m": [
+        0.48804569244384766,
+        0.9769538044929504,
+        0.17612752318382263,
+        0.7273005247116089,
+        0.33022207021713257,
+        0.3346713185310364,
+        0.6856604218482971,
+        0.10797537118196487,
+        0.5512201189994812
+      ],
+      "line_length_m": 1.843139285806555,
+      "max_height_m": 0.9766953587532043,
+      "min_height_m": 0.10820966213941574,
+      "orientation_control_knots_xyzw": [
+        [
+          0.13317811489105225,
+          0.7836892008781433,
+          0.01654450036585331,
+          -0.6064825057983398
+        ],
+        [
+          0.8798441290855408,
+          0.4066404104232788,
+          0.03477741777896881,
+          0.24353328347206116
+        ],
+        [
+          0.25221672654151917,
+          0.497795045375824,
+          -0.8286486268043518,
+          -0.04391223192214966
+        ],
+        [
+          0.5425260066986084,
+          0.436549574136734,
+          -0.6158528327941895,
+          0.3685312271118164
+        ],
+        [
+          0.8445331454277039,
+          -0.16949018836021423,
+          -0.01410674024373293,
+          -0.5077773928642273
+        ],
+        [
+          0.627081036567688,
+          -0.384996622800827,
+          0.362924724817276,
+          -0.5716927647590637
+        ],
+        [
+          0.0352923609316349,
+          0.8417707085609436,
+          0.34947532415390015,
+          -0.40993115305900574
+        ],
+        [
+          -0.22364351153373718,
+          0.4729393422603607,
+          -0.8009142279624939,
+          -0.291287362575531
+        ],
+        [
+          0.12314929813146591,
+          0.9465174674987793,
+          -0.07942777127027512,
+          -0.2874546945095062
+        ]
+      ],
+      "path_length_m": 5.11471700668335,
+      "seed": 20271065,
+      "time_law_points": 401,
+      "trajectory_id": "random-line-015"
+    },
+    {
+      "center_xy_m": [
+        2.3031303557727316,
+        -1.5601606169606157
+      ],
+      "circle_radius_m": 2.5413202804829913,
+      "content_sha256": "7864312d7b58eb578905906459c448fa993b2d1b5774aabaf5b550bafaf81e99",
+      "direction": "counterclockwise",
+      "duration_s": 49.38157272338867,
+      "family": "circle",
+      "gamma_points": 721,
+      "height_control_knots_m": [
+        0.24956479668617249,
+        0.09611313045024872,
+        0.35737326741218567,
+        0.22617222368717194,
+        0.41194605827331543,
+        0.14187151193618774,
+        0.8133811354637146,
+        0.6687483191490173,
+        0.24956479668617249
+      ],
+      "max_height_m": 0.8133811354637146,
+      "min_height_m": 0.09611313045024872,
+      "orientation_control_knots_xyzw": [
+        [
+          0.5259549617767334,
+          -0.6404756307601929,
+          -0.5588891506195068,
+          -0.02837730385363102
+        ],
+        [
+          0.2632468342781067,
+          0.09719658643007278,
+          -0.6759588122367859,
+          -0.6814203262329102
+        ],
+        [
+          0.5179304480552673,
+          -0.6142345666885376,
+          -0.5663610696792603,
+          -0.18357309699058533
+        ],
+        [
+          0.43759360909461975,
+          -0.20725135505199432,
+          -0.3434891402721405,
+          -0.8047197461128235
+        ],
+        [
+          0.04245365038514137,
+          -0.4348354637622833,
+          -0.5817332863807678,
+          -0.6860774159431458
+        ],
+        [
+          -0.14834322035312653,
+          0.37128815054893494,
+          -0.012890459969639778,
+          -0.9165005087852478
+        ],
+        [
+          -0.06243312358856201,
+          -0.583095908164978,
+          0.6209031343460083,
+          -0.5201735496520996
+        ],
+        [
+          -0.49788299202919006,
+          0.05534537136554718,
+          0.7986840605735779,
+          0.33339646458625793
+        ],
+        [
+          -0.5259549617767334,
+          0.6404756307601929,
+          0.5588891506195068,
+          0.02837730385363102
+        ]
+      ],
+      "path_length_m": 16.426307678222656,
+      "phase_rad": 2.217483222177351,
+      "seed": 20280915,
+      "time_law_points": 401,
+      "trajectory_id": "random-circle-000"
+    },
+    {
+      "center_xy_m": [
+        0.09400483033567852,
+        -2.089033430298861
+      ],
+      "circle_radius_m": 2.7978947286587315,
+      "content_sha256": "a906b4971e7cd1f7ebdc0715b91f2dd8f567853f7043bdafe853feafcff8e386",
+      "direction": "clockwise",
+      "duration_s": 70.76202392578125,
+      "family": "circle",
+      "gamma_points": 721,
+      "height_control_knots_m": [
+        0.9240339398384094,
+        0.44460225105285645,
+        0.6543868780136108,
+        0.20778602361679077,
+        0.07026837021112442,
+        0.6276646256446838,
+        0.580453634262085,
+        0.3332294523715973,
+        0.9240339398384094
+      ],
+      "max_height_m": 0.9240339398384094,
+      "min_height_m": 0.07026837021112442,
+      "orientation_control_knots_xyzw": [
+        [
+          -0.7891935110092163,
+          0.2624879777431488,
+          -0.5439993739128113,
+          -0.11107815057039261
+        ],
+        [
+          -0.7617418766021729,
+          -0.2960568964481354,
+          -0.3950338065624237,
+          0.4195806086063385
+        ],
+        [
+          -0.323766827583313,
+          -0.6106623411178589,
+          0.7070465683937073,
+          -0.14950472116470337
+        ],
+        [
+          -0.07542335987091064,
+          0.04994945228099823,
+          0.03886348754167557,
+          -0.9951412081718445
+        ],
+        [
+          -0.3587959408760071,
+          0.5164943933486938,
+          -0.24897970259189606,
+          -0.7365515232086182
+        ],
+        [
+          -0.3774179518222809,
+          0.2565981149673462,
+          0.8894457817077637,
+          -0.024481086060404778
+        ],
+        [
+          -0.1690313220024109,
+          0.2670828104019165,
+          0.8751960396766663,
+          -0.36623358726501465
+        ],
+        [
+          -0.0046105519868433475,
+          -0.9099174737930298,
+          0.27583739161491394,
+          -0.3097460865974426
+        ],
+        [
+          0.7891935110092163,
+          -0.2624879777431488,
+          0.5439993739128113,
+          0.11107815057039261
+        ]
+      ],
+      "path_length_m": 18.17015266418457,
+      "phase_rad": 1.301507924705069,
+      "seed": 20280925,
+      "time_law_points": 401,
+      "trajectory_id": "random-circle-001"
+    },
+    {
+      "center_xy_m": [
+        -0.24089421306471354,
+        0.803119161563793
+      ],
+      "circle_radius_m": 0.5857722766205049,
+      "content_sha256": "7a18845c95972ad568b081799e59846c3e7cd0170f6618abb8552e7c6ed278db",
+      "direction": "clockwise",
+      "duration_s": 26.115694046020508,
+      "family": "circle",
+      "gamma_points": 721,
+      "height_control_knots_m": [
+        0.09741608053445816,
+        0.14932814240455627,
+        0.40696123242378235,
+        0.0698581412434578,
+        0.13120652735233307,
+        0.25154414772987366,
+        0.9383896589279175,
+        0.8783589601516724,
+        0.09741608053445816
+      ],
+      "max_height_m": 0.9383896589279175,
+      "min_height_m": 0.0698581412434578,
+      "orientation_control_knots_xyzw": [
+        [
+          0.14466165006160736,
+          -0.46885931491851807,
+          0.5438272953033447,
+          0.6808052659034729
+        ],
+        [
+          -0.8109398484230042,
+          -0.0799003392457962,
+          0.5627931952476501,
+          0.13876700401306152
+        ],
+        [
+          0.12309956550598145,
+          0.7494323253631592,
+          0.41605857014656067,
+          0.5000929832458496
+        ],
+        [
+          0.8448522090911865,
+          -0.41995954513549805,
+          0.260661780834198,
+          0.20472942292690277
+        ],
+        [
+          -0.22783082723617554,
+          -0.9734203219413757,
+          0.013093328103423119,
+          0.019352953881025314
+        ],
+        [
+          0.43484070897102356,
+          -0.4138009250164032,
+          -0.5379890203475952,
+          0.5918193459510803
+        ],
+        [
+          -0.08805735409259796,
+          -0.9363311529159546,
+          -0.12565496563911438,
+          -0.31581759452819824
+        ],
+        [
+          -0.4042663872241974,
+          -0.4420125186443329,
+          0.2807893455028534,
+          0.7499006390571594
+        ],
+        [
+          0.14466165006160736,
+          -0.46885931491851807,
+          0.5438272953033447,
+          0.6808052659034729
+        ]
+      ],
+      "path_length_m": 5.8717241287231445,
+      "phase_rad": -1.4113131150817342,
+      "seed": 20280935,
+      "time_law_points": 401,
+      "trajectory_id": "random-circle-002"
+    },
+    {
+      "center_xy_m": [
+        1.9432499162479575,
+        -0.9257402772892518
+      ],
+      "circle_radius_m": 1.2176288444568184,
+      "content_sha256": "30f539ff51d7ea6e10f58851d3acb5378d7f1fa8304eb1b4b28a7348e8656240",
+      "direction": "clockwise",
+      "duration_s": 28.6512393951416,
+      "family": "circle",
+      "gamma_points": 721,
+      "height_control_knots_m": [
+        0.34019213914871216,
+        0.30447763204574585,
+        0.954841673374176,
+        0.4462362825870514,
+        0.35700270533561707,
+        0.10098683089017868,
+        0.7282992005348206,
+        0.5936180949211121,
+        0.34019213914871216
+      ],
+      "max_height_m": 0.954841673374176,
+      "min_height_m": 0.10098683089017868,
+      "orientation_control_knots_xyzw": [
+        [
+          -0.5025174021720886,
+          0.05136222764849663,
+          0.6776605844497681,
+          -0.5344289541244507
+        ],
+        [
+          -0.47604092955589294,
+          -0.09024397283792496,
+          0.13714806735515594,
+          -0.8639626502990723
+        ],
+        [
+          -0.04797785356640816,
+          0.14905591309070587,
+          0.9876366257667542,
+          -0.007373483385890722
+        ],
+        [
+          -0.3758374750614166,
+          0.4815511107444763,
+          0.7819716930389404,
+          -0.12399577349424362
+        ],
+        [
+          -0.2740246653556824,
+          0.5896474123001099,
+          0.5890518426895142,
+          0.4798378050327301
+        ],
+        [
+          -0.11760206520557404,
+          -0.5258563756942749,
+          0.8211035132408142,
+          -0.1882386952638626
+        ],
+        [
+          -0.7213864326477051,
+          0.3304428160190582,
+          0.5936325788497925,
+          0.1341993808746338
+        ],
+        [
+          -0.22490137815475464,
+          -0.49356356263160706,
+          0.8182967305183411,
+          -0.19027583301067352
+        ],
+        [
+          -0.5025174021720886,
+          0.05136222764849663,
+          0.6776605844497681,
+          -0.5344289541244507
+        ]
+      ],
+      "path_length_m": 8.7337007522583,
+      "phase_rad": 3.070023623951533,
+      "seed": 20280945,
+      "time_law_points": 401,
+      "trajectory_id": "random-circle-003"
+    },
+    {
+      "center_xy_m": [
+        0.4856147567521647,
+        1.3240343769982303
+      ],
+      "circle_radius_m": 1.0963876376677253,
+      "content_sha256": "3cf56adaa0fb5645f28c379bb3a95249b37177f9cedd3c191ac3be4b27654f85",
+      "direction": "clockwise",
+      "duration_s": 38.55769729614258,
+      "family": "circle",
+      "gamma_points": 721,
+      "height_control_knots_m": [
+        0.14577616751194,
+        0.9194773435592651,
+        0.7466203570365906,
+        0.6098345518112183,
+        0.9549757242202759,
+        0.6711114048957825,
+        0.9774083495140076,
+        0.5372259020805359,
+        0.14577616751194
+      ],
+      "max_height_m": 0.9774083495140076,
+      "min_height_m": 0.14577616751194,
+      "orientation_control_knots_xyzw": [
+        [
+          -0.36228135228157043,
+          0.7694470882415771,
+          0.1142224594950676,
+          -0.5134750604629517
+        ],
+        [
+          -0.47433891892433167,
+          0.06797732412815094,
+          0.7967025637626648,
+          -0.3683024048805237
+        ],
+        [
+          -0.2683328688144684,
+          -0.867263913154602,
+          0.28778499364852905,
+          0.3050091564655304
+        ],
+        [
+          0.8454415202140808,
+          -0.4094890058040619,
+          0.24409988522529602,
+          0.24075424671173096
+        ],
+        [
+          0.5924517512321472,
+          -0.6206285357475281,
+          0.4862616956233978,
+          -0.16544096171855927
+        ],
+        [
+          0.8111977577209473,
+          -0.38307517766952515,
+          -0.06360577046871185,
+          0.43722522258758545
+        ],
+        [
+          0.6756271719932556,
+          -0.11061179637908936,
+          0.7053804397583008,
+          0.18366101384162903
+        ],
+        [
+          0.7185506224632263,
+          -0.5756942629814148,
+          0.2812913954257965,
+          0.27043721079826355
+        ],
+        [
+          0.36228135228157043,
+          -0.7694470882415771,
+          -0.1142224594950676,
+          0.5134750604629517
+        ]
+      ],
+      "path_length_m": 8.065750122070312,
+      "phase_rad": -2.25954487778677,
+      "seed": 20280955,
+      "time_law_points": 401,
+      "trajectory_id": "random-circle-004"
+    },
+    {
+      "center_xy_m": [
+        -0.5631221907836266,
+        1.0750696473061914
+      ],
+      "circle_radius_m": 0.7279583494338613,
+      "content_sha256": "ece856ed8bf5babdf8da36d54c781f87c9c67b21589aef894e29da10f3968de8",
+      "direction": "clockwise",
+      "duration_s": 27.67218017578125,
+      "family": "circle",
+      "gamma_points": 721,
+      "height_control_knots_m": [
+        0.9447087645530701,
+        0.9974800944328308,
+        0.817913830280304,
+        0.7990309596061707,
+        0.06339845061302185,
+        0.9309900403022766,
+        0.8531208038330078,
+        0.23027606308460236,
+        0.9447087645530701
+      ],
+      "max_height_m": 0.9974800944328308,
+      "min_height_m": 0.06339845061302185,
+      "orientation_control_knots_xyzw": [
+        [
+          0.6025115847587585,
+          0.08971542865037918,
+          -0.6080579161643982,
+          -0.5091134905815125
+        ],
+        [
+          0.44566023349761963,
+          -0.6091156005859375,
+          -0.5559739470481873,
+          -0.3482213318347931
+        ],
+        [
+          0.7507903575897217,
+          0.10024195909500122,
+          -0.2908639907836914,
+          0.5845199227333069
+        ],
+        [
+          0.9311580657958984,
+          0.32901492714881897,
+          -0.01623818278312683,
+          -0.15630130469799042
+        ],
+        [
+          0.41840818524360657,
+          0.3380034565925598,
+          -0.5544069409370422,
+          -0.6350757479667664
+        ],
+        [
+          0.8558157086372375,
+          -0.3084253966808319,
+          -0.4091125428676605,
+          0.07127544283866882
+        ],
+        [
+          0.3177100419998169,
+          -0.1744351089000702,
+          -0.9283984303474426,
+          0.0819091647863388
+        ],
+        [
+          -0.5564320087432861,
+          -0.4745825231075287,
+          -0.3580954968929291,
+          -0.5804502367973328
+        ],
+        [
+          0.6025115847587585,
+          0.08971542865037918,
+          -0.6080579161643982,
+          -0.5091134905815125
+        ]
+      ],
+      "path_length_m": 6.773270130157471,
+      "phase_rad": -0.23167250937136252,
+      "seed": 20280965,
+      "time_law_points": 401,
+      "trajectory_id": "random-circle-005"
+    },
+    {
+      "center_xy_m": [
+        2.671514436907189,
+        -0.45597108114611956
+      ],
+      "circle_radius_m": 3.0,
+      "content_sha256": "b0dd1fa6c191115b87cd84a12815aee97b41ba0855c7d3d11742d9d8d0d21809",
+      "direction": "counterclockwise",
+      "duration_s": 80.49143981933594,
+      "family": "circle",
+      "gamma_points": 721,
+      "height_control_knots_m": [
+        0.8000170588493347,
+        0.3421849310398102,
+        0.5453094840049744,
+        0.8273614645004272,
+        0.22703030705451965,
+        0.7778641581535339,
+        0.4124959409236908,
+        0.5770531892776489,
+        0.8000170588493347
+      ],
+      "max_height_m": 0.8273614645004272,
+      "min_height_m": 0.22703030705451965,
+      "orientation_control_knots_xyzw": [
+        [
+          0.520150363445282,
+          -0.05250086262822151,
+          -0.3960129916667938,
+          -0.7548913359642029
+        ],
+        [
+          -0.4680764079093933,
+          -0.19386625289916992,
+          -0.7606375217437744,
+          -0.4058952331542969
+        ],
+        [
+          -0.6295456290245056,
+          -0.47592803835868835,
+          0.40787631273269653,
+          -0.45913153886795044
+        ],
+        [
+          -0.16163963079452515,
+          -0.0034618244972079992,
+          0.20707795023918152,
+          -0.9648727178573608
+        ],
+        [
+          -0.1891006976366043,
+          -0.31177499890327454,
+          0.907259464263916,
+          0.20956502854824066
+        ],
+        [
+          -0.43625408411026,
+          -0.35238686203956604,
+          0.6533652544021606,
+          0.5085466504096985
+        ],
+        [
+          -0.19048260152339935,
+          0.7935264110565186,
+          0.33171939849853516,
+          0.47328051924705505
+        ],
+        [
+          0.8726624250411987,
+          0.47350093722343445,
+          0.031767360866069794,
+          0.11510003358125687
+        ],
+        [
+          0.520150363445282,
+          -0.05250086262822151,
+          -0.3960129916667938,
+          -0.7548913359642029
+        ]
+      ],
+      "path_length_m": 19.404176712036133,
+      "phase_rad": -3.1034038814247276,
+      "seed": 20280975,
+      "time_law_points": 401,
+      "trajectory_id": "random-circle-006"
+    },
+    {
+      "center_xy_m": [
+        -0.20365802820320422,
+        1.2086294242502613
+      ],
+      "circle_radius_m": 2.055006206579858,
+      "content_sha256": "fc933c9a179d273be309bf790ea0405d35fce2ac185336483c67a91fda918826",
+      "direction": "counterclockwise",
+      "duration_s": 65.96233367919922,
+      "family": "circle",
+      "gamma_points": 721,
+      "height_control_knots_m": [
+        0.27240046858787537,
+        0.174455463886261,
+        0.09524136036634445,
+        0.6846612095832825,
+        0.22286202013492584,
+        0.41711559891700745,
+        0.8819283843040466,
+        0.07171208411455154,
+        0.27240046858787537
+      ],
+      "max_height_m": 0.8819283843040466,
+      "min_height_m": 0.07171208411455154,
+      "orientation_control_knots_xyzw": [
+        [
+          -0.35383766889572144,
+          0.06422432512044907,
+          -0.05131753161549568,
+          0.9316869974136353
+        ],
+        [
+          -0.1419428437948227,
+          0.4577350616455078,
+          -0.3634321689605713,
+          0.7989041805267334
+        ],
+        [
+          -0.2733571231365204,
+          -0.022214893251657486,
+          -0.09317212551832199,
+          0.9571318030357361
+        ],
+        [
+          -0.3997526466846466,
+          -0.310128778219223,
+          -0.08314087241888046,
+          0.8585485219955444
+        ],
+        [
+          -0.5335637331008911,
+          -0.5202298164367676,
+          0.4738692045211792,
+          0.4691680371761322
+        ],
+        [
+          -0.5733485221862793,
+          0.604062020778656,
+          0.2858943045139313,
+          0.4739673137664795
+        ],
+        [
+          -0.048454463481903076,
+          -0.6402072906494141,
+          0.5833054184913635,
+          0.49753546714782715
+        ],
+        [
+          0.17317716777324677,
+          -0.2584633231163025,
+          -0.37748366594314575,
+          0.8721883296966553
+        ],
+        [
+          -0.35383766889572144,
+          0.06422432512044907,
+          -0.05131753161549568,
+          0.9316869974136353
+        ]
+      ],
+      "path_length_m": 13.663602828979492,
+      "phase_rad": -1.8930386774919068,
+      "seed": 20280985,
+      "time_law_points": 401,
+      "trajectory_id": "random-circle-007"
+    },
+    {
+      "center_xy_m": [
+        -0.21858063727190463,
+        0.660492836712584
+      ],
+      "circle_radius_m": 1.5728476283295354,
+      "content_sha256": "5c71cd5c01eff150f70608eb977e6b8caa24d621c6e31b0a77cffe9f8c912fe6",
+      "direction": "counterclockwise",
+      "duration_s": 47.50130844116211,
+      "family": "circle",
+      "gamma_points": 721,
+      "height_control_knots_m": [
+        0.5569487810134888,
+        0.21131281554698944,
+        0.8404895067214966,
+        0.25709912180900574,
+        0.25064924359321594,
+        0.9170746207237244,
+        0.6915257573127747,
+        0.8448114395141602,
+        0.5569487810134888
+      ],
+      "max_height_m": 0.9170746207237244,
+      "min_height_m": 0.21131281554698944,
+      "orientation_control_knots_xyzw": [
+        [
+          0.21871605515480042,
+          -0.7054657340049744,
+          0.6723884344100952,
+          0.048735108226537704
+        ],
+        [
+          0.46645158529281616,
+          -0.07689885795116425,
+          -0.11111405491828918,
+          -0.8741642832756042
+        ],
+        [
+          0.8025861978530884,
+          0.4842018783092499,
+          -0.27391383051872253,
+          0.21534889936447144
+        ],
+        [
+          0.49319812655448914,
+          0.6661829948425293,
+          0.3447769582271576,
+          -0.44055041670799255
+        ],
+        [
+          0.30657288432121277,
+          0.7779632210731506,
+          0.10742354393005371,
+          0.5378163456916809
+        ],
+        [
+          -0.12607550621032715,
+          0.8680029511451721,
+          -0.30690881609916687,
+          -0.3694358170032501
+        ],
+        [
+          -0.6077508926391602,
+          0.36231398582458496,
+          -0.09618102014064789,
+          -0.7000832557678223
+        ],
+        [
+          0.11688520014286041,
+          0.8980982899665833,
+          -0.3554728627204895,
+          -0.23107661306858063
+        ],
+        [
+          -0.21871605515480042,
+          0.7054657340049744,
+          -0.6723884344100952,
+          -0.048735108226537704
+        ]
+      ],
+      "path_length_m": 10.920865058898926,
+      "phase_rad": -1.2975688463827402,
+      "seed": 20280995,
+      "time_law_points": 401,
+      "trajectory_id": "random-circle-008"
+    },
+    {
+      "center_xy_m": [
+        -1.3062815665315188,
+        0.4631701519811541
+      ],
+      "circle_radius_m": 0.38972010617216024,
+      "content_sha256": "b3718f4d46b850cae676fb67aaade89d67c2f98bce54d635c3967f160b625b99",
+      "direction": "counterclockwise",
+      "duration_s": 19.561582565307617,
+      "family": "circle",
+      "gamma_points": 721,
+      "height_control_knots_m": [
+        0.44714435935020447,
+        0.4194028675556183,
+        0.4720659554004669,
+        0.8428903818130493,
+        0.21504303812980652,
+        0.08046741783618927,
+        0.7798889875411987,
+        0.07148398458957672,
+        0.44714435935020447
+      ],
+      "max_height_m": 0.8428903818130493,
+      "min_height_m": 0.07148398458957672,
+      "orientation_control_knots_xyzw": [
+        [
+          0.6688427925109863,
+          -0.5764029622077942,
+          -0.28489264845848083,
+          -0.3731555640697479
+        ],
+        [
+          0.6781922578811646,
+          0.45400291681289673,
+          -0.47756776213645935,
+          -0.32537001371383667
+        ],
+        [
+          -0.5652734637260437,
+          0.5140723586082458,
+          0.043417930603027344,
+          -0.6436694860458374
+        ],
+        [
+          -0.40181276202201843,
+          -0.4227449297904968,
+          -0.6454079151153564,
+          -0.49323606491088867
+        ],
+        [
+          -0.9024381637573242,
+          0.400188148021698,
+          -0.15951238572597504,
+          0.0032620029523968697
+        ],
+        [
+          -0.02872379869222641,
+          -0.18127970397472382,
+          -0.9435442090034485,
+          0.27574795484542847
+        ],
+        [
+          0.04458485171198845,
+          -0.03451215848326683,
+          -0.989630401134491,
+          0.13210874795913696
+        ],
+        [
+          0.1619480401277542,
+          0.2332083284854889,
+          -0.3753832280635834,
+          0.8823118209838867
+        ],
+        [
+          -0.6688427925109863,
+          0.5764029622077942,
+          0.28489264845848083,
+          0.3731555640697479
+        ]
+      ],
+      "path_length_m": 5.333792209625244,
+      "phase_rad": -0.3459869044981496,
+      "seed": 20281005,
+      "time_law_points": 401,
+      "trajectory_id": "random-circle-009"
+    },
+    {
+      "center_xy_m": [
+        -2.110954633653985,
+        -0.4698377036716086
+      ],
+      "circle_radius_m": 1.9324194809595834,
+      "content_sha256": "5ab25079ff16e5627e1160b52f7cb55e7c5bda04552ee7c4babb103bd8988b88",
+      "direction": "clockwise",
+      "duration_s": 39.551597595214844,
+      "family": "circle",
+      "gamma_points": 721,
+      "height_control_knots_m": [
+        0.6433967351913452,
+        0.40325459837913513,
+        0.6913366317749023,
+        0.2396276444196701,
+        0.2505653202533722,
+        0.29754433035850525,
+        0.8417009711265564,
+        0.16521142423152924,
+        0.6433967351913452
+      ],
+      "max_height_m": 0.8417009711265564,
+      "min_height_m": 0.16521142423152924,
+      "orientation_control_knots_xyzw": [
+        [
+          -0.4162536561489105,
+          -0.40172842144966125,
+          -0.12227918207645416,
+          0.8064706921577454
+        ],
+        [
+          -0.611524224281311,
+          -0.6464764475822449,
+          0.05725310370326042,
+          -0.45257967710494995
+        ],
+        [
+          -0.5756429433822632,
+          -0.2122766673564911,
+          -0.47658705711364746,
+          -0.6296336650848389
+        ],
+        [
+          -0.6857389807701111,
+          0.051017627120018005,
+          -0.48588842153549194,
+          -0.5395106077194214
+        ],
+        [
+          0.14545409381389618,
+          0.16800609230995178,
+          -0.07883653044700623,
+          -0.9718034267425537
+        ],
+        [
+          -0.7349715232849121,
+          0.007505341898649931,
+          -0.2452421933412552,
+          -0.6321525573730469
+        ],
+        [
+          -0.768600583076477,
+          0.34954768419265747,
+          0.40014880895614624,
+          -0.35630109906196594
+        ],
+        [
+          0.3467586636543274,
+          0.7133908271789551,
+          -0.29313865303993225,
+          -0.5337617993354797
+        ],
+        [
+          0.4162536561489105,
+          0.40172842144966125,
+          0.12227918207645416,
+          -0.8064706921577454
+        ]
+      ],
+      "path_length_m": 12.909069061279297,
+      "phase_rad": 0.7183916707620113,
+      "seed": 20281015,
+      "time_law_points": 401,
+      "trajectory_id": "random-circle-010"
+    },
+    {
+      "center_xy_m": [
+        -0.7472289804551222,
+        -0.33244085887724983
+      ],
+      "circle_radius_m": 1.3444308400715015,
+      "content_sha256": "5a7ec7a648f07d89f5d778082b3482ebb4be6a3b20a02cb9e989381f7bcebd88",
+      "direction": "clockwise",
+      "duration_s": 34.03702926635742,
+      "family": "circle",
+      "gamma_points": 721,
+      "height_control_knots_m": [
+        0.37504222989082336,
+        0.49953246116638184,
+        0.8912320733070374,
+        0.44674569368362427,
+        0.441939115524292,
+        0.32914334535598755,
+        0.2381993979215622,
+        0.10873106867074966,
+        0.37504222989082336
+      ],
+      "max_height_m": 0.8912320733070374,
+      "min_height_m": 0.10873106867074966,
+      "orientation_control_knots_xyzw": [
+        [
+          0.3419421911239624,
+          -0.225476935505867,
+          0.40282830595970154,
+          0.8185139298439026
+        ],
+        [
+          -0.48403939604759216,
+          -0.6374720931053162,
+          -0.18744957447052002,
+          0.5693837404251099
+        ],
+        [
+          -0.3229049742221832,
+          -0.8617205023765564,
+          0.3644368052482605,
+          0.14267414808273315
+        ],
+        [
+          -0.36683303117752075,
+          -0.3763037621974945,
+          0.721386194229126,
+          -0.45103317499160767
+        ],
+        [
+          -0.05727081373333931,
+          -0.3500085473060608,
+          0.7437459230422974,
+          0.5666180849075317
+        ],
+        [
+          0.4034271240234375,
+          -0.8959325551986694,
+          -0.06517531722784042,
+          0.17407934367656708
+        ],
+        [
+          0.3137878477573395,
+          -0.717612624168396,
+          -0.45691677927970886,
+          -0.42165908217430115
+        ],
+        [
+          0.016842689365148544,
+          -0.605964183807373,
+          -0.7850619554519653,
+          -0.12728507816791534
+        ],
+        [
+          -0.3419421911239624,
+          0.225476935505867,
+          -0.40282830595970154,
+          -0.8185139298439026
+        ]
+      ],
+      "path_length_m": 9.088172912597656,
+      "phase_rad": 0.7684648001067487,
+      "seed": 20281025,
+      "time_law_points": 401,
+      "trajectory_id": "random-circle-011"
+    },
+    {
+      "center_xy_m": [
+        -2.417045456110782,
+        -1.6417967765068768
+      ],
+      "circle_radius_m": 2.212265675320026,
+      "content_sha256": "d8db20fb1137bf2d05cb0d0d3c0e93ba0f65ceaf87336e3f2a9666fe97b336fd",
+      "direction": "clockwise",
+      "duration_s": 81.11588287353516,
+      "family": "circle",
+      "gamma_points": 721,
+      "height_control_knots_m": [
+        0.2645246088504791,
+        0.7017041444778442,
+        0.3776353597640991,
+        0.9753936529159546,
+        0.6068329215049744,
+        0.3657569885253906,
+        0.24489742517471313,
+        0.7366243600845337,
+        0.2645246088504791
+      ],
+      "max_height_m": 0.9753936529159546,
+      "min_height_m": 0.24489742517471313,
+      "orientation_control_knots_xyzw": [
+        [
+          0.007818345911800861,
+          0.21948808431625366,
+          0.9601022005081177,
+          -0.1731116771697998
+        ],
+        [
+          0.07096624374389648,
+          0.5764500498771667,
+          0.685318648815155,
+          -0.4393261969089508
+        ],
+        [
+          0.651677668094635,
+          -0.14392271637916565,
+          0.3959680497646332,
+          -0.6307231783866882
+        ],
+        [
+          -0.28592759370803833,
+          -0.7084177732467651,
+          0.16056662797927856,
+          -0.6249864101409912
+        ],
+        [
+          -0.8173479437828064,
+          -0.3144584596157074,
+          -0.058695171028375626,
+          0.47917962074279785
+        ],
+        [
+          0.42477497458457947,
+          0.08996612578630447,
+          -0.05827128142118454,
+          0.8989309072494507
+        ],
+        [
+          0.10693582892417908,
+          -0.8096747994422913,
+          -0.2325301617383957,
+          0.5281298756599426
+        ],
+        [
+          -0.4444752037525177,
+          -0.5591312646865845,
+          0.6998118162155151,
+          -0.008797678165137768
+        ],
+        [
+          0.007818345911800861,
+          0.21948808431625366,
+          0.9601022005081177,
+          -0.1731116771697998
+        ]
+      ],
+      "path_length_m": 14.666626930236816,
+      "phase_rad": 0.5516255221527437,
+      "seed": 20281035,
+      "time_law_points": 401,
+      "trajectory_id": "random-circle-012"
+    },
+    {
+      "center_xy_m": [
+        0.08387662566428267,
+        1.2666143521360236
+      ],
+      "circle_radius_m": 2.326708221464782,
+      "content_sha256": "f630255b43e9dadc115292d6c708883d88a59731bed2df823169fd9ee8c36a5b",
+      "direction": "counterclockwise",
+      "duration_s": 48.400352478027344,
+      "family": "circle",
+      "gamma_points": 721,
+      "height_control_knots_m": [
+        0.9984130263328552,
+        0.7477193474769592,
+        0.5178372263908386,
+        0.8680282235145569,
+        0.42223790287971497,
+        0.5372672080993652,
+        0.2536311447620392,
+        0.6525302529335022,
+        0.9984130263328552
+      ],
+      "max_height_m": 0.9984130263328552,
+      "min_height_m": 0.2536311447620392,
+      "orientation_control_knots_xyzw": [
+        [
+          -0.5090958476066589,
+          0.04202967509627342,
+          0.7729449272155762,
+          0.3763124346733093
+        ],
+        [
+          -0.09957227855920792,
+          -0.37372496724128723,
+          0.830505907535553,
+          0.4008428156375885
+        ],
+        [
+          0.8367509245872498,
+          -0.3896605968475342,
+          0.35545650124549866,
+          0.1471841186285019
+        ],
+        [
+          -0.05301421508193016,
+          0.08990245312452316,
+          0.9115309715270996,
+          0.397766649723053
+        ],
+        [
+          0.5723605155944824,
+          0.500519335269928,
+          0.5898234844207764,
+          -0.27201494574546814
+        ],
+        [
+          0.620414674282074,
+          -0.19813048839569092,
+          0.16393528878688812,
+          -0.740915060043335
+        ],
+        [
+          0.20350465178489685,
+          -0.4492262601852417,
+          -0.6234791278839111,
+          -0.6066756844520569
+        ],
+        [
+          -0.011456120759248734,
+          -0.7576497197151184,
+          -0.5207677483558655,
+          0.3932386040687561
+        ],
+        [
+          0.5090958476066589,
+          -0.04202967509627342,
+          -0.7729449272155762,
+          -0.3763124346733093
+        ]
+      ],
+      "path_length_m": 15.145282745361328,
+      "phase_rad": -1.899405389731154,
+      "seed": 20281045,
+      "time_law_points": 401,
+      "trajectory_id": "random-circle-013"
+    },
+    {
+      "center_xy_m": [
+        0.8702691701950731,
+        1.020081082811262
+      ],
+      "circle_radius_m": 0.8739558155705324,
+      "content_sha256": "e2497bc22ac3db8f1b0b6272740a62abd3a5ff362e0ce377707ae080245f3f8f",
+      "direction": "counterclockwise",
+      "duration_s": 23.86147117614746,
+      "family": "circle",
+      "gamma_points": 721,
+      "height_control_knots_m": [
+        0.24324944615364075,
+        0.15521667897701263,
+        0.398921400308609,
+        0.29787665605545044,
+        0.48697900772094727,
+        0.2865423262119293,
+        0.9047337770462036,
+        0.6411723494529724,
+        0.24324944615364075
+      ],
+      "max_height_m": 0.9047337770462036,
+      "min_height_m": 0.15521667897701263,
+      "orientation_control_knots_xyzw": [
+        [
+          0.8753888010978699,
+          0.03253685683012009,
+          -0.4587232768535614,
+          -0.1490260511636734
+        ],
+        [
+          0.22437074780464172,
+          0.1957743614912033,
+          -0.41012895107269287,
+          0.8620466589927673
+        ],
+        [
+          0.1281055063009262,
+          0.8743765354156494,
+          -0.4680294692516327,
+          -0.0017632959643378854
+        ],
+        [
+          -0.4002116918563843,
+          0.08229756355285645,
+          -0.627548336982727,
+          0.6627523899078369
+        ],
+        [
+          0.6397661566734314,
+          0.3408186733722687,
+          -0.47641459107398987,
+          0.4975651204586029
+        ],
+        [
+          0.8741440176963806,
+          -0.028783459216356277,
+          0.48338305950164795,
+          -0.03720966354012489
+        ],
+        [
+          0.780815839767456,
+          0.3712994158267975,
+          0.40434497594833374,
+          0.298275887966156
+        ],
+        [
+          0.8455382585525513,
+          0.33183741569519043,
+          -0.13563010096549988,
+          -0.39566829800605774
+        ],
+        [
+          0.8753888010978699,
+          0.03253685683012009,
+          -0.4587232768535614,
+          -0.1490260511636734
+        ]
+      ],
+      "path_length_m": 6.668128967285156,
+      "phase_rad": -2.1175240842963388,
+      "seed": 20281055,
+      "time_law_points": 401,
+      "trajectory_id": "random-circle-014"
+    },
+    {
+      "center_xy_m": [
+        -2.0681640935727392,
+        -1.3398686272703348
+      ],
+      "circle_radius_m": 1.675834531929126,
+      "content_sha256": "f81cef5c70ca2e92f3bdf82e6864c3b2e75a69ee02325788b365f555be8f38b2",
+      "direction": "counterclockwise",
+      "duration_s": 41.0130729675293,
+      "family": "circle",
+      "gamma_points": 721,
+      "height_control_knots_m": [
+        0.3473154902458191,
+        0.8745662569999695,
+        0.14860382676124573,
+        0.2498040348291397,
+        0.1687835454940796,
+        0.7176988124847412,
+        0.18613210320472717,
+        0.4618260860443115,
+        0.3473154902458191
+      ],
+      "max_height_m": 0.8745662569999695,
+      "min_height_m": 0.14860382676124573,
+      "orientation_control_knots_xyzw": [
+        [
+          0.2535007894039154,
+          -0.24897095561027527,
+          0.20453912019729614,
+          -0.9120935201644897
+        ],
+        [
+          -0.26091909408569336,
+          0.8378919363021851,
+          0.43260130286216736,
+          -0.2066746950149536
+        ],
+        [
+          -0.024892834946513176,
+          -0.12834486365318298,
+          0.9586623907089233,
+          -0.25273388624191284
+        ],
+        [
+          -0.48206549882888794,
+          -0.3936271071434021,
+          0.5728650093078613,
+          0.5333819389343262
+        ],
+        [
+          -0.5938981771469116,
+          0.31958556175231934,
+          0.4565712809562683,
+          -0.5802522301673889
+        ],
+        [
+          -0.7851840257644653,
+          -0.20858949422836304,
+          0.29007381200790405,
+          -0.5058000087738037
+        ],
+        [
+          -0.22667011618614197,
+          -0.8996681571006775,
+          0.13628998398780823,
+          -0.34733694791793823
+        ],
+        [
+          -0.2322254627943039,
+          -0.4938909113407135,
+          0.6731744408607483,
+          0.49897822737693787
+        ],
+        [
+          -0.2535007894039154,
+          0.24897095561027527,
+          -0.20453912019729614,
+          0.9120935201644897
+        ]
+      ],
+      "path_length_m": 11.586776733398438,
+      "phase_rad": 0.3781908294497387,
+      "seed": 20281065,
+      "time_law_points": 401,
+      "trajectory_id": "random-circle-015"
+    }
+  ]
+}
