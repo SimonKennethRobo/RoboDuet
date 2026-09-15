@@ -55,6 +55,49 @@ MAX_LINE_LENGTH_M = 3.0
 MAX_CIRCLE_RADIUS_M = 3.0
 LAMBDA_M_PER_RAD = 0.15
 
+# ---------------------------------------------------------------------------
+# Time-law configuration
+# ---------------------------------------------------------------------------
+# These are the user-facing timing knobs for this library builder.  Speeds and
+# accelerations use the benchmark's metre-equivalent SE(3) arc coordinate.
+# ``T`` is a minimum duration; long or highly curved paths are automatically
+# stretched to satisfy the configured limits. ``f_max``/``n_freqs`` control
+# the random speed modulation, while ``min_speed_fraction`` sets its floor.
+# Edit these dictionaries when generating a new frozen library; existing
+# frozen artifacts are intentionally never modified in place.
+
+CURRICULUM_EASY_TIMING = {
+    "f_max": 0.10,
+    "v_max": 0.25,
+    "a_max": 0.20,
+    "linear_a_max": 0.75,
+    "T": 8.0,
+    "dt": 0.02,
+    "n_freqs": 6,
+    "min_speed_fraction": 0.25,
+}
+
+CURRICULUM_HARD_TIMING = {
+    "f_max": 0.40,
+    "v_max": 0.75,
+    "a_max": 1.20,
+    "linear_a_max": 2.50,
+    "T": 8.0,
+    "dt": 0.02,
+    "n_freqs": 6,
+    "min_speed_fraction": 0.25,
+}
+
+RANDOM_PRIMITIVE_TIMING = {
+    "f_max": 0.10,
+    "v_max": 0.35,
+    "a_max": 0.40,
+    "T": 8.0,
+    "dt": 0.02,
+    "n_freqs": 6,
+    "min_speed_fraction": 0.25,
+}
+
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -216,8 +259,7 @@ def _make_primitive(
     s_m, tangent = _arc_parameterize(position, quat)
     path_length = float(s_m[-1])
     timing = TimingGenerator().generate(
-        path_length, f_max=0.10, v_max=0.35, T=8.0, dt=0.02,
-        seed=seed + 1_000_000, a_max=0.40,
+        path_length, seed=seed + 1_000_000, **RANDOM_PRIMITIVE_TIMING
     )
     p = position
     q = quat
@@ -263,7 +305,15 @@ def _generate_grid(
     for a in range(levels_a):
         for b in range(levels_b):
             row = a * levels_b + b
-            geometry, timing_parameters = curriculum.params_for_cell(a, b)
+            geometry, _default_timing = curriculum.params_for_cell(a, b)
+            alpha_b = b / max(1, levels_b - 1)
+            timing_parameters = {
+                key: (
+                    CURRICULUM_EASY_TIMING[key]
+                    + (CURRICULUM_HARD_TIMING[key] - CURRICULUM_EASY_TIMING[key]) * alpha_b
+                )
+                for key in CURRICULUM_EASY_TIMING
+            }
             geometry_seed = seed + row
             timing_seed = seed + 100_000 + row
             gamma, timing = factory.generate(

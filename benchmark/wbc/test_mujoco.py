@@ -157,6 +157,14 @@ def test_frozen_reference_checks_hashes_and_applies_anchor(tmp_path):
     assert quaternion == pytest.approx([0.0, 0.0, 0.0, 1.0])
 
 
+def test_frozen_reference_rolling_window_has_fixed_size_and_holds_endpoint(tmp_path):
+    reference = FrozenReference(_write_suite(tmp_path))
+    times, poses = reference.rolling_window(0.8, horizon_s=1.0, sample_dt_s=0.2)
+    np.testing.assert_allclose(times, [0.8, 1.0, 1.2, 1.4, 1.6, 1.8])
+    assert poses.shape == (6, 7)
+    np.testing.assert_allclose(poses[1:, :3], [[3.0, -1.0, 0.5]] * 5, atol=1e-7)
+
+
 def test_progress_projection_is_monotonic_and_window_bounded(tmp_path):
     reference = FrozenReference(_write_suite(tmp_path))
     arc, lateral = _forward_project(

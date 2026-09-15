@@ -246,6 +246,19 @@ class FrozenReference:
             [np.concatenate(self.at(knot_time)[1:]) for knot_time in self.tl_t]
         ).astype(np.float32)
 
+    def rolling_window(
+        self, start_time_s: float, horizon_s: float, sample_dt_s: float
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Sample one fixed-size, forward-moving task-time reference window."""
+        if horizon_s <= 0.0 or sample_dt_s <= 0.0:
+            raise ValueError("reference window horizon and sample dt must be positive")
+        intervals = max(1, int(round(horizon_s / sample_dt_s)))
+        times = float(start_time_s) + np.linspace(0.0, horizon_s, intervals + 1)
+        poses = np.stack([
+            np.concatenate(self.at(time_s)[1:]) for time_s in times
+        ]).astype(np.float32)
+        return times.astype(np.float64), poses
+
     def at(self, time_s: float):
         time_s = float(np.clip(time_s, 0.0, self.duration))
         arc = float(np.interp(time_s, self.tl_t, self.tl_s))
@@ -499,12 +512,11 @@ def run(args) -> Tuple[Path, dict]:
             command_mode=args.ocs2_command_mode,
             task_profile=args.ocs2_task_profile,
             base_height_target=float(sim.p.get("base_height_target", 0.3)),
-            task_file=getattr(sim, "task_file", None),
+            task_file=args.ocs2_task_file or getattr(sim, "task_file", None),
             arm_plan=args.policy_adapter == "ma2022",
         )
         transport.reset_task()
         atexit.register(transport.close)
-        reference_poses = reference.timed_poses()
     if args.viewer:
         from mujoco import viewer as mj_viewer  # pylint: disable=import-outside-toplevel
 
@@ -541,10 +553,13 @@ def run(args) -> Tuple[Path, dict]:
                 leg_q=q[:12],
                 leg_dq=dq[:12],
             )
+            window_times, window_poses = reference.rolling_window(
+                step * policy_dt,
+                args.ocs2_reference_window_s,
+                args.ocs2_reference_window_dt_s,
+            )
             mpc_command = transport.exchange(
-                state_payload,
-                reference.tl_t if step == 0 else None,
-                reference_poses if step == 0 else None,
+                state_payload, window_times, window_poses,
             )
             base_feedforward = _set_mpc_dog_command(sim, mpc_command)
             if hasattr(sim, "set_mpc_command"):
@@ -913,6 +928,12 @@ def run(args) -> Tuple[Path, dict]:
             "bridge_core_sha256": _sha256(Path(args.ocs2_root) / "go2_x5_ocs2_bridge/src/WbcBridgeCore.cpp"),
             "arm_plan_serializer_sha256": _sha256(Path(args.ocs2_root) / "go2_x5_ocs2_bridge/include/wbc_bridge/arm_plan_publisher.hpp"),
             "complete_reference_knots": int(len(reference.tl_t)),
+            "reference_delivery": "fixed_horizon_forward_window_every_step",
+            "reference_window_s": args.ocs2_reference_window_s,
+            "reference_window_dt_s": args.ocs2_reference_window_dt_s,
+            "reference_window_knots": int(round(
+                args.ocs2_reference_window_s / args.ocs2_reference_window_dt_s
+            )) + 1,
             "runtime_stats": transport.runtime_stats,
             "runner_source": {
                 "path": str(transport.runner_source),
@@ -974,7 +995,10 @@ def main():
     )
     parser.add_argument("--ocs2-timeout-s", type=float, default=90.0)
     parser.add_argument("--ocs2-command-timeout-s", type=float, default=0.5)
+    parser.add_argument("--ocs2-reference-window-s", type=float, default=1.0)
+    parser.add_argument("--ocs2-reference-window-dt-s", type=float, default=0.02)
     parser.add_argument("--ocs2-task-profile", choices=("native_ideal", "legacy_benchmark"), default="native_ideal")
+    parser.add_argument("--ocs2-task-file")
     parser.add_argument("--arm-max-speed", type=float, default=1.5)
     parser.add_argument(
         "--ocs2-command-mode", choices=("full", "pose_only"), default="full"

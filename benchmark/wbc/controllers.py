@@ -182,7 +182,7 @@ def encode_ocs2_request(
     reference_poses_xyz_xyzw=None,
     gait_phase_rad=None,
 ) -> bytes:
-    """Pack one state request and, on task reset, the complete SE(3) reference."""
+    """Pack one state request and an optional task-time SE(3) reference window."""
     state = _StateMsg.from_buffer_copy(state_payload)
     header = _BenchmarkRequestHeader()
     header.state = state
@@ -700,7 +700,7 @@ class FloatingBaseOcs2MpcController:
                     "asynchronous_cached_command" if is_async else "exact"
                 ),
                 "solver_threads": 1,
-                "reference_delivery": "complete_task_trajectory_on_sequence_zero",
+                "reference_delivery": "fixed_horizon_forward_window_every_step",
                 "reference_time_frame": "task_relative_simulator_time",
                 "steady_state_command_timeout_s": (
                     self.transport.command_timeout_s if is_async else None
