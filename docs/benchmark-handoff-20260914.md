@@ -12,8 +12,9 @@ RoboDuetRaw 的同类运行修复见第 29 节；A0/B0 底盘不动的后续修�
 切向 yaw 与共用全向 waypoint PID；第 28–30 节的旧跟随规则作为历史保留。
 
 `frozen_trajectory_library2` 的 A5/B3 跟随诊断见第 32 节；Visual/Raw 提交与
-仓库边界见第 33 节，MA2022 的最新修复见第 34 节。对于本轮 learned baseline
-工作，以第 31–34 节为准，第 0 节的早期 HEAD 和未提交文件清单仅作历史记录。
+仓库边界见第 33 节，MA2022 和 UMI-on-Legs 的最新修复分别见第 34、35 节。
+对于本轮 learned baseline 工作，以第 31–35 节为准，第 0 节的早期 HEAD 和
+未提交文件清单仅作历史记录。
 
 部署仓库：`/home/simon/Projects/Simon/wbc_rl_mpc/rl_sar`。
 
@@ -1266,3 +1267,43 @@ A0/B0 另生成离线视频与 tracking plot，位于
 Xvfb viewer 25-step smoke 也正常退出。最终公共 contract/MuJoCo/adapter/library
 相关选择共 `61 passed`，另有 IsaacGym 自带 `np.float` 弃用 warning；
 `py_compile` 与 `git diff --check` 通过。
+
+## 35. 2026-09-15 UMI-on-Legs 冻结轨迹库运行修复
+
+UMI 旧 adapter 虽已恢复 96D 字段数量、preview 位置/旋转分组和逐关节延迟，
+但 checkpoint 实际 observation 仍被错误排列。原 `IsaacGymEnv` 会按字段名排序，
+真实顺序为 `dof_pos, dof_vel, local_root_gravity, root_ang_vel`；旧 mirror 使用
+`gyro, gravity, dof_pos, dof_vel`。该错误不改变总维数，因而旧 shape test 无法
+发现。修正并恢复 checkpoint 配置中的 torque limits 后，静止目标探针从 27 步
+跌倒变为完整 250 步，最低 upright 为 0.733。
+
+共同 X5 plant 与训练用 Go2+ARX5 finray 的工具坐标系相差约 120 度且有固定
+平移。新增显式 `arx5_home` 工具帧适配，将共同 `x5_ee` 相对 preview pose 通过
+`T_umi_ee_x5_ee` 共轭后再送入原 actor；scorer 仍只读取未改变的 `x5_ee` 世界
+轨迹。变换矩阵、训练 URDF/hash 和 adapter 设置均写入 receipt。原 actor 在异构
+plant 上会输出峰值超过 13 的 OOD action，而训练上限为 100；冻结库入口显式采用
+腿 0.25、机械臂 4.0 的 common-plant transfer guard。native 无 guard 对照仍保留
+为失败证据，不能将 guarded 结果称为原资产逐拍复现。
+
+新增入口：
+
+```bash
+cd /home/simon/Projects/Simon/wbc_rl_mpc
+./run_umi_on_legs_library.sh --viewer --cell 0 0
+./run_umi_on_legs_library.sh --viewer --cell 2 2
+./run_umi_on_legs_library.sh --viewer --trajectory random-circle-009
+```
+
+`ours-real` checkpoint、A0/B0 的 guarded 结果完整运行 935 步、无跌倒/数值故障，
+位置 RMSE 0.143 m；修复前同任务 25 步跌倒。离线视频中段 EE 误差约 0.132 m，
+可确认机械臂实际运动并大致跟随。A2/B2、随机直线 000 和随机圆 009 也分别完成
+497、908、1029 步且无跌倒，但位置 RMSE 分别为 1.793、1.301、0.628 m；前两条
+不能称为大致跟随或方法成功。`random-trajs` checkpoint 的四条平均位置 RMSE
+较低，但仍未解决长程跟随，因此未替换既有 `ours-real` 默认。
+
+主要结果位于 `benchmark/results/umi_repair_20260915/representative_final/`；A0/B0
+视频与图位于 `a0b0_video_final/20260915_195514/nominal/`。Xvfb viewer 25-step smoke
+正常退出；公共 contract/MuJoCo/adapter/library 相关选择共 `63 passed`，
+`py_compile` 与 `git diff --check` 通过。该修复是有 provenance 的共同 plant
+运行适配，不是 UMI-on-Legs 原 IsaacGym/ARX5 论文复现认证，也没有达到冻结
+benchmark 的 tracking success。

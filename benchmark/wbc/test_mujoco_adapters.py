@@ -8,7 +8,7 @@ import torch
 
 from benchmark.wbc.dwbc_mujoco import DwbcMujoco, VISUAL_POLICY_ORDER
 from benchmark.wbc.mujoco import JOINT_NAMES, joint_order_indices, _set_mpc_dog_command, configure_position_drives
-from benchmark.wbc.umi_mujoco import UmiMujoco
+from benchmark.wbc.umi_mujoco import UMI_TO_X5_HOME, UmiMujoco
 from benchmark.wbc.wb_locoman_mujoco import WbLocomanMujoco
 from scripts.rl_sar_obs import RlSarObservation, effective_gait_frequency
 
@@ -131,8 +131,15 @@ def test_umi_future_positions_precede_all_rotations(plant):
     sim.action_buffer = np.zeros((2, 18))
     sim.action_clip = 100.
     sim.actor = CaptureActor()
-    sim.forward(np.zeros(18), np.zeros(18), np.array([0., 0., 0., 1.]), np.zeros(3), np.zeros(3), np.zeros(3))
+    q = np.arange(18.) * .01
+    dq = np.arange(18.) * .1
+    gyro = np.array([.1, .2, .3])
+    sim.forward(q, dq, np.array([0., 0., 0., 1.]), gyro, np.zeros(3), np.zeros(3))
     obs = sim.actor.observations[0][0]
+    np.testing.assert_allclose(obs[:18], q)
+    np.testing.assert_allclose(obs[18:36], dq * .05)
+    np.testing.assert_allclose(obs[36:39], [0., 0., -1.])
+    np.testing.assert_allclose(obs[39:42], gyro * .25)
     np.testing.assert_allclose(obs[42:54], np.array([[t, 2*t, -t] for t in sim.target_offsets]).ravel() * 3)
     np.testing.assert_allclose(obs[54:78], np.tile([1.5, 0., 0., 0., 1.5, 0.], 4))
 
@@ -147,6 +154,50 @@ def test_umi_joint_specific_delay_uses_original_decimation_formula():
     np.testing.assert_array_equal(sim.control_targets(0), np.ones(18))
     np.testing.assert_array_equal(sim.control_targets(2), np.ones(18))
     np.testing.assert_array_equal(sim.control_targets(3), [1.] * 12 + [2.] * 6)
+
+
+def test_umi_transfer_action_limit_is_explicit():
+    sim = UmiMujoco.__new__(UmiMujoco)
+    sim.reference = SimpleNamespace(at=lambda _t: (0., np.zeros(3), np.array([0., 0., 0., 1.])))
+    sim.reference_time = 0.
+    sim.default_dof_pos = np.zeros(18)
+    sim.target_offsets = [0.] * 4
+    sim.position_scale = sim.orientation_scale = 1.
+    sim.pose_latency_frames = 2
+    sim.pose_history = [(np.zeros(3), np.eye(3))]
+    sim.actions = np.zeros(18)
+    sim.action_buffer = np.zeros((2, 18))
+    sim.action_clip = 100.
+    sim.transfer_action_limits = np.r_[[1.] * 12, [2.] * 6]
+    sim.actor = lambda _obs: torch.full((1, 18), 7.)
+    result = sim.forward(np.zeros(18), np.zeros(18), np.array([0., 0., 0., 1.]),
+                         np.zeros(3), np.zeros(3), np.zeros(3))
+    np.testing.assert_array_equal(result, np.r_[[1.] * 12, [2.] * 6])
+
+
+def test_umi_arx5_tool_frame_conjugates_common_relative_pose():
+    sim = UmiMujoco.__new__(UmiMujoco)
+    sim.reference_time = 0.
+    sim.default_dof_pos = np.zeros(18)
+    sim.target_offsets = [0.] * 4
+    sim.position_scale = sim.orientation_scale = 1.
+    sim.pose_latency_frames = 2
+    sim.pose_history = [(np.zeros(3), np.eye(3))]
+    target = np.array([.1, .2, .3])
+    sim.reference = SimpleNamespace(at=lambda _t: (0., target, np.array([0., 0., 0., 1.])))
+    sim.actions = np.zeros(18)
+    sim.action_buffer = np.zeros((2, 18))
+    sim.action_clip = 100.
+    sim.tool_frame = "arx5_home"
+    sim.actor = CaptureActor()
+    sim.forward(np.zeros(18), np.zeros(18), np.array([0., 0., 0., 1.]),
+                np.zeros(3), np.zeros(3), np.zeros(3))
+    common_relative = np.eye(4)
+    common_relative[:3, 3] = target
+    expected = UMI_TO_X5_HOME @ common_relative @ np.linalg.inv(UMI_TO_X5_HOME)
+    obs = sim.actor.observations[0][0]
+    np.testing.assert_allclose(obs[42:54], np.tile(expected[:3, 3], 4), atol=1e-7)
+    np.testing.assert_allclose(obs[54:78], np.tile(expected[:2, :3].reshape(-1), 4), atol=1e-7)
 
 
 def test_wb_locoman_feedback_changes_between_mpc_updates():

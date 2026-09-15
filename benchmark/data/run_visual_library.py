@@ -18,6 +18,8 @@ VISUAL = STACK / "baselines/visual_wholebody"
 CHECKPOINT = VISUAL / "low-level/logs/go2x5-visual-low/go2x5_low_v6_velocity_curriculum_tb_resume1000/model_24000.pt"
 MA2022_DEPLOYMENT = STACK / "rl_sar/deploy/ma2022"
 MA2022_BUNDLE = STACK / "rl_sar/policy/go2_x5/ma2022_student"
+UMI = STACK / "baselines/umi-on-legs/mani-centric-wbc"
+UMI_CHECKPOINT = UMI / "checkpoints/tossing/ours-real/model.pt"
 sys.path.insert(0, str(REPO))
 
 from benchmark.wbc.mujoco import FrozenReference, _sha256
@@ -58,7 +60,7 @@ def stop_process(process):
 
 
 def main(argv=None, *, method="visual"):
-    if method not in ("visual", "roboduet_raw", "ma2022"):
+    if method not in ("visual", "roboduet_raw", "ma2022", "umi"):
         raise ValueError(f"Unsupported library playback method: {method}")
     parser = argparse.ArgumentParser(description=f"Play {method} on the existing frozen library TaskSpecs.")
     parser.add_argument("--library", type=Path, default=REPO / "benchmark/data/frozen_trajectory_library2")
@@ -70,6 +72,11 @@ def main(argv=None, *, method="visual"):
     elif method == "roboduet_raw":
         parser.add_argument("--run-root", type=Path, default=RAW_BUNDLE_ROOT.parent)
         parser.add_argument("--target-mode", choices=("bounded", "native"), default="bounded")
+    elif method == "umi":
+        parser.add_argument("--checkpoint", type=Path, default=UMI_CHECKPOINT)
+        parser.add_argument("--leg-action-limit", type=float, default=.25)
+        parser.add_argument("--arm-action-limit", type=float, default=4.)
+        parser.add_argument("--tool-frame", choices=("native_x5", "arx5_home"), default="arx5_home")
     parser.add_argument("--cell", type=int, nargs=2, action="append", metavar=("A", "B"))
     parser.add_argument("--trajectory", action="append", help="Source name or TaskSpec ID; repeat to select several.")
     parser.add_argument("--list", action="store_true", help="List all library trajectories without simulating.")
@@ -84,6 +91,8 @@ def main(argv=None, *, method="visual"):
     args = parser.parse_args(argv)
     if args.max_tasks < 0 or args.max_steps < 0 or args.wall_timeout_s <= 0 or not 0 < args.playback_speed <= 1:
         parser.error("Step/task limits must be nonnegative and timeout positive")
+    if method == "umi" and (args.leg_action_limit < 0 or args.arm_action_limit < 0):
+        parser.error("UMI transfer action limits must be nonnegative")
     library = args.library.resolve()
     suite_path = library / "suite/trajectory_suite.json"
     suite = json.loads(suite_path.read_text())
@@ -122,7 +131,7 @@ def main(argv=None, *, method="visual"):
             "--raw-base-mode", args.base_mode, "--raw-target-mode", args.target_mode]
         policy_settings = dict(run_root=str(run_root), target_mode=args.target_mode,
                                base_mode=args.base_mode)
-    else:
+    elif method == "ma2022":
         checkpoint = MA2022_BUNDLE / "student_policy.pt"
         env_config = MA2022_BUNDLE / "env_cfg.json"
         deployment_config = MA2022_DEPLOYMENT / "config.yaml"
@@ -150,6 +159,24 @@ def main(argv=None, *, method="visual"):
             ocs2_transport="synchronous",
             ocs2_task_profile="native_ideal",
             ocs2_command_mode="full",
+        )
+    else:
+        checkpoint = args.checkpoint.resolve()
+        required = [checkpoint, checkpoint.with_name("config.pkl")]
+        policy_arguments = [
+            "--rl-sar-root", str(STACK / "rl_sar"),
+            "--policy-key", "unused",
+            "--policy-adapter", "umi",
+            "--umi-checkpoint", str(checkpoint),
+            "--umi-leg-action-limit", str(args.leg_action_limit),
+            "--umi-arm-action-limit", str(args.arm_action_limit),
+            "--umi-tool-frame", args.tool_frame,
+        ]
+        policy_settings = dict(
+            leg_action_limit=args.leg_action_limit,
+            arm_action_limit=args.arm_action_limit,
+            tool_frame=args.tool_frame,
+            common_plant_transfer=True,
         )
     missing = [str(path) for path in required if not path.is_file()]
     if missing:

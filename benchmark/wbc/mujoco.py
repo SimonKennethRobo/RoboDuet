@@ -436,7 +436,10 @@ def run(args) -> Tuple[Path, dict]:
     elif args.policy_adapter == "umi":
         from benchmark.wbc.umi_mujoco import UmiMujoco  # pylint: disable=import-outside-toplevel
 
-        sim = UmiMujoco(args.umi_checkpoint, scene)
+        sim = UmiMujoco(args.umi_checkpoint, scene,
+                        leg_action_limit=args.umi_leg_action_limit,
+                        arm_action_limit=args.umi_arm_action_limit,
+                        tool_frame=args.umi_tool_frame)
     elif args.policy_adapter == "visual":
         from benchmark.wbc.visual_mujoco import VisualMujoco
 
@@ -906,7 +909,12 @@ def run(args) -> Tuple[Path, dict]:
             "model_sha256": _sha256(Path(args.umi_checkpoint)),
             "training_config_sha256": _sha256(sim.config_path),
             "training_robot_asset": sim.training_config["cfg"]["asset"]["file"],
+            "training_robot_asset_sha256": _sha256(sim.training_asset_path),
             "common_plant_transfer": True,
+            "transfer_action_limits": sim.transfer_action_limits.tolist(),
+            "training_action_limit": sim.action_clip,
+            "tool_frame_adapter": sim.tool_frame,
+            "umi_to_x5_home_transform": sim.tool_transform.tolist(),
             "adapter_sha256": _sha256(Path(__file__).with_name("umi_mujoco.py")),
         } if args.policy_adapter == "umi" else {
             "adapter": ("visual_wholebody_checkpoint" if args.policy_adapter == "visual"
@@ -1058,6 +1066,11 @@ def main():
     parser.add_argument("--visual-base-mode", choices=("follow", "stand"), default="follow")
     parser.add_argument("--visual-action-delay", type=int, choices=(0, 1), default=0)
     parser.add_argument("--umi-checkpoint")
+    parser.add_argument("--umi-leg-action-limit", type=float, default=0.0,
+                        help="Explicit common-plant leg-action clamp; 0 preserves the training limit.")
+    parser.add_argument("--umi-arm-action-limit", type=float, default=0.0,
+                        help="Explicit common-plant arm-action clamp; 0 preserves the training limit.")
+    parser.add_argument("--umi-tool-frame", choices=("native_x5", "arx5_home"), default="native_x5")
     parser.add_argument("--scene", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--seed", type=int, default=0)
