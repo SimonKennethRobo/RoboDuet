@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import argparse
 import hashlib
+import json
 from pathlib import Path
 
 import imageio.v2 as imageio
@@ -181,3 +183,25 @@ def render_trace_artifacts(trace_path, scene_path, output_dir, *, method: str,
                   "fps": fps, "width": width, "height": height},
         "trajectory_plot": {"path": str(plot_path), "sha256": _sha256(plot_path)},
     }
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--trace", required=True)
+    parser.add_argument("--scene", required=True)
+    parser.add_argument("--output", required=True)
+    parser.add_argument("--method", required=True)
+    parser.add_argument("--scenario", required=True)
+    parser.add_argument("--fps", type=int, default=25)
+    parser.add_argument("--width", type=int, default=960)
+    parser.add_argument("--height", type=int, default=540)
+    args = parser.parse_args(argv)
+    artifacts = render_trace_artifacts(
+        args.trace, args.scene, args.output, method=args.method,
+        scenario=args.scenario, fps=args.fps, width=args.width, height=args.height,
+    )
+    print(json.dumps(artifacts))
+
+
+if __name__ == "__main__":
+    main()

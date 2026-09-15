@@ -244,9 +244,6 @@ def _normalize_results(output: Path, roboduet_root: Path) -> list[dict]:
 def _render_results(output: Path, results: list[dict], args, scene: Path) -> list[dict]:
     if not args.record_video:
         return results
-    os.environ.setdefault("MUJOCO_GL", "egl")
-    from benchmark.wbc.mujoco_video import render_trace_artifacts
-
     updated = []
     for receipt in results:
         scenario = receipt.get("scenario")
@@ -254,11 +251,26 @@ def _render_results(output: Path, results: list[dict], args, scene: Path) -> lis
             schedule = receipt.get("disturbance_schedule", [])
             scenario = "push" if schedule else "nominal"
         scenario_dir = output / scenario
-        receipt["visual_artifacts"] = render_trace_artifacts(
-            scenario_dir / "trace.npz", scene, scenario_dir,
-            method=args.method, scenario=scenario, fps=args.video_fps,
-            width=args.video_width, height=args.video_height,
+        command = [
+            str(Path(args.video_python).resolve()), "-m", "benchmark.wbc.mujoco_video",
+            "--trace", str(scenario_dir / "trace.npz"), "--scene", str(scene),
+            "--output", str(scenario_dir), "--method", args.method,
+            "--scenario", scenario, "--fps", str(args.video_fps),
+            "--width", str(args.video_width), "--height", str(args.video_height),
+        ]
+        environment = os.environ.copy()
+        environment["MUJOCO_GL"] = "egl"
+        completed = subprocess.run(
+            command, cwd=Path(__file__).resolve().parents[2], env=environment,
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
         )
+        (scenario_dir / "video_render.log").write_text(completed.stderr)
+        if completed.returncode:
+            raise RuntimeError(
+                f"video rendering exited {completed.returncode}; "
+                f"see {scenario_dir / 'video_render.log'}"
+            )
+        receipt["visual_artifacts"] = json.loads(completed.stdout)
         _write_json(scenario_dir / "receipt.json", receipt)
         updated.append(receipt)
     _write_json(output / "results.json", updated)
@@ -544,6 +556,7 @@ def main(argv=None):
     parser.add_argument("--video-fps", type=int, default=25)
     parser.add_argument("--video-width", type=int, default=960)
     parser.add_argument("--video-height", type=int, default=540)
+    parser.add_argument("--video-python", default="/opt/miniconda3/envs/base312/bin/python")
     args = parser.parse_args(argv)
     if args.list_methods or args.preflight:
         print(json.dumps(preflight(args.method), indent=2))
