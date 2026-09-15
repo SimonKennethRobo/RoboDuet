@@ -15,8 +15,11 @@ from scripts.rl_sar_obs import RlSarObservation, effective_gait_frequency
 
 @pytest.fixture
 def plant():
+    foot_names = ("FL", "FR", "RL", "RR")
     bodies = "".join(f'<body pos="0 0 .02"><joint name="{name}" axis="0 1 0"/>'
-                     '<geom type="sphere" size=".01" mass=".1"/></body>' for name in JOINT_NAMES)
+                     f'<geom{f" name={foot_names[index]!r}" if index < 4 else ""} '
+                     'type="sphere" size=".01" mass=".1"/></body>'
+                     for index, name in enumerate(JOINT_NAMES))
     actuators = "".join(f'<motor joint="{name}"/>' for name in JOINT_NAMES)
     model = mujoco.MjModel.from_xml_string(
         '<mujoco><worldbody><body name="base_link"><freejoint/>'
@@ -173,6 +176,26 @@ def test_umi_transfer_action_limit_is_explicit():
     result = sim.forward(np.zeros(18), np.zeros(18), np.array([0., 0., 0., 1.]),
                          np.zeros(3), np.zeros(3), np.zeros(3))
     np.testing.assert_array_equal(result, np.r_[[1.] * 12, [2.] * 6])
+
+
+def test_umi_training_nominal_profile_uses_checkpoint_dynamics_range(plant):
+    plant, _data = plant
+    sim = UmiMujoco.__new__(UmiMujoco)
+    sim.model = plant
+    sim.mujoco_profile = "training_nominal"
+    sim.vadr = np.asarray([plant.jnt_dofadr[plant.joint(name).id]
+                           for name in JOINT_NAMES])
+    parameters = sim._apply_mujoco_profile()
+    np.testing.assert_allclose(plant.dof_damping[sim.vadr[:12]], .1)
+    np.testing.assert_allclose(plant.dof_frictionloss[sim.vadr[:12]], .025)
+    np.testing.assert_allclose(
+        [plant.geom_friction[plant.geom(name).id, 0] for name in ("FL", "FR", "RL", "RR")], 1.)
+    assert parameters == {
+        "profile": "training_nominal",
+        "leg_damping_nms_per_rad": .1,
+        "leg_frictionloss_nm": .025,
+        "foot_slide_friction": 1.,
+    }
 
 
 def test_umi_arx5_tool_frame_conjugates_common_relative_pose():

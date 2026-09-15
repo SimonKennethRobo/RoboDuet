@@ -12,8 +12,8 @@ RoboDuetRaw 的同类运行修复见第 29 节；A0/B0 底盘不动的后续修�
 切向 yaw 与共用全向 waypoint PID；第 28–30 节的旧跟随规则作为历史保留。
 
 `frozen_trajectory_library2` 的 A5/B3 跟随诊断见第 32 节；Visual/Raw 提交与
-仓库边界见第 33 节，MA2022 和 UMI-on-Legs 的最新修复分别见第 34、35 节。
-对于本轮 learned baseline 工作，以第 31–35 节为准，第 0 节的早期 HEAD 和
+仓库边界见第 33 节，MA2022 和 UMI-on-Legs 的最新修复分别见第 34、36 节。
+对于本轮 learned baseline 工作，以第 31–36 节为准，第 0 节的早期 HEAD 和
 未提交文件清单仅作历史记录。
 
 部署仓库：`/home/simon/Projects/Simon/wbc_rl_mpc/rl_sar`。
@@ -1307,3 +1307,28 @@ cd /home/simon/Projects/Simon/wbc_rl_mpc
 `py_compile` 与 `git diff --check` 通过。该修复是有 provenance 的共同 plant
 运行适配，不是 UMI-on-Legs 原 IsaacGym/ARX5 论文复现认证，也没有达到冻结
 benchmark 的 tracking success。
+
+## 36. 2026-09-15 UMI-on-Legs 专用 MuJoCo 移动参数
+
+第 35 节的腿部 action guard 为 0.25；checkpoint 的 action scale 又是 0.25，
+所以最终关节目标相对默认姿态只有 0.0625 rad，A0/B0 中 87.7% 的腿动作长期顶在
+guard 上且四足全程接触，底盘净位移仅 5.9 mm。为避免继续把稳定站立误报成
+UMI-on-Legs 移动能力，冻结库默认改用显式 `training_nominal` MuJoCo transfer
+profile，且只在 UMI adapter 内存模型上生效，不修改公共 MJCF：
+
+- 腿 action limit：0.5（经 action scale 后最大目标偏移 0.125 rad）；
+- 腿关节 damping：0.1 Nms/rad；
+- 腿关节 frictionloss：0.025 Nm，位于 checkpoint 训练范围 [0, 0.05] 中点；
+- 四个足端 slide friction：1.0，与 IsaacGym nominal 静/动摩擦一致；
+- checkpoint 原始 PD、torque limits、armature、公共 physics dt 和 contact solver
+  其余设置不变。
+
+A0/B0 与 A2/B2 在该 profile 下分别完整运行 935、497 步且无跌倒。A0/B0 的
+12 个腿关节峰峰活动量为 0.24–0.54 rad，2.9% 的采样至少有一只脚离地，底盘
+净位移由 5.9 mm 增至 61 mm；A2/B2 的腿关节峰峰活动量为 0.45–0.83 rad，
+18.9% 的采样至少有一只脚离地。位置 RMSE 分别为 0.168 和 1.545 m。
+
+扩大到四条代表轨迹后，随机圆仍完整运行，但随机直线在 768/908 步跌倒；
+0.6/0.7 action limit 也会令 A2/B2 跌倒。故 0.5 是本轮满足“腿实际运动”的
+可运行 profile，不是全轨迹稳定或 tracking-success profile。最终四轨迹证据位于
+`benchmark/results/umi_repair_20260915/mobile_profile_final_v2/`，失败仍保留在分母。

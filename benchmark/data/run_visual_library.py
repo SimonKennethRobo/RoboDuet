@@ -74,9 +74,10 @@ def main(argv=None, *, method="visual"):
         parser.add_argument("--target-mode", choices=("bounded", "native"), default="bounded")
     elif method == "umi":
         parser.add_argument("--checkpoint", type=Path, default=UMI_CHECKPOINT)
-        parser.add_argument("--leg-action-limit", type=float, default=.25)
+        parser.add_argument("--leg-action-limit", type=float, default=.5)
         parser.add_argument("--arm-action-limit", type=float, default=4.)
         parser.add_argument("--tool-frame", choices=("native_x5", "arx5_home"), default="arx5_home")
+        parser.add_argument("--mujoco-profile", choices=("common", "training_nominal"), default="training_nominal")
     parser.add_argument("--cell", type=int, nargs=2, action="append", metavar=("A", "B"))
     parser.add_argument("--trajectory", action="append", help="Source name or TaskSpec ID; repeat to select several.")
     parser.add_argument("--list", action="store_true", help="List all library trajectories without simulating.")
@@ -171,11 +172,13 @@ def main(argv=None, *, method="visual"):
             "--umi-leg-action-limit", str(args.leg_action_limit),
             "--umi-arm-action-limit", str(args.arm_action_limit),
             "--umi-tool-frame", args.tool_frame,
+            "--umi-mujoco-profile", args.mujoco_profile,
         ]
         policy_settings = dict(
             leg_action_limit=args.leg_action_limit,
             arm_action_limit=args.arm_action_limit,
             tool_frame=args.tool_frame,
+            mujoco_profile=args.mujoco_profile,
             common_plant_transfer=True,
         )
     missing = [str(path) for path in required if not path.is_file()]

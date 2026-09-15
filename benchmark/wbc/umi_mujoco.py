@@ -34,7 +34,7 @@ class UmiMujoco:
     controls_arm = True
 
     def __init__(self, checkpoint, scene, leg_action_limit=0.0, arm_action_limit=0.0,
-                 tool_frame="native_x5"):
+                 tool_frame="native_x5", mujoco_profile="common"):
         self.config_path = Path(checkpoint).with_name("config.pkl")
         with self.config_path.open("rb") as stream:
             self.training_config = pickle.load(stream)["env"]
@@ -47,6 +47,9 @@ class UmiMujoco:
             raise ValueError("unsupported UMI task encoding/latency")
         self.model = mujoco.MjModel.from_xml_path(str(scene))
         self.data = mujoco.MjData(self.model)
+        if mujoco_profile not in ("common", "training_nominal"):
+            raise ValueError(f"unsupported UMI MuJoCo profile {mujoco_profile}")
+        self.mujoco_profile = mujoco_profile
         self.n = 18
         joints = np.asarray([self.model.joint(name).id for name in JOINT_NAMES])
         self.qadr = self.model.jnt_qposadr[joints].astype(int)
@@ -73,6 +76,7 @@ class UmiMujoco:
                   "rl_kp": control["kp"]["data"],
                   "rl_kd": control["kd"]["data"],
                   "torque_limits": limits.tolist()}
+        self.mujoco_parameters = self._apply_mujoco_profile()
         self.control_dt = float(cfg["cfg"]["sim"]["dt"])
         self.policy_dt, self.substeps = self.control_dt * self.p["decimation"], 1
         self.delay_steps = np.rint(np.asarray(cfg["ctrl_delay"]["data"]) / self.control_dt).astype(int)
@@ -108,6 +112,33 @@ class UmiMujoco:
         self.reference_time = 0.
         self.base = self.model.body("base_link").id
         self.ee = self.model.site("x5_ee").id
+
+    def _apply_mujoco_profile(self):
+        """Apply UMI-only dynamics without changing the shared MJCF on disk."""
+        parameters = {
+            "profile": self.mujoco_profile,
+            "leg_damping_nms_per_rad": None,
+            "leg_frictionloss_nm": None,
+            "foot_slide_friction": None,
+        }
+        if self.mujoco_profile == "common":
+            return parameters
+
+        # The ours-real checkpoint randomized joint damping over [0.01, 0.5],
+        # joint friction over [0, 0.05], and contact friction over [0.1, 8].
+        # Use the nominal/mid-range values instead of the common plant's 0.2-Nm
+        # leg friction, which lies outside the checkpoint's training range.
+        leg_dofs = self.vadr[:12]
+        self.model.dof_damping[leg_dofs] = 0.1
+        self.model.dof_frictionloss[leg_dofs] = 0.025
+        for name in ("FL", "FR", "RL", "RR"):
+            self.model.geom_friction[self.model.geom(name).id, 0] = 1.0
+        parameters.update(
+            leg_damping_nms_per_rad=0.1,
+            leg_frictionloss_nm=0.025,
+            foot_slide_friction=1.0,
+        )
+        return parameters
 
     def reset_policy(self):
         self.actions.fill(0.)

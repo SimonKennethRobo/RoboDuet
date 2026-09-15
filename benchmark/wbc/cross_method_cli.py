@@ -513,9 +513,10 @@ def run_policy_method(args) -> tuple[Path, list[dict]]:
             command.extend([
                 "--policy-adapter", "umi",
                 "--umi-checkpoint", str(contract["root"] / "checkpoints/tossing/ours-real/model.pt"),
-                "--umi-leg-action-limit", "0.25",
+                "--umi-leg-action-limit", "0.5",
                 "--umi-arm-action-limit", "4.0",
                 "--umi-tool-frame", "arx5_home",
+                "--umi-mujoco-profile", "training_nominal",
             ])
         commands.append(command)
         if args.prepare_only:

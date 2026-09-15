@@ -439,7 +439,8 @@ def run(args) -> Tuple[Path, dict]:
         sim = UmiMujoco(args.umi_checkpoint, scene,
                         leg_action_limit=args.umi_leg_action_limit,
                         arm_action_limit=args.umi_arm_action_limit,
-                        tool_frame=args.umi_tool_frame)
+                        tool_frame=args.umi_tool_frame,
+                        mujoco_profile=args.umi_mujoco_profile)
     elif args.policy_adapter == "visual":
         from benchmark.wbc.visual_mujoco import VisualMujoco
 
@@ -915,6 +916,7 @@ def run(args) -> Tuple[Path, dict]:
             "training_action_limit": sim.action_clip,
             "tool_frame_adapter": sim.tool_frame,
             "umi_to_x5_home_transform": sim.tool_transform.tolist(),
+            "mujoco_transfer_parameters": sim.mujoco_parameters,
             "adapter_sha256": _sha256(Path(__file__).with_name("umi_mujoco.py")),
         } if args.policy_adapter == "umi" else {
             "adapter": ("visual_wholebody_checkpoint" if args.policy_adapter == "visual"
@@ -1071,6 +1073,7 @@ def main():
     parser.add_argument("--umi-arm-action-limit", type=float, default=0.0,
                         help="Explicit common-plant arm-action clamp; 0 preserves the training limit.")
     parser.add_argument("--umi-tool-frame", choices=("native_x5", "arx5_home"), default="native_x5")
+    parser.add_argument("--umi-mujoco-profile", choices=("common", "training_nominal"), default="common")
     parser.add_argument("--scene", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--seed", type=int, default=0)
