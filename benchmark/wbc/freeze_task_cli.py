@@ -37,11 +37,16 @@ def freeze_task(source, task_id: str, output, deadline_s: float) -> tuple[Path, 
     wrapper, source_group, row, source_task = matches[0]
     group = copy.deepcopy(source_group)
     task = copy.deepcopy(source_task)
+    anchor = task.get("anchor_env_local_xyz_m")
+    if anchor is None:
+        anchor = [*task["anchor_env_local_xy_m"], 0.0]
     finalize_task_spec(
         task,
         initial_state=task["initial_state"],
-        anchor_env_local=task["anchor_env_local_xyz_m"],
-        orientation_left_multiplier_xyzw=task["orientation_left_multiplier_xyzw"],
+        anchor_env_local=anchor,
+        orientation_left_multiplier_xyzw=task.get(
+            "orientation_left_multiplier_xyzw", (0.0, 0.0, 0.0, 1.0),
+        ),
         deadline_s=deadline_s,
         disturbance_schedule=task.get("disturbance_schedule", []),
     )
