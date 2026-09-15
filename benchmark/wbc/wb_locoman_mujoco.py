@@ -22,7 +22,7 @@ PROTOCOL = "common-mujoco-controller-v1"
 class WbLocomanMujoco:
     direct_torque = True
 
-    def __init__(self, sidecar_root, python, scene):
+    def __init__(self, sidecar_root, python, scene, output_dir):
         self.root = Path(sidecar_root).resolve()
         self.model = mujoco.MjModel.from_xml_path(str(scene))
         self.model.opt.timestep = 0.0025
@@ -41,10 +41,13 @@ class WbLocomanMujoco:
             probe.bind(("127.0.0.1", 0))
             port = probe.getsockname()[1]
         self.endpoint = f"tcp://127.0.0.1:{port}"
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        self.log_path = Path(output_dir) / "sidecar.log"
+        self.log_stream = self.log_path.open("w")
         self.process = subprocess.Popen(
             [str(python), str(self.root / "benchmark_sidecar.py"),
              "--endpoint", self.endpoint],
-            cwd=self.root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            cwd=self.root, stdout=self.log_stream, stderr=subprocess.STDOUT,
             text=True,
         )
         self.context = zmq.Context()
@@ -85,7 +88,7 @@ class WbLocomanMujoco:
         deadline = time.monotonic() + 90.0
         while time.monotonic() < deadline:
             if self.process.poll() is not None:
-                output = self.process.stdout.read() if self.process.stdout else ""
+                output = self.log_path.read_text()[-8000:]
                 raise RuntimeError(f"WB-LocoMan sidecar exited {self.process.returncode}: {output}")
             try:
                 return self._request({"op": "describe"}, 1000)
@@ -126,7 +129,7 @@ class WbLocomanMujoco:
         dq = self.data.qvel[self.dof_adr].copy()
         quat = self.data.qpos[[4, 5, 6, 3]].copy()
         rotation = self.data.xmat[self.base].reshape(3, 3)
-        return q, dq, quat, rotation.T @ self.data.qvel[3:6], self.data.qpos[:3].copy(), rotation.T @ self.data.qvel[:3]
+        return q, dq, quat, self.data.qvel[3:6].copy(), self.data.qpos[:3].copy(), rotation.T @ self.data.qvel[:3]
 
     def forward(self, q, dq, quat, gyro, base_pos, lin_vel):
         if self.reference_payload is None:
@@ -141,11 +144,20 @@ class WbLocomanMujoco:
             "reference": self.reference_payload,
         }, 90000)
         self.actions = np.asarray(reply["torque_nm"], dtype=np.float64)
+        self.feedback = {key: np.asarray(value, dtype=np.float64)
+                         for key, value in reply["joint_feedback"].items()}
+        self.diagnostics = reply["diagnostics"]
         return self.actions.copy()
+
+    def compute_torque(self, q, dq):
+        # Native main.py evaluates this feedback law every physics tick, not
+        # just when a new MPC solution arrives. All 18 joints are bounded revolutes.
+        f = self.feedback
+        return f["feedforward_nm"] + f["kp"] * (f["q_rad"] - q) + f["kd"] * (f["dq_rad_s"] - dq)
 
     def compute_output(self, actions):
         del actions
-        return self.data.qpos[self.qpos_adr].copy()
+        return self.feedback["q_rad"].copy()
 
     def close(self):
         try:
@@ -161,6 +173,7 @@ class WbLocomanMujoco:
             self.process.kill()
         self.socket.close(linger=0)
         self.context.term()
+        self.log_stream.close()
 
 
 def _site_quaternion(model, data, site):

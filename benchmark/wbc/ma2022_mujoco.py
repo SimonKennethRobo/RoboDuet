@@ -59,6 +59,11 @@ class Ma2022Mujoco:
             "rl_kd": [self.student.kd] * 12 + list(config["arm_kd"]),
             "torque_limits": np.maximum(np.abs(limits[:, 0]), np.abs(limits[:, 1])).tolist(),
         }
+        for i, key in enumerate(("limit_vel_x", "limit_vel_y", "limit_vel_yaw")):
+            self.p[key] = [-float(config["command_limit"][i]), float(config["command_limit"][i])]
+        self.arm_max_speed = float(config["arm_max_speed"])
+        self.task_file = (Path(config["_config_path"]).parent / config["task_file"]).resolve()
+        self.arm_plan = None
         self.history = np.zeros((1, 1), dtype=np.float64)
         self.actions = np.zeros(18, dtype=np.float64)
         self.command = [0.0] * 6
@@ -71,6 +76,10 @@ class Ma2022Mujoco:
 
     def reset_policy(self):
         self.student.reset()
+        self.arm_plan = None
+
+    def set_mpc_command(self, command):
+        self.arm_plan = command["arm_plan"]
 
     def read_state(self):
         q = self.data.qpos[self.qpos_adr].copy()
@@ -83,9 +92,11 @@ class Ma2022Mujoco:
     def forward(self, q, dq, quat_xyzw, gyro, base_pos, lin_vel_body):
         del quat_xyzw
         rotation = self.data.xmat[self.model.body("base_link").id].reshape(3, 3)
-        arm_q = np.tile(q[12:18], (5, 1))
-        zeros = np.zeros_like(arm_q)
-        prediction = self.reaction.predict(self.data, arm_q, zeros, zeros)
+        if self.arm_plan is None:
+            raise RuntimeError("Ma2022 requires the native MPC arm horizon; no static-arm fallback")
+        arm_q, arm_dq, arm_ddq = [np.asarray(self.arm_plan[key]) for key in ("q", "dq", "ddq")]
+        prediction = self.reaction.predict(self.data, arm_q, arm_dq, arm_ddq)
+        self.last_prediction = prediction.copy()
         values, _clipped = self.student.inputs(
             lin_vel_body, gyro, rotation.T @ np.array([0.0, 0.0, -1.0]),
             np.asarray(self.command[:3]), q[:12], dq[:12], base_pos[2], prediction,

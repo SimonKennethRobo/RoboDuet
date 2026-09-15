@@ -17,7 +17,9 @@ import numpy as np
 
 def effective_gait_frequency(params, velocity_command):
     """Match the deployment's dynamic-gait stand rule; preserve fixed gait."""
-    dynamic = params.get("use_dynamic_gait", len(params["dog_commands_scale"]) > 6)
+    if "gait_frequency" not in params:
+        return 0.0
+    dynamic = params.get("use_dynamic_gait", len(params.get("dog_commands_scale", [])) > 6)
     if dynamic and np.linalg.norm(velocity_command) < 0.1:
         return 0.0
     return float(params["gait_frequency"])
@@ -103,8 +105,10 @@ class RlSarObservation:
             "roboduet/leg_dof_pos": self.num_leg,
             "roboduet/leg_dof_vel": self.num_leg,
             "roboduet/leg_actions": self.num_leg,
-            "roboduet/dog_commands": len(p["dog_commands_scale"]),
-            "roboduet/arm_commands": int(p["arm_num_commands"]),
+            "roboduet/dog_commands": len(p.get("dog_commands_scale", [])),
+            "roboduet/arm_commands": int(p.get("arm_num_commands", 0)),
+            "robot_lab/velocity_pose_commands": 7,
+            "robot_lab/arm_dof_vel": self.num_arm,
             "roboduet/clock_inputs": 4,
             "roboduet/base_lin_vel": 3,
             "roboduet/body_pose_actual": 2 if p.get("omit_height", False) else 3,
@@ -125,6 +129,12 @@ class RlSarObservation:
             return quat_rotate_inverse_np(s["quat"], np.array([0.0, 0.0, -1.0]))
         if name == "ang_vel":
             return s["ang_vel"] * p["ang_vel_scale"]
+        if name == "robot_lab/velocity_pose_commands":
+            return np.array([s["cmd_x"], s["cmd_y"], s["cmd_yaw"],
+                             p["base_height_target"] + s["cmd_height"],
+                             s["cmd_roll"], s["cmd_pitch"], 0.0])
+        if name == "robot_lab/arm_dof_vel":
+            return s["dof_vel"][num_leg:num_leg + num_arm] * p["arm_dof_vel_scale"]
         if name == "roboduet/leg_dof_pos":
             return (s["dof_pos"][:num_leg] - self.default_dof_pos[:num_leg]) * p["dof_pos_scale"]
         if name == "roboduet/leg_dof_vel":
@@ -141,7 +151,7 @@ class RlSarObservation:
                                         s["cmd_pitch"], s["cmd_roll"], s["cmd_height"]])
             return cmd * np.array(p["dog_commands_scale"], dtype=np.float64)
         if name == "roboduet/arm_commands":
-            return np.zeros(int(p["arm_num_commands"]))
+            return np.asarray(s.get("arm_commands", np.zeros(int(p["arm_num_commands"]))), dtype=np.float64)
         if name == "roboduet/base_roll":
             return quat_to_euler_np(s["quat"])[0:1]
         if name == "roboduet/base_pitch":

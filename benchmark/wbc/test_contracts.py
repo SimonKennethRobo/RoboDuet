@@ -199,6 +199,18 @@ def test_ocs2_state_and_command_wire_contracts_are_fixed_width_and_framed():
     state_only = encode_ocs2_request(payload, 0.16)
     assert len(state_only) == 240
     assert _BenchmarkRequestHeader.from_buffer_copy(state_only).reference_count == 0
+    # Phase is an optional trailer: legacy StateMsg/reference bytes are intact.
+    for times_arg, poses_arg, legacy in [(None, None, state_only), (times, poses, request_payload)]:
+        framed = encode_ocs2_request(payload, .16 if times_arg is None else .14,
+                                    times_arg, poses_arg, gait_phase_rad=5.7)
+        assert len(framed) == len(legacy) + 8
+        header = _BenchmarkRequestHeader.from_buffer_copy(framed)
+        assert header.reserved == 1
+        assert framed[:236] == legacy[:236]
+        assert framed[240:-8] == legacy[240:]
+        assert np.frombuffer(framed[-8:], dtype="<f8")[0] == pytest.approx(5.7)
+    with pytest.raises(ValueError, match="finite"):
+        encode_ocs2_request(payload, 0., gait_phase_rad=float("nan"))
     with pytest.raises(ValueError, match="strictly increasing"):
         encode_ocs2_request(payload, 0.0, [0.0, 0.0], poses[:2])
 

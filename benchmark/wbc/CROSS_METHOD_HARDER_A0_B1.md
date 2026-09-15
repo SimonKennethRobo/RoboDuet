@@ -1,5 +1,11 @@
 # Cross-method MuJoCo A0/B1 benchmark
 
+Historical run, invalid for method ranking: the 2026-09-15 reproduction audit
+found wrong controller selection and observation/action/physics-boundary bugs.
+The raw results below are preserved as failure evidence. Current repair runs
+and unresolved issues are in
+`/home/simon/Projects/Simon/wbc_rl_mpc/baselines/DOC/CROSS_METHOD_MUJOCO_BUGFIX_20260915.md`.
+
 This run evaluates all eight handoff methods on one frozen trajectory that is
 moderately harder than the earlier A0/B0 integration task. The A0/B1 reference
 has a 3.325 m SE(3) path and 0.205 m/s peak equivalent speed, compared with

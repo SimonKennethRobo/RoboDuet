@@ -42,6 +42,20 @@ def test_registry_contains_every_handoff_method():
     }
 
 
+def test_normalization_only_requires_selected_scenarios(tmp_path, monkeypatch):
+    from benchmark.wbc import cross_method_cli as cli
+    nominal, push = tmp_path / "nominal", tmp_path / "push"
+    nominal.mkdir()
+    push.mkdir()  # aligned_cli prepares BOTH folders, even in nominal-only runs.
+    (nominal / "trace.npz").write_bytes(b"test")
+    (nominal / "receipt.json").write_text("{}")
+    monkeypatch.setattr(cli, "normalize_trace_protocol", lambda _: {})
+    monkeypatch.setattr(cli, "score_trace_archive", lambda _: [{}])
+    monkeypatch.setattr(cli, "_sha256", lambda _: "test-hash")
+    rows = cli._normalize_results(tmp_path, tmp_path, ("nominal",))
+    assert len(rows) == 1
+
+
 def test_replay_trace_and_video_sampling(tmp_path):
     trace = tmp_path / "trace.npz"
     samples = 6

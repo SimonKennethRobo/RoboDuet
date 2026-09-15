@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import shutil
+import signal
 import subprocess
 from pathlib import Path
 
@@ -83,11 +84,12 @@ def _method_contracts() -> dict[str, dict]:
     """Return the auditable adapter inventory; paths are checked at call time."""
     return {
         "roboduet": {
-            "backend": "roboduet_rl_sar_mujoco", "policy_key": "roboduet_stage1",
+            "backend": "robot_lab_with_native_ideal_mpc", "policy_key": "robot_lab_rear_r30o_s42_11497",
+            "upper_controller": "floating_base_ocs2_mpc",
             "root": DEFAULT_RL_SAR_ROOT, "common_mujoco": True,
         },
         "roboduet_raw": {
-            "backend": "roboduet_rl_sar_mujoco", "policy_key": "roboduet_go2_x5",
+            "backend": "roboduet_raw_dual_actor_mujoco", "policy_key": "roboduet_go2_x5",
             "root": RAW_BUNDLE_ROOT, "common_mujoco": True,
         },
         "qm_control": {
@@ -102,6 +104,7 @@ def _method_contracts() -> dict[str, dict]:
         },
         "ma2022": {
             "backend": "ma2022_recurrent_student",
+            "upper_controller": "floating_base_ocs2_mpc",
             "policy_key": "ma2022_student",
             "root": DEFAULT_RL_SAR_ROOT / "deploy/ma2022", "common_mujoco": True,
         },
@@ -133,6 +136,9 @@ def preflight(method: str | None = None) -> dict:
             policy = root / "policy/go2_x5" / contract["policy_key"]
             required = [root / "policy/go2_x5/base.yaml", policy / "config.yaml",
                         policy / "policy.pt", DEFAULT_SCENE]
+            if name == "roboduet_raw":
+                required += [root.parent / "parameters.pkl"] + [root.parent / "deploy_model" / file for file in
+                    ("history_latest_arm.jit", "adaptation_module_latest_arm.jit", "body_latest_arm.jit")]
         elif name == "qm_control":
             required = [root / "benchmark/aligned_cli.py",
                         root / "qm_control_baseline/install_aligned/setup.bash",
@@ -149,7 +155,7 @@ def preflight(method: str | None = None) -> dict:
                         root / "low-level/logs/go2x5-visual-low/go2x5_low_v6_velocity_curriculum_tb_resume1000/model_24000.pt"]
         elif name == "umi":
             required = [root / "benchmark_adapter/run.py",
-                        root / "checkpoints/tossing/ours-real/model.pt"]
+                        root / "checkpoints/tossing/ours-real/model.pt", root / "checkpoints/tossing/ours-real/config.pkl"]
         else:
             required = [root / "legged_gym/logs/go2_x5/1789388761_go2_x5_reward_fix/model_11000.pt"]
         missing = [str(path) for path in required if not path.is_file()]
@@ -158,6 +164,7 @@ def preflight(method: str | None = None) -> dict:
             **contract, "root": str(root), "required": [str(path) for path in required],
             "missing": missing, "status": "ready" if ready else "blocked",
             "blocker": None if ready else contract.get("blocker", "missing required files"),
+            "readiness_scope": "files_present_only_not_tracking_certified",
         }
     return {"schema_version": "cross-method-preflight-v1", "methods": result}
 
@@ -204,9 +211,9 @@ def _coverage(metrics: dict) -> dict:
     }
 
 
-def _normalize_results(output: Path, roboduet_root: Path) -> list[dict]:
+def _normalize_results(output: Path, roboduet_root: Path, scenarios=("nominal", "push")) -> list[dict]:
     results = []
-    for scenario in ("nominal", "push"):
+    for scenario in scenarios:
         scenario_dir = output / scenario
         if not scenario_dir.is_dir():
             continue
@@ -342,7 +349,7 @@ def run_qm_control(args) -> tuple[Path, list[dict]]:
         raise RuntimeError(
             f"qm_control adapter exited {completed.returncode}; see {output / 'adapter.log'}"
         )
-    results = [] if args.prepare_only else _normalize_results(output, roboduet_root)
+    results = [] if args.prepare_only else _normalize_results(output, roboduet_root, args.scenarios)
     results = _render_results(
         output, results, args,
         baseline_root / "mujoco_models/go2_x5_description/mjcf/scene.xml",
@@ -464,8 +471,13 @@ def run_policy_method(args) -> tuple[Path, list[dict]]:
             "--suite", str(suite_path), "--task-id", scenario_task_id,
             "--rl-sar-root", str(policy_root),
             "--policy-key", contract["policy_key"], "--scene", str(DEFAULT_SCENE),
-            "--output", str(scenario_dir), "--upper-controller", "scripted_dls_ik",
+            "--output", str(scenario_dir), "--upper-controller",
+            contract.get("upper_controller", "scripted_dls_ik"),
         ]
+        if contract.get("upper_controller") == "floating_base_ocs2_mpc":
+            command.extend(["--ocs2-task-profile", "native_ideal",
+                            "--ocs2-command-mode", "full",
+                            "--ocs2-transport", "synchronous" if args.method == "ma2022" else args.ocs2_transport])
         if args.method == "ma2022":
             bundle = DEFAULT_RL_SAR_ROOT / "policy/go2_x5/ma2022_student"
             command.extend([
@@ -475,6 +487,8 @@ def run_policy_method(args) -> tuple[Path, list[dict]]:
                 "--ma2022-env-config", str(bundle / "env_cfg.json"),
                 "--ma2022-config", str(contract["root"] / "config.yaml"),
             ])
+        elif args.method == "roboduet_raw":
+            command.extend(["--policy-adapter", "roboduet_raw", "--raw-run-root", str(RAW_BUNDLE_ROOT.parent)])
         elif args.method == "wb_locoman":
             command.extend([
                 "--policy-adapter", "wb_locoman",
@@ -499,16 +513,29 @@ def run_policy_method(args) -> tuple[Path, list[dict]]:
         commands.append(command)
         if args.prepare_only:
             continue
-        completed = subprocess.run(
-            command, cwd=roboduet_root, text=True,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            timeout=args.timeout_s, check=False,
-        )
-        (scenario_dir / "run.log").write_text(completed.stdout)
-        if completed.returncode:
-            raise RuntimeError(
-                f"{args.method} {scenario} exited {completed.returncode}; see {scenario_dir / 'run.log'}"
-            )
+        with (scenario_dir / "run.log").open("w") as log:
+            process = subprocess.Popen(command, cwd=roboduet_root, stdout=log,
+                                       stderr=subprocess.STDOUT, start_new_session=True)
+            try:
+                process.wait(timeout=args.timeout_s)
+                failure = None if process.returncode == 0 else f"exit_{process.returncode}"
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGTERM)
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.wait(timeout=5)
+                failure = "wall_clock_timeout"
+        if failure:
+            receipt_path = scenario_dir / "receipt.json"
+            receipt = json.loads(receipt_path.read_text()) if receipt_path.is_file() else {}
+            receipt.update(status="failed", method=args.method, scenario=scenario,
+                           task_id=scenario_task_id, failure=failure, command=command,
+                           run_log=str(scenario_dir / "run.log"), result=None)
+            _write_json(receipt_path, receipt)
+            results.append(receipt)
+            continue
         receipt_path = scenario_dir / "receipt.json"
         if not receipt_path.is_file():
             raise RuntimeError(f"{args.method} {scenario} produced no receipt")
@@ -520,7 +547,7 @@ def run_policy_method(args) -> tuple[Path, list[dict]]:
         _write_json(scenario_dir / "metric_coverage.json", coverage)
         _write_json(receipt_path, receipt)
         results.append(receipt)
-    status = "prepared" if args.prepare_only else "complete"
+    status = "prepared" if args.prepare_only else "failed" if any(r["status"] == "failed" for r in results) else "complete"
     manifest = {
         "schema_version": "cross-method-mujoco-run-v1", "status": status,
         "method": args.method, "started_at": started.isoformat(),
@@ -531,7 +558,8 @@ def run_policy_method(args) -> tuple[Path, list[dict]]:
         "result_count": len(results),
     }
     _write_json(output / "cross_method_manifest.json", manifest)
-    results = _render_results(output, results, args, DEFAULT_SCENE)
+    if status != "failed":
+        results = _render_results(output, results, args, DEFAULT_SCENE)
     _write_json(output / "results.json", results)
     _write_json(output / "run_state.json", {"status": status, "output": str(output)})
     return output, results
@@ -550,6 +578,7 @@ def main(argv=None):
     parser.add_argument("--baseline-root")
     parser.add_argument("--python")
     parser.add_argument("--ros-domain-id", type=int, default=91)
+    parser.add_argument("--ocs2-transport", choices=("synchronous", "async"), default="synchronous")
     parser.add_argument("--timeout-s", type=float, default=480.0)
     parser.add_argument("--prepare-only", action="store_true")
     parser.add_argument("--record-video", action="store_true")
@@ -584,6 +613,8 @@ def main(argv=None):
     else:
         output, results = run_policy_method(args)
     print(json.dumps({"output": str(output), "results": results}, indent=2))
+    if any(result.get("status") == "failed" for result in results):
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

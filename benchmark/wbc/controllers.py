@@ -180,6 +180,7 @@ def encode_ocs2_request(
     controller_time_s: float,
     reference_times_s=None,
     reference_poses_xyz_xyzw=None,
+    gait_phase_rad=None,
 ) -> bytes:
     """Pack one state request and, on task reset, the complete SE(3) reference."""
     state = _StateMsg.from_buffer_copy(state_payload)
@@ -188,8 +189,14 @@ def encode_ocs2_request(
     header.controller_time_s = float(controller_time_s)
     if not np.isfinite(header.controller_time_s):
         raise ValueError("OCS2 controller time must be finite")
+    trailer = b""
+    if gait_phase_rad is not None:
+        if not np.isfinite(gait_phase_rad):
+            raise ValueError("OCS2 measured gait phase must be finite")
+        header.reserved = 1  # optional little-endian float64 after reference data
+        trailer = np.asarray([gait_phase_rad], dtype="<f8").tobytes()
     if reference_times_s is None and reference_poses_xyz_xyzw is None:
-        return bytes(header)
+        return bytes(header) + trailer
     if reference_times_s is None or reference_poses_xyz_xyzw is None:
         raise ValueError("OCS2 reference times and poses must be supplied together")
     times = np.asarray(reference_times_s, dtype="<f8")
@@ -207,7 +214,7 @@ def encode_ocs2_request(
         raise ValueError("OCS2 full reference contains a zero quaternion")
     poses[:, 3:] /= qnorm[:, None]
     header.reference_count = times.size
-    return bytes(header) + times.tobytes(order="C") + poses.tobytes(order="C")
+    return bytes(header) + times.tobytes(order="C") + poses.tobytes(order="C") + trailer
 
 
 def encode_ocs2_state_values(
@@ -307,6 +314,10 @@ class NativeOcs2Transport:
         mode: str = "synchronous",
         command_timeout_s: float = 0.5,
         command_mode: str = "full",
+        task_profile: str = "legacy_benchmark",
+        base_height_target: float = 0.3,
+        task_file=None,
+        arm_plan: bool = False,
     ):
         import zmq
 
@@ -322,6 +333,14 @@ class NativeOcs2Transport:
         self.timeout_s = float(timeout_s)
         self.command_timeout_s = float(command_timeout_s)
         self.mode = mode
+        if task_profile not in ("native_ideal", "legacy_benchmark"):
+            raise ValueError(f"unknown OCS2 task profile: {task_profile}")
+        self.task_profile = task_profile
+        self.task_file = Path(task_file).resolve() if task_file else None
+        self.arm_plan = bool(arm_plan)
+        if self.arm_plan and mode != "synchronous":
+            raise ValueError("correlated Ma2022 arm plans require synchronous transport")
+        self.base_height_target = float(base_height_target)
         self.command_mode = command_mode
         self.expected_command_mode = 2 if command_mode == "full" else 1
         self.control_dt_s = 0.02
@@ -366,7 +385,7 @@ class NativeOcs2Transport:
         ros_setup = "/opt/ros/jazzy/setup.zsh"
         ws_setup = self.stack_root / "ros2_ws/install/setup.zsh"
         config = self.output_dir / "bridge.yaml"
-        source_task = (
+        source_task = self.task_file or (
             self.stack_root
             / "go2_x5_ocs2"
             / "config"
@@ -374,45 +393,24 @@ class NativeOcs2Transport:
         )
         task = self.output_dir / "task_floating_benchmark.info"
         task_text = source_task.read_text(encoding="utf-8")
-        collision_marker = (
-            "selfCollision\n{\n  ; activate self-collision constraint\n  activate  true"
-        )
-        if collision_marker not in task_text:
-            raise ValueError("cannot locate selfCollision activation in OCS2 task")
-        # Pinocchio 4.1 removed getBodyId(link-frame) compatibility used by the
-        # installed OCS2 self-collision helper. Self collision is explicitly
-        # outside this benchmark's acceptance scope, so disable only that term
-        # in an immutable runtime copy and record its hash in provenance.
-        runtime_task_text = task_text.replace(
-            collision_marker, collision_marker[:-4] + "false", 1
-        )
-        runtime_task_text, thread_replacements = re.subn(
-            r"(?m)^(\s*nThreads\s+)3(\s*)$", r"\g<1>1\g<2>", runtime_task_text
-        )
-        if thread_replacements != 2:
-            raise ValueError(
-                f"expected DDP and SQP nThreads entries, changed {thread_replacements}"
+        runtime_task_text = task_text
+        if self.task_profile == "legacy_benchmark":
+            # Historical matrix-only modifications. Native reproduction must
+            # neither apply nor require these substitutions to match.
+            collision_marker = "selfCollision\n{\n  ; activate self-collision constraint\n  activate  true"
+            if collision_marker not in task_text:
+                raise ValueError("cannot locate selfCollision activation in OCS2 task")
+            runtime_task_text = task_text.replace(collision_marker, collision_marker[:-4] + "false", 1)
+            substitutions = (
+                (r"(?m)^(\s*nThreads\s+)3(\s*)$", r"\g<1>1\g<2>", 0, 2),
+                (r"(?m)^(\s*weight\s+)1\.0(\s*)$", r"\g<1>0.0\g<2>", 1, 1),
+                (r"(?m)^(\s*muPosition\s+)10\.0(\s*)$", r"\g<1>50.0\g<2>", 0, 2),
+                (r"(?m)^(\s*muOrientation\s+)5\.0(\s*)$", r"\g<1>25.0\g<2>", 0, 2),
             )
-        runtime_task_text, posture_replacements = re.subn(
-            r"(?m)^(\s*weight\s+)1\.0(\s*)$",
-            r"\g<1>0.0\g<2>",
-            runtime_task_text,
-            count=1,
-        )
-        if posture_replacements != 1:
-            raise ValueError("expected one armNominalPosture weight entry")
-        runtime_task_text, position_weight_replacements = re.subn(
-            r"(?m)^(\s*muPosition\s+)10\.0(\s*)$",
-            r"\g<1>50.0\g<2>",
-            runtime_task_text,
-        )
-        runtime_task_text, orientation_weight_replacements = re.subn(
-            r"(?m)^(\s*muOrientation\s+)5\.0(\s*)$",
-            r"\g<1>25.0\g<2>",
-            runtime_task_text,
-        )
-        if position_weight_replacements != 2 or orientation_weight_replacements != 2:
-            raise ValueError("expected running and final SE(3) tracking weight entries")
+            for pattern, replacement, count, expected in substitutions:
+                runtime_task_text, changed = re.subn(pattern, replacement, runtime_task_text, count=count)
+                if changed != expected:
+                    raise ValueError(f"legacy benchmark substitution {pattern}: expected {expected}, got {changed}")
         task.write_text(runtime_task_text, encoding="utf-8")
         self.source_task = source_task
         self.runtime_task = task
@@ -463,7 +461,8 @@ class NativeOcs2Transport:
             f"{endpoint_config}"
             f"    controlDt: {self.control_dt_s}\n"
             f"    commandMode: {self.command_mode}\n"
-            "    solverThreads: 1\n",
+            f"    baseHeightTarget: {self.base_height_target}\n"
+            f"    taskProfile: {self.task_profile}\n",
             encoding="utf-8",
         )
         commands = [
@@ -472,7 +471,8 @@ class NativeOcs2Transport:
                 f"source {ros_setup} && source {ws_setup} && "
                 f"{shlex.quote(str(executable))} {shlex.quote(str(task))} "
                 f"{shlex.quote(str(self.codegen_dir))} {shlex.quote(str(self.urdf_file))} "
-                f"{endpoint_args} {shlex.quote(self.command_mode)}",
+                f"{endpoint_args} {shlex.quote(self.command_mode)} "
+                f"{self.base_height_target} {shlex.quote(self.task_profile)}",
             ),
         ]
         for name, command in commands:
@@ -482,6 +482,8 @@ class NativeOcs2Transport:
                 stdout=log,
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
+                env={**{key: value for key, value in os.environ.items() if key != "WBC_BENCHMARK_ARM_PLAN"},
+                     **({"WBC_BENCHMARK_ARM_PLAN": "1"} if self.arm_plan else {})},
             )
             self.processes.append((name, process, log))
 
@@ -582,6 +584,7 @@ class NativeOcs2Transport:
         state_payload: bytes,
         reference_times_s=None,
         reference_poses_xyz_xyzw=None,
+        gait_phase_rad=None,
     ) -> dict:
         import zmq
 
@@ -596,6 +599,7 @@ class NativeOcs2Transport:
             controller_time_s,
             reference_times_s,
             reference_poses_xyz_xyzw,
+            gait_phase_rad=gait_phase_rad,
         )
         if self.mode == "async":
             return self._exchange_async(request, expected_seq)
@@ -604,7 +608,21 @@ class NativeOcs2Transport:
         while time.monotonic() < deadline:
             self._check_processes()
             if self.request.poll(timeout=10, flags=zmq.POLLIN):
-                decoded = decode_ocs2_command(self.request.recv())
+                payload = self.request.recv()
+                if self.arm_plan:
+                    width = ctypes.sizeof(_CmdMsg)
+                    decoded = decode_ocs2_command(payload[:width])
+                    plan = json.loads(payload[width:])
+                    if (plan.get("schema") != "ma2022_arm_plan_v1" or not plan.get("valid")
+                            or plan.get("seq") != expected_seq):
+                        raise RuntimeError("invalid or uncorrelated native arm horizon")
+                    for key in ("q", "dq", "ddq"):
+                        values = np.asarray(plan[key], dtype=float)
+                        if values.shape != (5, 6) or not np.isfinite(values).all():
+                            raise RuntimeError(f"invalid native arm plan {key}")
+                    decoded["arm_plan"] = plan
+                else:
+                    decoded = decode_ocs2_command(payload)
                 correlated = decoded["seq"] == expected_seq
                 synchronous_time = abs(
                     decoded["policy_time"]
@@ -613,6 +631,9 @@ class NativeOcs2Transport:
                 if (correlated and synchronous_time
                         and decoded["solver_ok"]
                         and decoded["mode"] == self.expected_command_mode):
+                    self.runtime_stats["commands_received"] += 1
+                    self.runtime_stats["task_initializations"] += int(logical_sequence == 0)
+                    self.runtime_stats["max_solve_time_ms"] = max(self.runtime_stats["max_solve_time_ms"], decoded["solve_time_ms"])
                     return decoded
                 raise RuntimeError("OCS2 reply violates the synchronous request contract")
             time.sleep(0.002)

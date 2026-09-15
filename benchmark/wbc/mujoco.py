@@ -15,6 +15,7 @@ import hashlib
 import json
 import math
 import sys
+import signal
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -28,6 +29,40 @@ from benchmark.wbc.scoring import (
 )
 from benchmark.wbc.trace import TRACE_SCHEMA_VERSION, score_trace_archive
 from benchmark.wbc.suite import refresh_suite_hash
+
+
+JOINT_NAMES = [f"{leg}_{part}_joint" for leg in ("FL", "FR", "RL", "RR")
+               for part in ("hip", "thigh", "calf")] + [f"x5_joint{i}" for i in range(1, 7)]
+
+
+def joint_order_indices(model, mapping):
+    """TaskSpec and trace are canonical; policy arrays may use a different order."""
+    names = [model.joint(int(model.actuator_trnid[index, 0])).name for index in mapping]
+    if set(names) != set(JOINT_NAMES) or len(names) != len(JOINT_NAMES):
+        raise ValueError(f"unexpected controlled joints: {names}")
+    policy_from_canonical = np.asarray([JOINT_NAMES.index(name) for name in names])
+    return policy_from_canonical, np.argsort(policy_from_canonical)
+
+
+def configure_position_drives(sim, torque_limits):
+    """Use MuJoCo's velocity-aware affine actuator for native position drives.
+
+    With implicitfast its damping is part of the implicit velocity solve.
+    Sending a precomputed PD torque through a motor hides that derivative.
+    """
+    if not getattr(sim, "arm_position_drive", False):
+        return
+    if sim.model.opt.integrator != mujoco.mjtIntegrator.mjINT_IMPLICITFAST:
+        raise ValueError("native arm position drives require the common implicitfast integrator")
+    for i in range(12, 18):
+        actuator = sim.mapping[i]
+        sim.model.actuator_gaintype[actuator] = mujoco.mjtGain.mjGAIN_FIXED
+        sim.model.actuator_biastype[actuator] = mujoco.mjtBias.mjBIAS_AFFINE
+        sim.model.actuator_gainprm[actuator, :3] = [sim.p["rl_kp"][i], 0., 0.]
+        sim.model.actuator_biasprm[actuator, :3] = [0., -sim.p["rl_kp"][i], -sim.p["rl_kd"][i]]
+        sim.model.actuator_ctrllimited[actuator] = False
+        sim.model.actuator_forcelimited[actuator] = True
+        sim.model.actuator_forcerange[actuator] = [-torque_limits[i], torque_limits[i]]
 
 
 def _sha256(path: Path) -> str:
@@ -359,7 +394,11 @@ def run(args) -> Tuple[Path, dict]:
     push_events = _validated_push_events(reference.task["disturbance_schedule"])
     scene = Path(args.scene).resolve()
     robot_dir = rl_sar_root / "policy" / "go2_x5"
-    if args.policy_adapter == "umi":
+    if args.policy_adapter == "roboduet_raw":
+        from benchmark.wbc.roboduet_raw_mujoco import RoboDuetRawMujoco
+
+        sim = RoboDuetRawMujoco(robot_dir, args.policy_key, scene, args.raw_run_root, seed=args.seed)
+    elif args.policy_adapter == "umi":
         from benchmark.wbc.umi_mujoco import UmiMujoco  # pylint: disable=import-outside-toplevel
 
         sim = UmiMujoco(args.umi_checkpoint, scene)
@@ -371,7 +410,8 @@ def run(args) -> Tuple[Path, dict]:
     elif args.policy_adapter == "wb_locoman":
         from benchmark.wbc.wb_locoman_mujoco import WbLocomanMujoco  # pylint: disable=import-outside-toplevel
 
-        sim = WbLocomanMujoco(args.wb_locoman_root, args.wb_locoman_python, scene)
+        sim = WbLocomanMujoco(args.wb_locoman_root, args.wb_locoman_python, scene,
+                              Path(args.output) / "wb_locoman_runtime")
     elif args.policy_adapter == "ma2022":
         from benchmark.wbc.ma2022_mujoco import (  # pylint: disable=import-outside-toplevel
             Ma2022Mujoco, load_config,
@@ -384,7 +424,11 @@ def run(args) -> Tuple[Path, dict]:
         )
     else:
         sim = RlSarMujoco(robot_dir, args.policy_key, scene, seed=args.seed)
+    if hasattr(sim, "close"):
+        atexit.register(sim.close)
     sim.model.opt.timestep = float(args.physics_dt)
+    sim.model.opt.integrator = (mujoco.mjtIntegrator.mjINT_IMPLICITFAST if args.integrator == "implicitfast"
+                                else mujoco.mjtIntegrator.mjINT_EULER)
     sim.substeps = max(1, round(sim.control_dt / sim.model.opt.timestep))
 
     site = mujoco.mj_name2id(sim.model, mujoco.mjtObj.mjOBJ_SITE, "x5_ee")
@@ -392,17 +436,19 @@ def run(args) -> Tuple[Path, dict]:
     if site < 0 or base < 0:
         raise ValueError("MJCF must contain base_link and x5_ee")
     joints = [int(sim.model.actuator_trnid[sim.mapping[i], 0]) for i in range(sim.n)]
+    policy_from_canonical, canonical_from_policy = joint_order_indices(sim.model, sim.mapping)
     qpos_adr = [int(sim.model.jnt_qposadr[joint]) for joint in joints]
     dof_adr = [int(sim.model.jnt_dofadr[joint]) for joint in joints]
 
     state = reference.task["initial_state"]
     root = np.asarray(state["root_state_env_local"], dtype=np.float64)
-    dof_position = np.asarray(state["dof_position_rad"], dtype=np.float64)[: sim.n]
-    dof_velocity = np.asarray(state["dof_velocity_rad_s"], dtype=np.float64)[: sim.n]
+    dof_position = np.asarray(state["dof_position_rad"], dtype=np.float64)[policy_from_canonical]
+    dof_velocity = np.asarray(state["dof_velocity_rad_s"], dtype=np.float64)[policy_from_canonical]
     mujoco.mj_resetData(sim.model, sim.data)
     sim.data.qpos[:3] = root[:3]
     sim.data.qpos[3:7] = np.roll(root[3:7], 1)
-    sim.data.qvel[:6] = root[7:13]
+    sim.data.qvel[:3] = root[7:10]
+    sim.data.qvel[3:6] = _quat_to_matrix(root[3:7]).T @ root[10:13]
     for i in range(sim.n):
         sim.data.qpos[qpos_adr[i]] = dof_position[i]
         sim.data.qvel[dof_adr[i]] = dof_velocity[i]
@@ -415,14 +461,20 @@ def run(args) -> Tuple[Path, dict]:
     sim.command = [0.0] * 6
 
     policy_dt = sim.policy_dt
+    deadline_steps = int(math.ceil(float(reference.task["deadline_s"]) / policy_dt))
     requested_steps = min(
-        int(math.ceil(float(reference.task["deadline_s"]) / policy_dt)),
+        deadline_steps,
         args.max_steps if args.max_steps > 0 else 2**31 - 1,
     )
     kp = np.asarray(sim.p["rl_kp"], dtype=np.float64)
     kd = np.asarray(sim.p["rl_kd"], dtype=np.float64)
     torque_limits = np.asarray(sim.p["torque_limits"], dtype=np.float64)
+    plant_limits = sim.model.actuator_ctrlrange[sim.mapping]
+    torque_limits = np.minimum(torque_limits, np.maximum(np.abs(plant_limits[:, 0]), np.abs(plant_limits[:, 1])))
+    configure_position_drives(sim, torque_limits)
     q_target = dof_position.copy()
+    arm_command_position = dof_position[12:18].copy()
+    q_velocity_target = np.zeros(sim.n)
     trace: Dict[str, List[np.ndarray]] = {}
     arm_dofs = np.asarray(dof_adr[12:18], dtype=np.int32)
     arm_joints = joints[12:18]
@@ -445,6 +497,10 @@ def run(args) -> Tuple[Path, dict]:
             mode=args.ocs2_transport,
             command_timeout_s=args.ocs2_command_timeout_s,
             command_mode=args.ocs2_command_mode,
+            task_profile=args.ocs2_task_profile,
+            base_height_target=float(sim.p.get("base_height_target", 0.3)),
+            task_file=getattr(sim, "task_file", None),
+            arm_plan=args.policy_adapter == "ma2022",
         )
         transport.reset_task()
         atexit.register(transport.close)
@@ -491,6 +547,8 @@ def run(args) -> Tuple[Path, dict]:
                 reference_poses if step == 0 else None,
             )
             base_feedforward = _set_mpc_dog_command(sim, mpc_command)
+            if hasattr(sim, "set_mpc_command"):
+                sim.set_mpc_command(mpc_command)
         actions = sim.forward(q, dq, quat, gyro, base_pos, lin_vel)
         q_target = sim.compute_output(actions)
 
@@ -509,7 +567,7 @@ def run(args) -> Tuple[Path, dict]:
             saturated = False
             ik_valid = True
         elif getattr(sim, "direct_torque", False):
-            arm_q = q[12:18].copy()
+            arm_q = q_target[12:18].copy()
             raw_step_norm = 0.0
             saturated = False
             ik_valid = False
@@ -536,30 +594,57 @@ def run(args) -> Tuple[Path, dict]:
         margins = np.empty(6, dtype=np.float64)
         for i, joint in enumerate(arm_joints):
             low, high = sim.model.jnt_range[joint]
-            arm_q[i] = np.clip(arm_q[i], low, high)
+            if not getattr(sim, "controls_arm", False):
+                arm_q[i] = np.clip(arm_q[i], low, high)
             margins[i] = min(arm_q[i] - low, high - arm_q[i]) / max(high - low, 1e-12)
         q_target[12:18] = arm_q
+        q_velocity_target.fill(0.0)
+        if use_mpc:
+            q_velocity_target[12:18] = mpc_command["arm_dq_cmd"]
+            if hasattr(sim, "arm_max_speed"):
+                q_velocity_target[12:18] = np.clip(q_velocity_target[12:18], -sim.arm_max_speed, sim.arm_max_speed)
+        elif hasattr(sim, "feedback"):
+            q_velocity_target[:] = sim.feedback["dq_rad_s"]
 
         leg_abs_energy = 0.0
         leg_positive_energy = 0.0
         push_impulse = np.zeros(3, dtype=np.float64)
-        for _ in range(int(sim.p["decimation"])):
+        for control_step in range(int(sim.p["decimation"])):
+            if hasattr(sim, "control_targets"):
+                q_target = sim.control_targets(control_step)
+            if use_mpc:
+                # Match RLFSMStateOCS2Manip: slew the persistent target at
+                # the low-level control rate, retaining MPC velocity feedforward.
+                arm_command_position += np.clip(
+                    arm_q - arm_command_position,
+                    -args.arm_max_speed * sim.control_dt,
+                    args.arm_max_speed * sim.control_dt,
+                )
+                q_target[12:18] = arm_command_position
             for _ in range(sim.substeps):
                 push_force = _push_force_at(push_events, float(sim.data.time))
                 sim.data.xfrc_applied[base, :3] = push_force
                 push_impulse += push_force * sim.model.opt.timestep
                 q_now, dq_now, *_ = sim.read_state()
+                raw_torque = (sim.compute_torque(q_now, dq_now)
+                              if hasattr(sim, "compute_torque")
+                              else actions if getattr(sim, "direct_torque", False)
+                              else kp * (q_target - q_now) + kd * (q_velocity_target - dq_now))
                 torque = np.clip(
-                    actions if getattr(sim, "direct_torque", False)
-                    else kp * (q_target - q_now) - kd * dq_now,
+                    raw_torque,
                     -torque_limits, torque_limits,
                 )
                 for i in range(sim.n):
-                    sim.data.ctrl[sim.mapping[i]] = torque[i]
+                    sim.data.ctrl[sim.mapping[i]] = (
+                        q_target[i] + kd[i] / kp[i] * q_velocity_target[i]
+                        if i >= 12 and getattr(sim, "arm_position_drive", False) else torque[i])
                 mujoco.mj_step(sim.model, sim.data)
+                torque = sim.data.actuator_force[sim.mapping].copy()
                 power = torque[:12] * dq_now[:12]
                 leg_abs_energy += float(np.abs(power).sum()) * sim.model.opt.timestep
                 leg_positive_energy += float(np.maximum(power, 0.0).sum()) * sim.model.opt.timestep
+            if hasattr(sim, "after_control_step"):
+                sim.after_control_step()
         sim.data.xfrc_applied[base, :3] = 0.0
 
         mujoco.mj_forward(sim.model, sim.data)
@@ -583,12 +668,12 @@ def run(args) -> Tuple[Path, dict]:
         rot_singular = np.linalg.svd(jacr[:, arm_dofs], compute_uv=False)
         manipulability = float(np.sqrt(max(np.linalg.det(jacobian @ jacobian.T), 0.0)))
         actual_state = np.concatenate((actual_position, actual_quaternion, spatial_velocity[3:], spatial_velocity[:3]))
-        base_state = np.concatenate((sim.data.xpos[base], quat, sim.data.qvel[:3], sim.data.qvel[3:6]))
+        base_state = np.concatenate((sim.data.xpos[base], quat, sim.data.qvel[:3], base_rotation @ sim.data.qvel[3:6]))
 
         for name, value, dtype in (
             ("sample_present", True, bool), ("metric_valid", not numerical_fault, bool),
             ("terminal_snapshot", False, bool), ("done", fall or numerical_fault, bool),
-            ("timed_out", step + 1 == requested_steps, bool),
+            ("timed_out", step + 1 >= deadline_steps, bool),
             ("trajectory_early_termination", False, bool),
             ("numerical_fault", numerical_fault, bool), ("fall", fall, bool),
             ("reference_time_s", reference_time, np.float32),
@@ -612,15 +697,24 @@ def run(args) -> Tuple[Path, dict]:
         trace.setdefault("actual_ee_grasp_linear_velocity_mps", []).append(spatial_velocity[3:][None].astype(np.float32))
         trace.setdefault("environment_origin_m", []).append(np.zeros((1, 3), np.float32))
         trace.setdefault("base_root_state", []).append(base_state[None].astype(np.float32))
-        trace.setdefault("dof_position_rad", []).append(q[None].astype(np.float32))
-        trace.setdefault("dof_velocity_rad_s", []).append(dq[None].astype(np.float32))
-        trace.setdefault("actuator_command", []).append(torque[None].astype(np.float32))
-        trace.setdefault("joint_position_target_rad", []).append(q_target[None].astype(np.float32))
-        trace.setdefault("policy_action", []).append(actions[None].astype(np.float32))
-        trace.setdefault("actuator_torque_limit", []).append(torque_limits[None].astype(np.float32))
+        for name, value in (("dof_position_rad", q), ("dof_velocity_rad_s", dq),
+                            ("actuator_command", torque), ("joint_position_target_rad", q_target),
+                            ("joint_velocity_target_rad_s", q_velocity_target),
+                            ("policy_action", actions), ("actuator_torque_limit", torque_limits)):
+            trace.setdefault(name, []).append(value[canonical_from_policy][None].astype(np.float32))
         trace.setdefault("base_feedforward_command", []).append(
             base_feedforward[None].astype(np.float32)
         )
+        if hasattr(sim, "diagnostics"):
+            _add_scalar_column(trace, "controller_solver_failed", sim.diagnostics["solver_failed"], bool)
+            for key in ("solve_time_ms", "constraint_violation"):
+                value = sim.diagnostics.get(key)
+                _add_scalar_column(trace, "controller_" + key, 0.0 if value is None else value)
+                _add_scalar_column(trace, "controller_" + key + "_valid", value is not None, bool)
+        if hasattr(sim, "last_prediction"):
+            trace.setdefault("arm_reaction_prediction", []).append(sim.last_prediction[None].astype(np.float32))
+            for key in ("q", "dq", "ddq"):
+                trace.setdefault("mpc_arm_plan_" + key, []).append(np.asarray(sim.arm_plan[key], np.float32)[None])
         trace.setdefault("joint_limit_distance_fraction", []).append(margins[None].astype(np.float32))
         applied_push_force = push_impulse / policy_dt
         trace.setdefault("benchmark_push_active", []).append(
@@ -635,6 +729,17 @@ def run(args) -> Tuple[Path, dict]:
         trace.setdefault("foot_contact_force_n", []).append(
             foot_force[None].astype(np.float32)
         )
+        if step == 0 or (step + 1) % 100 == 0 or fall or numerical_fault:
+            output = Path(args.output)
+            output.mkdir(parents=True, exist_ok=True)
+            # Retain partial evidence on exceptions/timeouts; this is not a
+            # completed/scored archive and is never promoted to trace.npz.
+            np.savez_compressed(output / "trace.partial.npz", **{
+                name: np.stack(values) for name, values in trace.items()})
+            (output / "progress.json").write_text(json.dumps({
+                "task_id": reference.task["task_id"], "recorded_steps": step + 1,
+                "sim_time_s": float(sim.data.time), "deadline_steps": deadline_steps,
+                "fall": fall, "numerical_fault": numerical_fault}) + "\n")
         executed_path.append(actual_position.copy())
         if viewer is not None:
             _draw_trajectory(viewer, reference, executed_path, goal_position, sim.data.xpos[base])
@@ -652,6 +757,7 @@ def run(args) -> Tuple[Path, dict]:
         atexit.unregister(transport.close)
     if hasattr(sim, "close"):
         sim.close()
+        atexit.unregister(sim.close)
 
     output_dir = Path(args.output).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -662,7 +768,8 @@ def run(args) -> Tuple[Path, dict]:
         protocol_json=np.asarray(json.dumps(DEVELOPMENT_TIMED_TRAJECTORY_PROTOCOL, sort_keys=True, separators=(",", ":"))),
         kinematic_protocol_json=np.asarray(json.dumps(DEVELOPMENT_KINEMATIC_PROTOCOL, sort_keys=True, separators=(",", ":"))),
         task_id=np.asarray([reference.task["task_id"]]), control_dt_s=np.asarray(policy_dt, np.float64),
-        requested_steps=np.asarray(requested_steps, np.int64),
+        requested_steps=np.asarray(deadline_steps, np.int64),
+        execution_step_limit=np.asarray(requested_steps, np.int64),
         control_type=np.asarray("T" if getattr(sim, "direct_torque", False) else "P"),
         num_actions_loco=np.asarray(12, np.int64), num_actions_arm=np.asarray(6, np.int64),
         arm_action_mode=np.asarray(
@@ -695,7 +802,7 @@ def run(args) -> Tuple[Path, dict]:
         "controller_adapter": (
             "umi_on_legs_learned_joint_targets"
             if args.policy_adapter == "umi"
-            else "visual_wholebody_policy_plus_scripted_dls_ik_arm"
+            else "visual_wholebody_policy_plus_native_persistent_ik_arm"
             if args.policy_adapter == "visual"
             else "deep_whole_body_control_learned_joint_targets"
             if args.policy_adapter == "dwbc"
@@ -703,22 +810,22 @@ def run(args) -> Tuple[Path, dict]:
             "wb_locoman_fatrop_direct_torque"
             if args.policy_adapter == "wb_locoman"
             else
-            "ma2022_recurrent_student_plus_scripted_dls_ik_arm"
+            "ma2022_recurrent_student_plus_native_mpc_arm_reaction_horizon"
             if args.policy_adapter == "ma2022"
+            else "roboduet_raw_dual_actor_with_learned_posture_plan"
+            if args.policy_adapter == "roboduet_raw"
             else "rl_sar_dog_policy_plus_native_floating_base_ocs2_mpc"
             if use_mpc else "rl_sar_dog_policy_plus_scripted_dls_ik_arm"
         ),
         "evidence_scope": (
             "closed_loop_mujoco_native_ocs2_implementation_test"
             if use_mpc
-            else "implementation_smoke_not_learned_manipulation_policy"
+            else "closed_loop_common_plant_adapter_test_not_reproduction_certification"
         ),
         "initial_state_adapter": {
             "root": "isaac_xyzw_to_mujoco_wxyz",
-            "joint_order": (
-                "named_FL_FR_RL_RR_X5" if args.policy_adapter != "rl_sar"
-                else "rl_sar_joint_mapping"
-            ),
+            "joint_order": "named_FL_FR_RL_RR_X5",
+            "policy_from_canonical": policy_from_canonical.tolist(),
             "task_dof_count": len(state["dof_position_rad"]),
             "simulated_dof_count": sim.n,
             "ignored_task_dofs": max(0, len(state["dof_position_rad"]) - sim.n),
@@ -737,6 +844,9 @@ def run(args) -> Tuple[Path, dict]:
         "policy": ({
             "adapter": "umi_on_legs_official_actor",
             "model_sha256": _sha256(Path(args.umi_checkpoint)),
+            "training_config_sha256": _sha256(sim.config_path),
+            "training_robot_asset": sim.training_config["cfg"]["asset"]["file"],
+            "common_plant_transfer": True,
             "adapter_sha256": _sha256(Path(__file__).with_name("umi_mujoco.py")),
         } if args.policy_adapter == "umi" else {
             "adapter": ("visual_wholebody_checkpoint" if args.policy_adapter == "visual"
@@ -762,7 +872,8 @@ def run(args) -> Tuple[Path, dict]:
             "base_config_sha256": _sha256(robot_dir / "base.yaml"),
         }),
         "observation_boundary": {
-            "implementation": "python_mirror_of_rl_sar_compute_observation",
+            "implementation": ("python_mirror_of_rl_sar_compute_observation" if args.policy_adapter in ("rl_sar", "roboduet_raw")
+                               else f"method_specific_{args.policy_adapter}_adapter"),
             "mirror_sha256": _sha256(observation_mirror),
             "simulation_loop_mirror_sha256": _sha256(sim_loop_mirror),
             "production_rl_sdk_sha256": (
@@ -775,8 +886,12 @@ def run(args) -> Tuple[Path, dict]:
         },
         "mujoco_version": mujoco.__version__,
         "physics_dt_s": sim.model.opt.timestep,
+        "integrator": args.integrator,
+        "arm_drive": "implicit_position" if getattr(sim, "arm_position_drive", False) else "explicit_torque_pd",
         "policy_dt_s": policy_dt,
         "requested_steps": requested_steps,
+        "deadline_steps": deadline_steps,
+        "diagnostic_step_limit": requested_steps < deadline_steps,
         "recorded_steps": len(trace["sample_present"]),
         "trace": {"path": str(trace_path), "sha256": _sha256(trace_path), "schema_version": TRACE_SCHEMA_VERSION},
         "result": result,
@@ -786,6 +901,17 @@ def run(args) -> Tuple[Path, dict]:
             "root": str(Path(args.ocs2_root).resolve()),
             "transport": args.ocs2_transport,
             "command_mode": args.ocs2_command_mode,
+            "task_profile": args.ocs2_task_profile,
+            "source_task": str(transport.source_task),
+            "source_task_sha256": _sha256(transport.source_task),
+            "runtime_task_sha256": _sha256(transport.runtime_task),
+            "base_height_target_m": transport.base_height_target,
+            "arm_target_speed_limit_rad_s": args.arm_max_speed,
+            "arm_velocity_feedforward": True,
+            "arm_plan_horizon": bool(transport.arm_plan),
+            "model_urdf_sha256": _sha256(transport.urdf_file),
+            "bridge_core_sha256": _sha256(Path(args.ocs2_root) / "go2_x5_ocs2_bridge/src/WbcBridgeCore.cpp"),
+            "arm_plan_serializer_sha256": _sha256(Path(args.ocs2_root) / "go2_x5_ocs2_bridge/include/wbc_bridge/arm_plan_publisher.hpp"),
             "complete_reference_knots": int(len(reference.tl_t)),
             "runtime_stats": transport.runtime_stats,
             "runner_source": {
@@ -802,6 +928,11 @@ def run(args) -> Tuple[Path, dict]:
             "ik_step_norm_rad": "MPC absolute arm target minus measured arm position",
             "ik_step_saturated": "false; joint-limit clipping is recorded separately",
         }
+    if args.policy_adapter == "roboduet_raw":
+        receipt["policy"].update(
+            adapter="roboduet_raw_dual_actor", parameters_sha256=_sha256(sim.parameters_path),
+            arm_models=[{"path": str(path), "sha256": _sha256(path)} for path in sim.arm_model_paths],
+            plan_vel=False, adapter_sha256=_sha256(Path(__file__).with_name("roboduet_raw_mujoco.py")))
     (output_dir / "receipt.json").write_text(json.dumps(receipt, indent=2, allow_nan=False) + "\n")
     return trace_path, receipt
 
@@ -812,7 +943,8 @@ def main():
     parser.add_argument("--task-id")
     parser.add_argument("--rl-sar-root", required=True)
     parser.add_argument("--policy-key", required=True)
-    parser.add_argument("--policy-adapter", choices=("rl_sar", "ma2022", "wb_locoman", "dwbc", "visual", "umi"), default="rl_sar")
+    parser.add_argument("--policy-adapter", choices=("rl_sar", "roboduet_raw", "ma2022", "wb_locoman", "dwbc", "visual", "umi"), default="rl_sar")
+    parser.add_argument("--raw-run-root")
     parser.add_argument("--ma2022-deployment-root")
     parser.add_argument("--ma2022-policy")
     parser.add_argument("--ma2022-env-config")
@@ -827,6 +959,7 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max-steps", type=int, default=0)
     parser.add_argument("--physics-dt", type=float, default=0.0025)
+    parser.add_argument("--integrator", choices=("implicitfast", "Euler"), default="implicitfast")
     parser.add_argument("--ik-damping", type=float, default=0.05)
     parser.add_argument("--orientation-weight", type=float, default=0.25)
     parser.add_argument("--max-ik-step-rad", type=float, default=0.08)
@@ -841,13 +974,27 @@ def main():
     )
     parser.add_argument("--ocs2-timeout-s", type=float, default=90.0)
     parser.add_argument("--ocs2-command-timeout-s", type=float, default=0.5)
+    parser.add_argument("--ocs2-task-profile", choices=("native_ideal", "legacy_benchmark"), default="native_ideal")
+    parser.add_argument("--arm-max-speed", type=float, default=1.5)
     parser.add_argument(
         "--ocs2-command-mode", choices=("full", "pose_only"), default="full"
     )
     parser.add_argument("--viewer", action="store_true")
     parser.add_argument("--realtime", action="store_true")
     args = parser.parse_args()
-    trace_path, receipt = run(args)
+    def terminate(_signum, _frame):
+        raise SystemExit(143)  # invoke atexit cleanup for native controller children
+    signal.signal(signal.SIGTERM, terminate)
+    try:
+        trace_path, receipt = run(args)
+    except Exception as exc:
+        output = Path(args.output).resolve()
+        output.mkdir(parents=True, exist_ok=True)
+        (output / "receipt.json").write_text(json.dumps({
+            "status": "failed", "error": f"{type(exc).__name__}: {exc}",
+            "partial_trace": str(output / "trace.partial.npz") if (output / "trace.partial.npz").exists() else None,
+            "arguments": vars(args)}, indent=2) + "\n")
+        raise
     print(json.dumps({"trace": str(trace_path), "receipt": str(Path(args.output).resolve() / "receipt.json"), "result": receipt["result"]}, indent=2))
 
 

@@ -1,5 +1,12 @@
 # Cross-method MuJoCo benchmark
 
+Reproduction status correction (2026-09-15): the historical integration runs
+below exposed adapter errors, not verified method reproductions. Their traces
+are retained but must not be used to rank methods. Current fixes, remaining
+failures, receipts and runnable commands are documented in
+`/home/simon/Projects/Simon/wbc_rl_mpc/baselines/DOC/CROSS_METHOD_MUJOCO_BUGFIX_20260915.md`.
+No method has yet passed the retained A0/B1 task-success gate in this repair pass.
+
 The benchmark owner is `RoboDuet/benchmark/wbc`. Frozen TaskSpec/reference
 validation, trace-v3 normalization, scoring, and final receipts are handled by
 `cross_method_cli.py`. Method-specific controller processes stay in their
@@ -19,17 +26,21 @@ The current common-plant adapters are:
 
 | method | controller boundary |
 | --- | --- |
-| `roboduet` | deployed RL-SAR dog policy + scripted DLS arm |
-| `roboduet_raw` | original exported dog policy + scripted DLS arm |
-| `ma2022` | recurrent dual-GRU student with arm-reaction prediction + scripted DLS arm |
+| `roboduet` | robot_lab_rear_r30o_s42_11497 + native_ideal/full floating MPC, original task_floating.info |
+| `roboduet_raw` | original exported dog + arm/history/planning actors (plan_vel=False checkpoint) |
+| `ma2022` | recurrent dual-GRU student with native MPC q/dq/ddq arm-reaction prediction |
 | `deep_whole_body_control` | native history encoder + learned 18-joint position targets |
-| `visual_wholebody` | native 71D/history policy for legs + its scripted DLS arm contract |
+| `visual_wholebody` | native 71D/history policy with native joint reindex + persistent IK/position-drive arm |
 | `umi` | official 96D actor with four future EE pose observations |
-| `wb_locoman` | native FATROP sidecar, direct 18-joint torque |
+| `wb_locoman` | native FATROP sidecar with feedback torque recomputed every physics step |
 | `qm_control` | native SQP-MPC + QP-WBC ROS process |
 
 All eight handoff methods have an executable common-plant adapter. The old
 `cross-wbc-v1` IsaacGym traces are not used as current benchmark evidence.
+Executable preflight only checks dependencies; it does not certify tracking.
+The common integrator is now implicitfast (explicit Euler remains selectable).
+Raw/Visual position drives retain native PD gains; receipts record the drive
+type. Other methods use their explicit torque/PD boundary.
 
 From the RoboDuet checkout:
 
