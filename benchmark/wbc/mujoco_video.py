@@ -114,7 +114,8 @@ def _add_path(scene, points, rgba, max_points=90) -> None:
 
 
 def _replay_video(trace: dict, scene_path: Path, output: Path, method: str,
-                  scenario: str, fps: int, width: int, height: int) -> None:
+                  scenario: str, fps: int, width: int, height: int,
+                  show_hud: bool = True) -> None:
     model = mujoco.MjModel.from_xml_path(str(scene_path))
     model.vis.global_.offwidth = max(int(model.vis.global_.offwidth), width)
     model.vis.global_.offheight = max(int(model.vis.global_.offheight), height)
@@ -125,9 +126,9 @@ def _replay_video(trace: dict, scene_path: Path, output: Path, method: str,
     )
     camera = mujoco.MjvCamera()
     camera.type = mujoco.mjtCamera.mjCAMERA_FREE
-    camera.distance = 2.2
-    camera.azimuth = 135
-    camera.elevation = -20
+    camera.distance = 2.35
+    camera.azimuth = 138
+    camera.elevation = -16
     renderer = mujoco.Renderer(model, height=height, width=width, max_geom=500)
     reference = trace["reference_ee_position_m"]
     actual = trace["actual_ee_state"][:, :3]
@@ -149,24 +150,26 @@ def _replay_video(trace: dict, scene_path: Path, output: Path, method: str,
                 _add_sphere(renderer.scene, reference[sample], .025, [1.0, .75, .05, 1.0])
                 _add_sphere(renderer.scene, actual[sample], .022, [.05, .85, 1.0, 1.0])
                 frame = renderer.render()
-                image = Image.fromarray(frame)
-                draw = ImageDraw.Draw(image)
-                error = float(np.linalg.norm(actual[sample] - reference[sample]))
-                lines = [
-                    f"{method} | {scenario}",
-                    f"t={float(trace['reference_time_s'][sample]):.2f}s  EE error={error:.3f}m",
-                    "reference: yellow   actual: cyan",
-                ]
-                draw.rounded_rectangle((12, 12, 430, 83), radius=8, fill=(0, 0, 0, 175))
-                draw.multiline_text((24, 21), "\n".join(lines), fill="white", spacing=4)
-                writer.append_data(np.asarray(image))
+                if show_hud:
+                    image = Image.fromarray(frame)
+                    draw = ImageDraw.Draw(image)
+                    error = float(np.linalg.norm(actual[sample] - reference[sample]))
+                    lines = [
+                        f"{method} | {scenario}",
+                        f"t={float(trace['reference_time_s'][sample]):.2f}s  EE error={error:.3f}m",
+                        "reference: yellow   actual: cyan",
+                    ]
+                    draw.rounded_rectangle((12, 12, 430, 83), radius=8, fill=(0, 0, 0, 175))
+                    draw.multiline_text((24, 21), "\n".join(lines), fill="white", spacing=4)
+                    frame = np.asarray(image)
+                writer.append_data(frame)
     finally:
         renderer.close()
 
 
 def render_trace_artifacts(trace_path, scene_path, output_dir, *, method: str,
                            scenario: str, fps: int = 25, width: int = 960,
-                           height: int = 540) -> dict:
+                           height: int = 540, show_hud: bool = True) -> dict:
     """Create a synchronized MP4 and a static tracking diagnostic from a trace."""
     trace_path = Path(trace_path).resolve()
     scene_path = Path(scene_path).resolve()
@@ -176,10 +179,19 @@ def render_trace_artifacts(trace_path, scene_path, output_dir, *, method: str,
     plot_path = output_dir / "trajectory_tracking.png"
     video_path = output_dir / "mujoco_tracking.mp4"
     _tracking_plot(trace, plot_path, method, scenario)
-    _replay_video(trace, scene_path, video_path, method, scenario, fps, width, height)
+    _replay_video(
+        trace, scene_path, video_path, method, scenario, fps, width, height,
+        show_hud=show_hud,
+    )
     return {
         "schema_version": "mujoco-trace-replay-artifacts-v1",
         "replay_semantics": "recorded_state_trace_replayed_in_hashed_common_mujoco_scene",
+        "overlays": {
+            "reference_ee_path": True,
+            "actual_ee_path": True,
+            "target_base_pose": False,
+            "hud": show_hud,
+        },
         "source_trace": {"path": str(trace_path), "sha256": _sha256(trace_path)},
         "video": {"path": str(video_path), "sha256": _sha256(video_path),
                   "fps": fps, "width": width, "height": height},
@@ -197,10 +209,12 @@ def main(argv=None):
     parser.add_argument("--fps", type=int, default=25)
     parser.add_argument("--width", type=int, default=960)
     parser.add_argument("--height", type=int, default=540)
+    parser.add_argument("--no-hud", action="store_true")
     args = parser.parse_args(argv)
     artifacts = render_trace_artifacts(
         args.trace, args.scene, args.output, method=args.method,
         scenario=args.scenario, fps=args.fps, width=args.width, height=args.height,
+        show_hud=not args.no_hud,
     )
     print(json.dumps(artifacts))
 

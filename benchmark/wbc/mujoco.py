@@ -14,6 +14,7 @@ import copy
 import hashlib
 import json
 import math
+import os
 import sys
 import signal
 import time
@@ -363,7 +364,7 @@ def _set_mpc_dog_command(sim, command: dict, command_limits=None) -> np.ndarray:
 
 
 def _draw_trajectory(viewer, reference: FrozenReference, executed, target, base_position,
-                     follower=None):
+                     follower=None, draw_base_target=False):
     """Draw orange reference and green executed paths in a passive MuJoCo viewer."""
     reference_points = reference.gamma_p
     if len(reference_points) > 101:
@@ -401,7 +402,7 @@ def _draw_trajectory(viewer, reference: FrozenReference, executed, target, base_
                 np.array([1.0, 0.9, 0.1, 1.0], np.float32),
             )
             scene.ngeom += 1
-        if follower is not None and follower.diagnostics is not None:
+        if draw_base_target and follower is not None and follower.diagnostics is not None:
             d = follower.diagnostics
             waypoint = d["base_waypoint_world_m"].copy()
             waypoint[2] = .025
@@ -821,7 +822,10 @@ def run(args) -> Tuple[Path, dict]:
         executed_path.append(actual_position.copy())
         follower = getattr(sim, "follower", None)
         if viewer is not None:
-            _draw_trajectory(viewer, reference, executed_path, goal_position, sim.data.xpos[base], follower)
+            _draw_trajectory(
+                viewer, reference, executed_path, goal_position, sim.data.xpos[base],
+                follower, draw_base_target=args.viewer_base_target,
+            )
         if (args.realtime or viewer is not None) and not (
             use_mpc and args.ocs2_transport == "async"
         ):
@@ -1107,7 +1111,10 @@ def main():
         choices=("scripted_dls_ik", "floating_base_ocs2_mpc"),
         default="scripted_dls_ik",
     )
-    parser.add_argument("--ocs2-root", default="/home/simon/Projects/Simon/wbc_rl_mpc")
+    parser.add_argument(
+        "--ocs2-root",
+        default=os.environ.get("WBC_RL_MPC_ROOT", "/home/simon/Projects/Simon/wbc_rl_mpc"),
+    )
     parser.add_argument(
         "--ocs2-transport", choices=("synchronous", "async"), default="async"
     )
@@ -1125,6 +1132,10 @@ def main():
         "--ocs2-command-mode", choices=("full", "pose_only"), default="full"
     )
     parser.add_argument("--viewer", action="store_true")
+    parser.add_argument(
+        "--viewer-base-target", action="store_true",
+        help="Opt in to the blue follower target-base footprint in the interactive viewer.",
+    )
     parser.add_argument("--realtime", action="store_true")
     args = parser.parse_args()
     def terminate(_signum, _frame):

@@ -535,6 +535,8 @@ def maybe_export_rl_sar(args, logdir, ckpt_id):
 def main(args):
     logdir = args.logdir
     lock_arm = bool(getattr(args, "lock_arm", False))
+    if int(getattr(args, "num_envs", 1)) < 1:
+        raise ValueError("--num_envs must be at least 1")
     ckpt_id_arg = str(args.ckptid)
     ckpt_id = "last" if ckpt_id_arg == "last" else ckpt_id_arg.zfill(6)
 
@@ -556,7 +558,14 @@ def main(args):
     arm_cmd = ArmInitCmd()
 
     env, cfg = load_env(
-        logdir, wrapper=WBCEnv, headless=False, device=args.sim_device, robot=getattr(args, "robot", None)
+        logdir,
+        wrapper=WBCEnv,
+        headless=False,
+        device=args.sim_device,
+        robot=getattr(args, "robot", None),
+        training_scene=bool(getattr(args, "training_scene", False)),
+        num_envs=int(getattr(args, "num_envs", 1)),
+        scene_spacing_scale=float(getattr(args, "scene_spacing_scale", 1.0)),
     )
     apply_checkpoint_command_limits(cfg)
 
@@ -564,8 +573,10 @@ def main(args):
     config_path = os.path.join(os.path.dirname(joylink_client.__file__), "../../config/xbox.yaml")
     joy_ctrl = JoystickController(config_path, dog_cmd, arm_cmd)
     joy_ctrl.print_command_mapping()
-    dog_policy = load_dog_policy(logdir, ckpt_id, cfg)
-    arm_policy = None if stage1_only else load_arm_policy(logdir, ckpt_id, cfg)
+    dog_policy = load_dog_policy(logdir, ckpt_id, cfg, device=args.sim_device)
+    arm_policy = None if stage1_only else load_arm_policy(
+        logdir, ckpt_id, cfg, device=args.sim_device
+    )
     if stage1_only:
         env.env.cfg.env.stage1_arm_curriculum = True
         env.env.stage1_arm_play_intensity = stage1_arm_intensity
@@ -640,6 +651,25 @@ def parse_args():
     parser.add_argument("--logdir", type=str, required=True)
     parser.add_argument("--ckptid", type=str, default="last")
     parser.add_argument("--robot", type=str, default="go2", choices=["go1", "go2"])
+    parser.add_argument(
+        "--num_envs",
+        type=int,
+        default=1,
+        help="Number of parallel viewer environments. Use 4096 to reproduce the large training-scene look.",
+    )
+    parser.add_argument(
+        "--training_scene",
+        action="store_true",
+        default=False,
+        help="Preserve the checkpoint's training terrain for viewer capture; "
+        "domain randomization remains disabled for a stable capture.",
+    )
+    parser.add_argument(
+        "--scene_spacing_scale",
+        type=float,
+        default=1.0,
+        help="Scale training-scene terrain spacing; use 0.333333 to reduce it by 3x.",
+    )
     parser.add_argument(
         "--stage1_only",
         action="store_true",

@@ -32,15 +32,18 @@ METHODS = (
     "roboduet", "roboduet_raw", "umi", "visual_wholebody",
     "wb_locoman", "qm_control", "deep_whole_body_control", "ma2022",
 )
-DEFAULT_BASELINE_ROOT = Path(
-    "/home/simon/Projects/Simon/wbc_rl_mpc/baselines/mpc_baseline"
-)
-WORKSPACE_ROOT = Path("/home/simon/Projects/Simon/wbc_rl_mpc")
+WORKSPACE_ROOT = Path(os.environ.get(
+    "WBC_RL_MPC_ROOT", "/home/simon/Projects/Simon/wbc_rl_mpc",
+))
+DEFAULT_BASELINE_ROOT = WORKSPACE_ROOT / "baselines/mpc_baseline"
 DEFAULT_RL_SAR_ROOT = WORKSPACE_ROOT / "rl_sar"
 DEFAULT_SCENE = DEFAULT_RL_SAR_ROOT / "src/rl_sar_zoo/go2_x5_description/mjcf/scene.xml"
 RAW_BUNDLE_ROOT = Path(
-    "/home/simon/Projects/WBC/RoboDuetRaw/runs/default_go2x5v3_noselfcollision/0905/"
-    "default_go2x5v3_noselfcollision_151454_seed6444/rl_sar"
+    os.environ.get(
+        "ROBODUET_RAW_BUNDLE_ROOT",
+        "/home/simon/Projects/WBC/RoboDuetRaw/runs/default_go2x5v3_noselfcollision/0905/"
+        "default_go2x5v3_noselfcollision_151454_seed6444/rl_sar",
+    )
 )
 COMMON_PHYSICAL_FIELDS = (
     "ee_pos_rmse_m", "ee_rot_rmse_rad", "ee_pos_error_p95_m",
@@ -306,15 +309,24 @@ def run_qm_control(args) -> tuple[Path, list[dict]]:
     roboduet_root = Path(__file__).resolve().parents[2]
     baseline_root = Path(args.baseline_root or DEFAULT_BASELINE_ROOT).resolve()
     python = Path(args.python).resolve()
+    mujoco_python = Path(args.qm_mujoco_python).resolve()
+    mujoco_pythonpath = (
+        Path(args.qm_mujoco_pythonpath).resolve()
+        if args.qm_mujoco_pythonpath else None
+    )
+    scene = Path(args.scene or baseline_root / "mujoco_models/go2_x5_description/mjcf/scene.xml").resolve()
     required = (
         baseline_root / "benchmark/aligned_cli.py",
         baseline_root / "benchmark/task_contract.py",
         baseline_root / "qm_control_baseline/install_aligned/setup.bash",
         baseline_root / "qm_control_baseline/src/go2_x5_whole_body_mpc/scripts/mujoco_bridge.py",
-        baseline_root / "mujoco_models/go2_x5_description/mjcf/scene.xml",
+        scene,
         python,
+        mujoco_python,
     )
+    required_dirs = (mujoco_pythonpath,) if mujoco_pythonpath else ()
     missing = [str(path) for path in required if not path.is_file()]
+    missing.extend(str(path) for path in required_dirs if not path.is_dir())
     if missing:
         raise FileNotFoundError("missing qm_control dependency: " + ", ".join(missing))
 
@@ -326,10 +338,20 @@ def run_qm_control(args) -> tuple[Path, list[dict]]:
         "--roboduet-root", str(roboduet_root),
         "--suite", str(Path(args.suite).resolve()),
         "--output-dir", str(output_root),
-        "--mujoco-python", str(python),
+        "--mujoco-python", str(mujoco_python),
         "--ros-domain-id", str(args.ros_domain_id),
+        "--mjcf-file", str(scene),
+        "--mpc-coupling-mode", args.qm_mpc_coupling_mode,
+        "--workspace-ros-install", os.environ.get(
+            "WBC_ROS_INSTALL", str(WORKSPACE_ROOT / "ros2_ws/install"),
+        ),
+        "--qm-ros-install", os.environ.get(
+            "QM_CONTROL_ROS_INSTALL", str(baseline_root / "qm_control_baseline/install_aligned"),
+        ),
         "--scenarios", *args.scenarios,
     ]
+    if mujoco_pythonpath:
+        command.extend(("--mujoco-pythonpath", str(mujoco_pythonpath)))
     if args.task_id:
         command.extend(("--task-id", args.task_id))
     if args.prepare_only:
@@ -356,7 +378,7 @@ def run_qm_control(args) -> tuple[Path, list[dict]]:
     results = [] if args.prepare_only else _normalize_results(output, roboduet_root, args.scenarios)
     results = _render_results(
         output, results, args,
-        baseline_root / "mujoco_models/go2_x5_description/mjcf/scene.xml",
+        scene,
     )
     manifest = {
         "schema_version": "cross-method-mujoco-run-v1",
@@ -366,6 +388,7 @@ def run_qm_control(args) -> tuple[Path, list[dict]]:
         "finished_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         "command": command,
         "suite": str(Path(args.suite).resolve()),
+        "scene": {"path": str(scene), "sha256": _sha256(scene)},
         "task_id": args.task_id,
         "scenarios": list(args.scenarios),
         "roboduet_git": _git_state(roboduet_root),
@@ -452,6 +475,7 @@ def run_policy_method(args) -> tuple[Path, list[dict]]:
         raise RuntimeError(f"{args.method} preflight blocked: {readiness['blocker']}; missing={readiness['missing']}")
     roboduet_root = Path(__file__).resolve().parents[2]
     python = Path(args.python or "/opt/miniconda3/envs/isaacgym/bin/python").resolve()
+    scene = Path(args.scene or DEFAULT_SCENE).resolve()
     output_root = Path(args.output or (
         roboduet_root / "benchmark/results/cross_method_mujoco" / args.method
     )).resolve()
@@ -474,7 +498,7 @@ def run_policy_method(args) -> tuple[Path, list[dict]]:
             str(python), "-m", "benchmark.wbc.mujoco",
             "--suite", str(suite_path), "--task-id", scenario_task_id,
             "--rl-sar-root", str(policy_root),
-            "--policy-key", contract["policy_key"], "--scene", str(DEFAULT_SCENE),
+            "--policy-key", contract["policy_key"], "--scene", str(scene),
             "--output", str(scenario_dir), "--upper-controller",
             contract.get("upper_controller", "scripted_dls_ik"),
         ]
@@ -482,6 +506,8 @@ def run_policy_method(args) -> tuple[Path, list[dict]]:
             command.extend(["--ocs2-task-profile", "native_ideal",
                             "--ocs2-command-mode", "full",
                             "--ocs2-transport", "synchronous" if args.method == "ma2022" else args.ocs2_transport])
+            if args.method == "roboduet" and args.roboduet_ocs2_task_file:
+                command.extend(["--ocs2-task-file", str(Path(args.roboduet_ocs2_task_file).resolve())])
         if args.method == "ma2022":
             bundle = DEFAULT_RL_SAR_ROOT / "policy/go2_x5/ma2022_student"
             command.extend([
@@ -497,7 +523,7 @@ def run_policy_method(args) -> tuple[Path, list[dict]]:
             command.extend([
                 "--policy-adapter", "wb_locoman",
                 "--wb-locoman-root", str(contract["root"]),
-                "--wb-locoman-python", "/opt/miniconda3/envs/base312/bin/python",
+                "--wb-locoman-python", str(Path(args.wb_locoman_python).resolve()),
             ])
         elif args.method == "deep_whole_body_control":
             command.extend([
@@ -516,7 +542,7 @@ def run_policy_method(args) -> tuple[Path, list[dict]]:
                 "--umi-leg-action-limit", "0.5",
                 "--umi-arm-action-limit", "4.0",
                 "--umi-tool-frame", "arx5_home",
-                "--umi-mujoco-profile", "training_nominal",
+                "--umi-mujoco-profile", args.umi_mujoco_profile,
             ])
         commands.append(command)
         if args.prepare_only:
@@ -562,12 +588,13 @@ def run_policy_method(args) -> tuple[Path, list[dict]]:
         "finished_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         "source_suite": str(Path(args.suite).resolve()), "source_task_id": args.task_id,
         "scenarios": list(args.scenarios), "commands": commands,
+        "scene": {"path": str(scene), "sha256": _sha256(scene)},
         "roboduet_git": _git_state(roboduet_root), "preflight": readiness,
         "result_count": len(results),
     }
     _write_json(output / "cross_method_manifest.json", manifest)
     if status != "failed":
-        results = _render_results(output, results, args, DEFAULT_SCENE)
+        results = _render_results(output, results, args, scene)
     _write_json(output / "results.json", results)
     _write_json(output / "run_state.json", {"status": status, "output": str(output)})
     return output, results
@@ -584,9 +611,33 @@ def main(argv=None):
                         default=("nominal", "push"))
     parser.add_argument("--output")
     parser.add_argument("--baseline-root")
+    parser.add_argument("--scene", help="Common MuJoCo scene used by every method, including qm_control")
     parser.add_argument("--python")
     parser.add_argument("--ros-domain-id", type=int, default=91)
     parser.add_argument("--ocs2-transport", choices=("synchronous", "async"), default="synchronous")
+    parser.add_argument("--roboduet-ocs2-task-file",
+                        help="Frozen OCS2 task override passed only to the roboduet method")
+    parser.add_argument("--qm-mpc-coupling-mode", choices=("sync", "async"), default="async")
+    parser.add_argument(
+        "--wb-locoman-python",
+        default=os.environ.get(
+            "WB_LOCOMAN_PYTHON", "/opt/miniconda3/envs/base312/bin/python",
+        ),
+    )
+    parser.add_argument(
+        "--qm-mujoco-python",
+        default=os.environ.get(
+            "QM_MUJOCO_PYTHON", "/opt/miniconda3/envs/base312/bin/python",
+        ),
+    )
+    parser.add_argument(
+        "--qm-mujoco-pythonpath",
+        default=os.environ.get(
+            "QM_MUJOCO_PYTHONPATH", "",
+        ),
+    )
+    parser.add_argument("--umi-mujoco-profile", choices=("common", "training_nominal"), default="common",
+                        help="Use common for strict shared-environment evaluation")
     parser.add_argument("--timeout-s", type=float, default=480.0)
     parser.add_argument("--prepare-only", action="store_true")
     parser.add_argument("--record-video", action="store_true")
@@ -602,6 +653,18 @@ def main(argv=None):
         parser.error("--method is required (or use --list-methods)")
     if not args.suite:
         parser.error("--suite is required for a run")
+    if args.scene and not Path(args.scene).is_file():
+        parser.error(f"--scene does not exist: {args.scene}")
+    if args.roboduet_ocs2_task_file and not Path(args.roboduet_ocs2_task_file).is_file():
+        parser.error(f"--roboduet-ocs2-task-file does not exist: {args.roboduet_ocs2_task_file}")
+    if args.method != "roboduet" and args.roboduet_ocs2_task_file:
+        parser.error("--roboduet-ocs2-task-file is valid only with --method roboduet")
+    if args.python and not Path(args.python).is_file():
+        parser.error(f"--python does not exist: {args.python}")
+    if args.record_video and not Path(args.video_python).is_file():
+        parser.error(f"--video-python does not exist: {args.video_python}")
+    if args.method == "wb_locoman" and not Path(args.wb_locoman_python).is_file():
+        parser.error(f"--wb-locoman-python does not exist: {args.wb_locoman_python}")
     if not 0 <= args.ros_domain_id <= 232:
         parser.error("--ros-domain-id must be in 0..232")
     if args.video_fps < 1 or args.video_width < 64 or args.video_height < 64:

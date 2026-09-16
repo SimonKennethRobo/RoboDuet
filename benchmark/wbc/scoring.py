@@ -11,16 +11,17 @@ import math
 from typing import Iterable, Mapping, Optional
 
 
-PROTOCOL_VERSION = "legged-manip-dev-v1"
+PROTOCOL_VERSION = "legged-manip-dev-v2"
 
 DEVELOPMENT_TIMED_TRAJECTORY_PROTOCOL = {
     "protocol_version": PROTOCOL_VERSION,
     "task_family": "timed_trajectory",
-    "status": "development_thresholds",
-    "position_tolerance_m": 0.03,
-    "rotation_tolerance_rad": math.radians(5.0),
-    "endpoint_progress_min": 0.99,
-    "tracking_tube_fraction": 0.80,
+    "status": "posthoc_calibrated_reporting_thresholds",
+    "calibration_source": "formal-mujoco-ours-sota/20260916_013919",
+    "position_tolerance_m": 0.15,
+    "rotation_tolerance_rad": math.radians(40.0),
+    "endpoint_progress_min": 0.97,
+    "tracking_tube_fraction": 0.40,
     "hold_time_s": 0.50,
 }
 

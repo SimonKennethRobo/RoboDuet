@@ -10,6 +10,7 @@ from benchmark.wbc.dwbc_mujoco import DwbcMujoco, VISUAL_POLICY_ORDER
 from benchmark.wbc.mujoco import JOINT_NAMES, joint_order_indices, _set_mpc_dog_command, configure_position_drives
 from benchmark.wbc.umi_mujoco import UMI_TO_X5_HOME, UmiMujoco
 from benchmark.wbc.wb_locoman_mujoco import WbLocomanMujoco
+from benchmark.data.run_qm_control_library import select_task as select_qm_control_task
 from scripts.rl_sar_obs import RlSarObservation, effective_gait_frequency
 
 
@@ -50,6 +51,17 @@ def test_policy_joint_order_roundtrip_by_name(plant):
     physical = np.arange(18.)
     np.testing.assert_array_equal(policy_from_canonical[:6], [3, 4, 5, 0, 1, 2])
     np.testing.assert_array_equal(physical[policy_from_canonical][canonical_from_policy], physical)
+
+
+def test_qm_control_library_selects_one_frozen_cell():
+    suite = {"trajectories": [
+        {"cell_A": 5, "cell_B": 3, "source_trajectory_id": "curriculum-a5-b3", "task_id": "task-53"},
+        {"source_trajectory_id": "random-line-000", "task_id": "task-random"},
+    ]}
+    assert select_qm_control_task(suite, (5, 3), None)["task_id"] == "task-53"
+    assert select_qm_control_task(suite, None, "random-line-000")["task_id"] == "task-random"
+    with pytest.raises(ValueError, match="found 0"):
+        select_qm_control_task(suite, (0, 0), None)
 
 
 def test_robot_lab_command_layout_and_separate_arm_velocity_scale():

@@ -9,7 +9,11 @@ import pytest
 import torch
 
 from benchmark.compare import _summary_rows
-from benchmark.wbc.scoring import aggregate_task_events, timed_trajectory_success
+from benchmark.wbc.scoring import (
+    DEVELOPMENT_TIMED_TRAJECTORY_PROTOCOL,
+    aggregate_task_events,
+    timed_trajectory_success,
+)
 from benchmark.wbc.suite import finalize_task_spec, trajectory_features
 from benchmark.wbc.workspace import build_workspace_grid, summarize_workspace_results
 
@@ -58,6 +62,20 @@ def test_timed_trajectory_success_requires_and_accepts_full_contract():
         }
     )
     assert result == {"success": True, "end_reason": "success"}
+
+
+def test_reporting_protocol_is_explicitly_versioned_and_calibrated():
+    assert DEVELOPMENT_TIMED_TRAJECTORY_PROTOCOL == {
+        "protocol_version": "legged-manip-dev-v2",
+        "task_family": "timed_trajectory",
+        "status": "posthoc_calibrated_reporting_thresholds",
+        "calibration_source": "formal-mujoco-ours-sota/20260916_013919",
+        "position_tolerance_m": 0.15,
+        "rotation_tolerance_rad": pytest.approx(np.deg2rad(40.0)),
+        "endpoint_progress_min": 0.97,
+        "tracking_tube_fraction": 0.40,
+        "hold_time_s": 0.50,
+    }
 
 
 def test_full_time_law_changes_reference_content_hash():

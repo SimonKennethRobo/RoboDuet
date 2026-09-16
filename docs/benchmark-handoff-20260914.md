@@ -1,5 +1,9 @@
 # Legged Manipulation Benchmark：IsaacGym 完整交付与后续 MuJoCo 交接
 
+> **最新入口（2026-09-16）：** 正式多节点 MuJoCo 重跑以第 39 节和
+> `docs/distributed-formal-mujoco-handoff-20260916.md` 为准；第 0 节及第 38 节保留为
+> 历史记录，不再覆盖最新地形、ours MPC 或分布式执行口径。
+
 日期：2026-09-14，Asia/Shanghai。
 
 主仓库：`/home/simon/Projects/WBC/RoboDuet`。
@@ -12,8 +16,9 @@ RoboDuetRaw 的同类运行修复见第 29 节；A0/B0 底盘不动的后续修�
 切向 yaw 与共用全向 waypoint PID；第 28–30 节的旧跟随规则作为历史保留。
 
 `frozen_trajectory_library2` 的 A5/B3 跟随诊断见第 32 节；Visual/Raw 提交与
-仓库边界见第 33 节，MA2022 和 UMI-on-Legs 的最新修复分别见第 34、36 节。
-对于本轮 learned baseline 工作，以第 31–36 节为准，第 0 节的早期 HEAD 和
+仓库边界见第 33 节，MA2022 和 UMI-on-Legs 的最新修复分别见第 34、36 节；
+原生纯 MPC 的冻结库入口、viewer 外力和异步耦合见第 37 节。对于本轮 learned baseline 工作，以
+第 31–37 节为准，第 0 节的早期 HEAD 和
 未提交文件清单仅作历史记录。
 
 部署仓库：`/home/simon/Projects/Simon/wbc_rl_mpc/rl_sar`。
@@ -1332,3 +1337,142 @@ A0/B0 与 A2/B2 在该 profile 下分别完整运行 935、497 步且无跌倒�
 0.6/0.7 action limit 也会令 A2/B2 跌倒。故 0.5 是本轮满足“腿实际运动”的
 可运行 profile，不是全轨迹稳定或 tracking-success profile。最终四轨迹证据位于
 `benchmark/results/umi_repair_20260915/mobile_profile_final_v2/`，失败仍保留在分母。
+
+## 37. 2026-09-15 原生 qm_control 冻结库、viewer 外力与异步耦合
+
+新增 `benchmark/data/run_qm_control_library.py`，把冻结库的 `--cell A B` 或
+`--trajectory` 选择解析为既有 TaskSpec-v3 ID，再调用原生 qm_control 的
+`benchmark.aligned_cli`。默认只跑 nominal，重复 `--scenario nominal/push` 可运行
+两种场景。外层入口：
+
+```bash
+cd /home/simon/Projects/Simon/wbc_rl_mpc
+./run_qm_control_library.sh --cell 5 3
+```
+
+实时 MuJoCo 窗口与 MA2022 使用同样的参数形式；例如 cell 2/2：
+
+```bash
+cd /home/simon/Projects/Simon/wbc_rl_mpc
+./run_qm_control_library.sh --viewer --cell 2 2
+```
+
+`--viewer` 同时打开 passive viewer 和参考轨迹显示。bridge 由 400 Hz ROS
+墙钟定时器驱动，每次推进一个 2.5 ms 物理步；它不是无节拍的离线高速回放，但
+viewer 渲染或系统负载较高时仍可能慢于 1x 墙钟速度。
+
+最初 viewer 能显示白色鼠标外力箭头，但机器人没有相应受力。根因是 bridge 的
+`_apply_disturbance()` 在每个物理步前把 `data.xfrc_applied[base]` 整体清零，擦除了
+passive viewer 已写入的鼠标 wrench。当前实现会在 viewer lock 内保存鼠标 wrench、
+叠加 TaskSpec 定时 push、执行 `mj_step()`，然后只撤销定时 push，避免两类外力互相
+覆盖或逐步累积。用户已在
+`benchmark/results/qm_control_mouse_force_fix/20260915_205328/` 的实时窗口中确认鼠标
+外力能改变机器人运动。该次交互导致跌倒，但鼠标力大小/持续时间不可复现，且
+`actual_disturbance_impulse_ns` 只统计 TaskSpec 定时 push，所以此目录仅是交互修复
+验证，不是正式 push benchmark。正式可复现扰动命令为：
+
+```bash
+./run_qm_control_library.sh --viewer --cell 2 2 --scenario push
+```
+
+qm_control 默认使用 `--mpc-coupling-mode async`：首次收到安全有效的 WBC 控制量后，
+MuJoCo 始终用最新可用控制量推进，不等待下一次 MPC 更新；`sync` 仅保留作逐控制量
+诊断。`bridge_metrics.json` 记录收到的控制更新数、fresh/reused physics steps 以及
+初始化或同步等待 tick，便于审计实际时序。
+
+默认异步 cell 2/2 实跑位于
+`benchmark/results/qm_control_async_default/20260915_205725/`：3964 个物理步使用
+新 WBC 控制量，5 个物理步复用上一控制量且继续推进，`sync_wait_ticks=0`；这组
+计数描述 400 Hz WBC command 边界，不等同于 50 Hz MPC policy 更新次数。MPC、WBC
+和 MuJoCo 分属独立 ROS 进程，OCS2 的 policy/observation publisher 使用独立 worker；
+进程 exit 0、状态有限、无跌倒。
+
+cell 2/2 的可视化实跑证据位于
+`benchmark/results/qm_control_viewer_cell22/20260915_204253/`：exit 0、497/497
+有效采样、底盘 XY 净位移 2.043 m、无跌倒/数值故障；严格 tracking gate 仍因
+deadline timeout 为 `success=false`。
+
+cell 5/3 对应 `curriculum-a5-b3`、任务
+`timed-trajectory-cc6e0cf14ac6a85c`，reference duration 为 24.4291 s，deadline
+为 25.4291 s。正式 nominal 位于
+`benchmark/results/qm_control_cell53/20260915_202802/`：进程 exit 0、1272/1272
+有效样本、command received、状态有限、无跌倒/数值故障；底盘 XY 净位移
+4.975 m，最终路径进度 0.99991。位置 RMSE 为 0.2443 m，姿态 RMSE 为
+0.5525 rad，tracking-tube fraction 为 0，最终 deadline timeout 且
+`success=false`。因此它证明纯 MPC 在该高难度 cell 上完成物理闭环和整段路径推进，
+不证明严格末端跟踪通过。
+
+当前仓库边界需要继续保留：RoboDuet 中的
+`benchmark/data/run_qm_control_library.py`、本交接文档及 adapter 选择测试尚未提交；
+`sysid/run.sh` 和 `sysid/run_policy_library_benchmark.py` 的现有修改与本项无关，不要
+混入提交。外层 `run_qm_control_library.sh` 以及
+`baselines/mpc_baseline/benchmark/aligned_cli.py`、qm_control 的
+`mujoco_bridge.py`/`whole_body_mujoco.launch.py` 位于非 Git 容器，不能由 RoboDuet
+提交覆盖。`qm_control_baseline/install_aligned` 已通过 `cmake --install` 刷新；
+迁移或重建环境时必须同步这些外部源码并重新安装。
+
+## 38. 2026-09-15 正式并行 MuJoCo 粗糙地面测评入口
+
+按用户最新要求，不再以外部方法复现认证作为启动门槛。新增
+`benchmark/wbc/formal_mujoco.py` 和 `benchmark/data/run_formal_mujoco.sh`，默认在
+同一冻结环境中调度八种方法、68 条 `frozen_trajectory_library2` 轨迹及
+nominal/push 两种场景，即 544 个 method-task job、1088 个 scenario result。
+
+统一环境 ID 为 `go2-x5-mujoco-mild-rough-v1`：公共 Go2-X5 资源、2.5 ms physics、
+`implicitfast`、16 m × 16 m 的确定性 129 × 129 heightfield、seed 20260915、默认
+高差边界 ±10 mm、地面摩擦 `0.8 0.02 0.01`。中心出生点高度严格为 0；实际默认地形
+范围约 `[-8.20, 10.00] mm`，RMS 约 3.05 mm。生成 scene、原始 scene/robot、mesh
+resource tree 和 height array 均写 SHA-256。所有方法消费同一粗糙地面 scene；按用户
+最新要求，UMI 是唯一允许的 method-specific dynamics 例外，保留其 `training_nominal`
+profile：腿 damping 0.1 Nms/rad、frictionloss 0.025 Nm、足端 slide friction 1.0。
+该修改只发生在 UMI adapter 的内存模型并写入环境 manifest；qm_control 仍通过新增
+`--mjcf-file` 消费同一 scene。
+
+统一扰动继续由 TaskSpec 派生：base COM、environment-world +X、80 N、0.1 s，目标冲量
+8 N·s。每个 worker 使用独立 ROS domain，子任务使用独立进程组；状态原子写入
+`formal_state.json`，统一逐场景汇总写入 `formal_results.json`。失败保留且默认 resume
+不覆盖，显式 `--rerun-failed` 才重跑。
+
+正式启动命令：
+
+```bash
+cd /home/simon/Projects/WBC/RoboDuet
+./benchmark/data/run_formal_mujoco.sh --workers 4
+```
+
+也可从外层 workspace 执行
+`/home/simon/Projects/Simon/wbc_rl_mpc/run_formal_mujoco_benchmark.sh --workers 4`。
+`--dry-run` 已核对生成 544/1088 项计划；相关测试 `30 passed`。两 worker 并行真实
+A0/B0 nominal 验证中 RoboDuetRaw/Visual 均完整记录 935 steps、无跌倒或数值故障，
+receipt scene SHA-256 同为
+`90c5563d980dafb3febd15e184ea301c540890a5b7302b379278f00e77da349f`。qm_control 另完成
+同一 scene hash 的完整 nominal 实跑。RoboDuetRaw rough/push 实跑记录 5 个 20 ms
+active samples，积分冲量严格为 `[8, 0, 0] N·s`。
+
+## 39. 2026-09-16 分布式正式测评最终口径
+
+第 38 节的 `mild-rough-v1` 与 ±10 mm 地形已经被后续用户决策替代。下一 session 的
+权威执行文件为：
+
+```text
+docs/distributed-formal-mujoco-handoff-20260916.md
+```
+
+最终 ours policy 为 `robot_lab_rear_r30o_s42_11497`，MPC 必须使用
+`go2_x5_ocs2/config/robot_lab_rear_r30o_s42_11497/task_sota.info`；其 SHA-256 为
+`8c36bf47fe59353f0984d27fcc46477ed9e3f70850f01963a6a030b201c3b938`。最终统一环境为
+`go2-x5-mujoco-paper-rolling-v3`：16 m × 16 m、129 × 129、seed 20260915、连续
+heightfield `[-0.10,+0.10] m`，无碎石，地面摩擦 `0.8 0.02 0.01`。论文风格使用无
+棋盘纹理的哑光 sage-stone 地面、蓝灰天空和柔和侧向光。
+
+录像只叠加 reference/actual EE path，不渲染 target base pose；实时 viewer 也默认隐藏
+蓝色 target-base footprint。代表结果可从 trace 用 `--no-hud` 重渲染为 1920×1080。
+单条 ours A0/B0 nominal 已在该地形跑满 935 steps、final progress 1.0、无跌倒和数值
+故障；严格 endpoint-hold gate 仍 timeout，因此只是 smoke。
+
+正式目标仍为八方法 × 68 轨迹 × nominal/push，共 1088 个 scenario result，并在用户
+给定的 7 台主机（8 张 GPU）上按 task 分片。当前单机 runner 已存在，但 ours task-file
+透传、跨节点 shard、独立节点 state 和严格聚合器尚未实现；不得把它们写成已完成。
+用户会先把外层 workspace 同步到 NFS。下一 session 收到“开始执行”后，按专用交接的
+P0→P4 直接预检、补齐入口、两节点 smoke、正式启动和持续监控，不重新规划，也不要
+直接运行会启动无关训练的 `tmp/run_cluster.sh`。

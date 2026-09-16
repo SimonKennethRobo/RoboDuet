@@ -288,7 +288,16 @@ def load_arm_policy(logdir, ckpt_id, cfg, device="cpu"):
 
     return policy
 
-def load_env(logdir, wrapper, headless=False, device='cuda:0', robot=None):
+def load_env(
+    logdir,
+    wrapper,
+    headless=False,
+    device='cuda:0',
+    robot=None,
+    training_scene=False,
+    num_envs=1,
+    scene_spacing_scale=1.0,
+):
     print('*'*10, logdir)
     cfg = build_roboduet_config(options=RoboDuetRuntimeOptions(num_envs=1, robot=robot or "go2"))
 
@@ -331,9 +340,44 @@ def load_env(logdir, wrapper, headless=False, device='cuda:0', robot=None):
     # a waypoint policy silently gets replayed as a joint-residual one.
     print(f"[RoboDuet] arm action mode: {cfg.arm.action_mode}")
 
-    cfg.terrain.mesh_type = "plane"
-    if cfg.terrain.mesh_type == "plane":
-      cfg.terrain.teleport_robots = False
+    if training_scene:
+        if scene_spacing_scale <= 0:
+            raise ValueError("scene_spacing_scale must be positive")
+        if scene_spacing_scale != 1.0:
+            original_spacing = (
+                float(cfg.terrain.terrain_length),
+                float(cfg.terrain.terrain_width),
+            )
+            original_horizontal_scale = float(cfg.terrain.horizontal_scale)
+            length_pixels = int(round(original_spacing[0] / original_horizontal_scale))
+            width_pixels = int(round(original_spacing[1] / original_horizontal_scale))
+            cfg.terrain.horizontal_scale *= scene_spacing_scale
+            cfg.terrain.terrain_length = length_pixels * cfg.terrain.horizontal_scale
+            cfg.terrain.terrain_width = width_pixels * cfg.terrain.horizontal_scale
+            cfg.terrain.border_size *= scene_spacing_scale
+            print(
+                "[RoboDuet] scene spacing: "
+                f"{original_spacing} -> "
+                f"({cfg.terrain.terrain_length}, {cfg.terrain.terrain_width}) m"
+            )
+        print(
+            "[RoboDuet] training scene: preserving checkpoint terrain "
+            f"({cfg.terrain.mesh_type}, {cfg.terrain.num_rows}x{cfg.terrain.num_cols}, "
+            f"{num_envs} envs)"
+        )
+        if num_envs > 1 and cfg.terrain.mesh_type in ("heightfield", "trimesh"):
+            scene_x = float(cfg.terrain.num_rows * cfg.terrain.terrain_length)
+            scene_y = float(cfg.terrain.num_cols * cfg.terrain.terrain_width)
+            scene_span = max(scene_x, scene_y)
+            cfg.viewer.pos = [scene_x * 0.5, -scene_span * 0.6, scene_span * 0.65]
+            cfg.viewer.lookat = [scene_x * 0.5, scene_y * 0.5, 0.0]
+            print(
+                "[RoboDuet] overview camera: "
+                f"pos={cfg.viewer.pos}, lookat={cfg.viewer.lookat}"
+            )
+    else:
+        cfg.terrain.mesh_type = "plane"
+        cfg.terrain.teleport_robots = False
 
     cfg.domain_rand.randomize_dog_obs_latency = False
     cfg.domain_rand.dog_obs_latency_jitter_steps = 0
@@ -355,14 +399,15 @@ def load_env(logdir, wrapper, headless=False, device='cuda:0', robot=None):
     cfg.domain_rand.randomize_end_effector_force = False
 
     cfg.env.num_recording_envs = 1
-    cfg.env.num_envs = 1
-    cfg.terrain.num_rows = 5
-    cfg.terrain.num_cols = 5
-    cfg.terrain.border_size = 0
-    cfg.terrain.center_robots = True
-    cfg.terrain.center_span = 1
-    cfg.terrain.teleport_robots = False
-    cfg.asset.render_sphere = True
+    cfg.env.num_envs = int(num_envs)
+    if not training_scene:
+        cfg.terrain.num_rows = 5
+        cfg.terrain.num_cols = 5
+        cfg.terrain.border_size = 0
+        cfg.terrain.center_robots = True
+        cfg.terrain.center_span = 1
+        cfg.terrain.teleport_robots = False
+    cfg.asset.render_sphere = False
     cfg.env.episode_length_s = 10000
     cfg.commands.resampling_time = 10000
     # Cfg.domain_rand.lag_timesteps = 6

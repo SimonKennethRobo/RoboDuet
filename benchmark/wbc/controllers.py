@@ -383,7 +383,10 @@ class NativeOcs2Transport:
 
     def _start_processes(self):
         ros_setup = "/opt/ros/jazzy/setup.zsh"
-        ws_setup = self.stack_root / "ros2_ws/install/setup.zsh"
+        ros_install = Path(os.environ.get(
+            "WBC_ROS_INSTALL", str(self.stack_root / "ros2_ws/install"),
+        )).resolve()
+        ws_setup = ros_install / "setup.zsh"
         config = self.output_dir / "bridge.yaml"
         source_task = self.task_file or (
             self.stack_root
@@ -425,7 +428,7 @@ class NativeOcs2Transport:
             self.stack_root / "go2_x5_description" / "urdf" / "arx5_ac1_floating.urdf"
         )
         kernel = (
-            self.stack_root / "ros2_ws" / "install" / "ocs2_mobile_manipulator"
+            ros_install / "ocs2_mobile_manipulator"
             / "lib" / "libocs2_mobile_manipulator.a"
         )
         digest = hashlib.sha256(
@@ -434,7 +437,7 @@ class NativeOcs2Transport:
         ).hexdigest()[:16]
         self.codegen_dir = Path("/tmp") / f"roboduet_ocs2_{self.mode}_{os.getuid()}" / digest
         executable = (
-            self.stack_root / "ros2_ws" / "install" / "go2_x5_ocs2_bridge"
+            ros_install / "go2_x5_ocs2_bridge"
             / "lib" / "go2_x5_ocs2_bridge" / runner_name
         )
         self.runner_executable = executable

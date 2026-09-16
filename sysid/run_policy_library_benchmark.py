@@ -47,7 +47,13 @@ def checked_copy(source, target, digest):
 def prepare(args):
     out = args.output.resolve()
     if out.exists():
-        raise FileExistsError(f"use --resume with existing output: {out}")
+        if (out / "plan.json").exists():
+            raise FileExistsError(f"use --resume with existing output: {out}")
+        unexpected = {path.name for path in out.iterdir()} - {"suite", "inputs", "source"}
+        if unexpected:
+            raise FileExistsError(
+                f"output contains files unrelated to an interrupted preparation: {out}"
+            )
     library = args.library.resolve()
     suite_path = library / "suite/trajectory_suite.json"
     suite = json.loads(suite_path.read_text())
@@ -57,8 +63,8 @@ def prepare(args):
     selected = random.Random(args.seed).sample(suite["trajectories"], args.count)
     for task in selected:
         FrozenReference(suite_path, task["task_id"])
-    out.mkdir(parents=True)
-    (out / "suite").mkdir()
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "suite").mkdir(exist_ok=True)
     checked_copy(suite_path, out / "suite/trajectory_suite.json", sha(suite_path))
     checked_copy(suite_path.parent / suite["reference_archive"]["path"],
                  out / "suite" / suite["reference_archive"]["path"], suite["reference_archive"]["sha256"])
@@ -70,14 +76,18 @@ def prepare(args):
         spec = json.loads((source_root / "protocol.json").read_text())
         inputs = json.loads((source_root / "input_manifest.json").read_text())["files"]
         key = manifest["policy"]
-        bundle = Path(manifest["robot_dir"])
+        manifest_bundle = Path(manifest["robot_dir"])
+        local_bundle = source_root / "policy_bundle/go2_x5"
+        bundle = local_bundle if local_bundle.is_dir() else manifest_bundle
         frozen = out / "inputs" / key
         robot = frozen / "rl_sar/policy/go2_x5"
         base = bundle / "base.yaml"
-        expected_base = inputs[str(base)]
+        expected_base = inputs[str(manifest_bundle / "base.yaml")]
         base_bytes = base.read_bytes()
         base_origin = "current_file"
         if hashlib.sha256(base_bytes).hexdigest() != expected_base:
+            if bundle == local_bundle:
+                raise ValueError(f"experiment-local policy snapshot changed: {base}")
             # Recover the exact collected config into this experiment only.
             repo = Path(manifest["stack_root"]) / "rl_sar"
             relative = base.relative_to(repo).as_posix()
@@ -90,18 +100,24 @@ def prepare(args):
                     break
             else:
                 raise ValueError(f"cannot recover collected base config: {source_root}")
-        robot.mkdir(parents=True)
+        robot.mkdir(parents=True, exist_ok=True)
         (robot / "base.yaml").write_bytes(base_bytes)
         for name in ["policy.pt", "config.yaml"]:
             source = bundle / key / name
-            checked_copy(source, robot / key / name, inputs[str(source)])
+            checked_copy(source, robot / key / name,
+                         inputs[str(manifest_bundle / key / name)])
         selected_model = manifest["models"]["selected"]
         tasks = {}
         for mode in ["ideal", "selected"]:
             source = source_root / "mpc" / f"task_{key}_{mode}.info"
             digest = manifest["ideal_task_sha256"] if mode == "ideal" else selected_model["task_sha256"]
             tasks[mode] = checked_copy(source, frozen / source.name, digest)
-        checked_copy(selected_model["model"], frozen / "selected_model.json", selected_model["model_sha256"])
+        # Manifests retain collection-time absolute paths. Resolve models from
+        # the experiment root so a complete identification directory remains
+        # relocatable as one unit.
+        selected_model_path = source_root / "models_v2" / f"{selected_model['model_name']}.json"
+        checked_copy(selected_model_path, frozen / "selected_model.json",
+                     selected_model["model_sha256"])
         for name in ["mpc/manifest.json", "protocol.json", "models_v2/selection.json", "input_manifest.json"]:
             checked_copy(source_root / name, frozen / name, sha(source_root / name))
         if sha(source_root / "protocol.json") != manifest["protocol_sha256"]:

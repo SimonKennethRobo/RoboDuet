@@ -119,13 +119,21 @@ def _scalar_stats(values):
     }
 
 
-def score_trace_archive(path) -> list[dict]:
-    """Recompute core accuracy/events/success directly from a saved raw trace."""
+def score_trace_archive(path, protocol_override=None) -> list[dict]:
+    """Recompute metrics from a raw trace, optionally under an explicit protocol.
+
+    Without an override, the protocol embedded in the immutable trace remains the
+    authority.  An override makes post-hoc threshold calibration explicit instead
+    of silently changing historical results.
+    """
     with np.load(path, allow_pickle=False) as trace:
         schema = str(trace["schema_version"].item())
         if schema not in SUPPORTED_TRACE_SCHEMA_VERSIONS:
             raise ValueError(f"unsupported trace schema: {schema}")
-        protocol = json.loads(str(trace["protocol_json"].item()))
+        embedded_protocol = json.loads(str(trace["protocol_json"].item()))
+        protocol = dict(
+            embedded_protocol if protocol_override is None else protocol_override
+        )
         kinematic_protocol = (
             json.loads(str(trace["kinematic_protocol_json"].item()))
             if "kinematic_protocol_json" in trace.files
@@ -595,9 +603,18 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="Rescore a WBC raw trace archive")
     parser.add_argument("archives", nargs="+")
     parser.add_argument("--output", default=None)
+    parser.add_argument(
+        "--current-protocol",
+        action="store_true",
+        help="Use the current reporting protocol instead of each trace's embedded protocol",
+    )
     args = parser.parse_args(argv)
+    protocol_override = (
+        DEVELOPMENT_TIMED_TRAJECTORY_PROTOCOL if args.current_protocol else None
+    )
     payload = {
-        str(Path(path)): score_trace_archive(path) for path in args.archives
+        str(Path(path)): score_trace_archive(path, protocol_override=protocol_override)
+        for path in args.archives
     }
     encoded = json.dumps(payload, indent=2, allow_nan=False)
     if args.output:

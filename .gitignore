@@ -83,3 +83,6 @@ tests
 .stfolder
 .claude
 .codex
+
+# Runtime viewer snapshot
+/now.png
