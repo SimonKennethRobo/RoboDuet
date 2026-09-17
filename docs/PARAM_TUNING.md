@@ -308,7 +308,7 @@ q_target = dof_pos + dq                                       # ik_waypoint（�
 `--goal_reaching` 额外提供 6 个 plan-action 通道，由 `WBCEnv.plan()` 转成四足速度/posture 命令，
 三种模式下都不进入 DLS。
 
-**已知精度**（`scripts/debug_ik_reach.py`，纯 IK、策略残差置零）
+**已知精度**（`tmp/scripts/debug_ik_reach.py`，纯 IK、策略残差置零）
 
 - 干净条件（贴合可达 box、无复位噪声、无臂 DR）：位置 median ~2 cm。
 - 绝对 box（当前设置、无筛选）：位置 median 偏大、收敛率偏低——源于 box 含大量不可达目标，

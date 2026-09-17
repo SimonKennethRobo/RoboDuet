@@ -66,7 +66,7 @@ runs
 docker/rsc
 *.swp
 *.jit
-tmp
+tmp/
 *.tar
 resources/robots/**/urdf/*_mount_bucket_*.urdf
 
