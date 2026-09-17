@@ -37,7 +37,7 @@ def discover_run_logdirs(candidate_dir: Path) -> List[Path]:
         except OSError:
             continue
         for child in reversed(list(children)):
-            if child.is_dir():
+            if child.is_dir() and not child.name.startswith("."):
                 stack.append(child)
 
     return sorted(logdirs, key=lambda path: str(path))

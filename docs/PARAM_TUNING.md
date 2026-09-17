@@ -1,0 +1,420 @@
+# 参数说明 / 调参指南（wbc.py）
+
+本文件是 `go1_gym/envs/config/wbc.py` 中 `ROBODUET_OVERRIDES` 及相关常量的**唯一注释来源**。
+`wbc.py` 里只保留裸参数、不写任何注释；所有含义、取值理由、调参方向集中在这里。
+
+> 约定：`wbc.py` 用完整 `Cfg` 路径作为键，仅覆盖从 LeggedRobot → Go1 → WTW 继承链中
+> **新增或修改**的字段；派生的观测维度和运行时特征开关在 `core.py` 里由这些源值计算，不在此表。
+
+目录：
+
+1. [机器人资产与臂接线（ROBOT_ASSET_FILES / ROBOT_ARM_SPEC）](#1-机器人资产与臂接线)
+2. [臂 PD 增益（arm.control.stiffness_arm / damping_arm）](#2-臂-pd-增益)
+3. [底层控制与资产（control.* / asset.*）](#3-底层控制与资产)
+4. [环境与观测开关（env.*）](#4-环境与观测开关)
+5. [stage-1 臂扰动课程（env.stage1_arm_*）](#5-stage-1-臂扰动课程)
+6. [狗命令与奖励（commands.* / reward_scales.*）](#6-狗命令与奖励)
+7. [狗 policy 布局与 critic 特权观测（dog.*）](#7-狗-policy-布局与-critic-特权观测)
+8. [臂 policy 布局与目标采样（arm.num_actions_arm\* / num_privileged_links / arm.target.\*）](#8-臂-policy-布局与目标采样)
+9. [stage-2 DLS-IK 控制器（arm.ik.\*）](#9-stage-2-dls-ik-控制器)
+10. [WBC 奖励与终止（wbc.*）](#10-wbc-奖励与终止)
+11. [域随机化（domain_rand.*）](#11-域随机化)
+12. [Reset 高度与姿态课程（terrain.* / init_state.pos）](#12-reset-高度与姿态课程)
+
+---
+
+## 1. 机器人资产与臂接线
+
+`ROBOT_ARM_SPEC` 把每个机器人的臂接线参数化，在 `core.configure_robot_asset` 中按 `--robot` 应用。
+
+| 字段                 | 含义                                                                             |
+| -------------------- | -------------------------------------------------------------------------------- |
+| `ee_body_name`     | 被跟踪的末端连杆（go1/go2 =`zarx_body6`；go2_x5 = `x5_link6`）               |
+| `ee_local_pos`     | 把跟踪点从该连杆原点平移到抓取点的偏移（仅 x5 臂的 gripper_center 需要，见 §9） |
+| `mount_joint_name` | mount 随机化作用的固定关节（其 transform 被抖动）                                |
+
+`ROBOT_ASSET_FILES` 为各机器人的 URDF 路径。三个机器人（go1 / go2 / go2_x5）共用一套 union 配置。
+
+---
+
+## 2. 臂 PD 增益
+
+`arm.control.stiffness_arm` / `damping_arm` 按 **精确 DOF 名**查表（见 `_process_dof_props` 与
+`_init_buffers` 的增益推导）。它是**所有已注册臂 DOF 名的并集**——未命中的键永远不会被用到，
+所以同一张表同时服务 arx/zarx 臂（go1、go2）和 x5 臂（go2_x5）。给新臂加 DOF 时往表里补键即可，
+不会影响其它机器人。
+
+---
+
+3. 底层控制与资产
+
+| 参数                                  | 含义 / 备注                                                                                                                                                        |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `control.control_type`              | `"M"` = mixed：腿用力矩控制，臂 slice 用位置目标                                                                                                                 |
+| `control.update_obs_freq`           | **仅当 `use_vision=True` 时生效**，视觉观测更新频率                                                                                                        |
+| `asset.penalize_contacts_on`        | 这些连杆接触受碰撞惩罚                                                                                                                                             |
+| `asset.terminate_after_contacts_on` | `[""]` = 不因接触终止 episode                                                                                                                                    |
+| `asset.self_collisions`             | **1 = 关闭自碰，0 = 开启自碰**（IsaacGym 语义）                                                                                                              |
+| `asset.render_sphere`               | 是否在 viewer 里画出**EE 目标可视化球**（`legged_robot.py:151`）。**纯渲染开关，不影响物理/训练**；headless 下无效。play 置 True，benchmark 置 False |
+
+> 注：腿/臂的真实 PD 增益不在 `control.*`，而在 `dog.control.stiffness_leg`/`damping_leg`（§7）与
+> `arm.control.stiffness_arm`/`damping_arm`（§2）。原先的 `control.stiffness`/`control.damping` 已删除
+> （前者只被当分组 key 用、值失效，后者零读取）。
+
+---
+
+## 4. 环境与观测开关
+
+| 参数                                        | 含义 / 备注                                                                                                                                                                                                                                                |
+| ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `env.keep_arm_fixed`                      | True 时臂**不由臂 policy 驱动**，而是被 `_keep_arm_fixed()` 保持在每个 env 复位时随机化的固定位姿上（`wbc_env.py:517`）。stage-1 训练狗时臂当作静态负载/扰动源；开关/课程会进一步调制（见 §5）。臂 policy 接管（stage-2/switch_open）后此项让位 |
+| `env.num_actions`                         | 总动作维（12 腿 + 6 臂）                                                                                                                                                                                                                                   |
+| `env.priv_observe_*`                      | 是否把对应量加入**critic 特权观测**（base_mass、com、Kp/Kd、dof_damping、vel 等）                                                                                                                                                                    |
+| `env.priv_observe_high_freq_goal`         | 是否向特权观测加入**未降采样**的目标相对 EE 位姿                                                                                                                                                                                                     |
+| `env.observe_two_prev_actions`            | 是否观测上上一步动作                                                                                                                                                                                                                                       |
+| `env.record_video` / `recording_*`      | 录像开关与分辨率/帧步长/叠加文字轨迹                                                                                                                                                                                                                       |
+| `env.debug_viz`                           | 调试可视化                                                                                                                                                                                                                                                 |
+| `env.arm_policy_enabled`                  | 臂 policy 路径是否可用。**仅被双 policy runner 在纯 stage-1 训练时置 False**；two_stage / stage-2 / unified / play 都保持 True                                                                                                                       |
+| `env.arm_observe_dog_state`               | 跨 policy 通道：让臂 policy 看到狗的 gait phase、足端接触状态、`v_actual − v_cmd` 跟踪残差                                                                                                                                                              |
+| `env.priv_observe_stage1_ee_payload_mass` | 把 stage-1 EE payload 质量加入特权观测（配合 §11 的 payload 随机化）                                                                                                                                                                                      |
+
+---
+
+## 5. stage-1 臂扰动课程
+
+stage-1 训练腿部 policy 时，臂不是简单固定，而是按课程逐步加入激进扰动（模拟臂运动对 base 的反作用力）。
+强度 `intensity` 随迭代从 0 线性 ramp 到 1（见 `_get_stage1_arm_curriculum_intensity`）。
+
+| 参数                                      | 含义                                | 当前值    |
+| ----------------------------------------- | ----------------------------------- | --------- |
+| `env.stage1_arm_ramp_iterations`        | 扰动强度从 0 → 满值的迭代数        | `20000` |
+| `env.stage1_arm_fixed_fraction`         | 保持臂完全固定的 env 比例（对照组） | `0.1`   |
+| `env.stage1_arm_saturation_fraction`    | 达到满强度的迭代占 ramp 的比例      | `0.8`   |
+| `env.stage1_arm_accel_resample_time_s`  | 臂目标加速度重采样周期（s）         | `0.01`  |
+| `env.stage1_arm_zero_accel_probability` | 每次重采样置零加速度的概率          | `0.3`   |
+| `env.stage1_arm_zero_vel_probability`   | 每步置零速度的概率                  | `0.005` |
+| `env.stage1_arm_max_accel`              | 臂目标最大加速度（满强度时）        | `10.0`  |
+| `env.stage1_arm_max_vel`                | 臂目标最大速度（满强度时）          | `5.0`   |
+| `env.stage1_arm_init_dof_pos_noise`     | 复位时臂初始关节角随机噪声幅度      | `1.0`   |
+
+**调参方向**：狗训不稳/爱摔 → 减小 `max_accel` / `max_vel` 或拉长 `ramp_iterations`（更慢加压）；
+想让狗对臂扰动更鲁棒 → 反之增大。`init_dof_pos_noise` 越大，臂初始位形越发散、top-heavy 风险越高
+（详见 memory: arm-ik-motor-strength-floor 里对 go2_x5 top-heavy 的分析）。
+
+---
+
+## 6. 狗命令与奖励
+
+| 参数                                               | 含义 / 备注                                                                                                                                                                                                                                                                                                                       |
+| -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `commands.body_roll_range` / `limit_body_roll` | body roll 命令范围与硬限                                                                                                                                                                                                                                                                                                          |
+| `commands.T_force_range`                         | 外力持续时间范围（s），**仅当 `randomize_end_effector_force=True` 生效**                                                                                                                                                                                                                                                  |
+| `commands.add_force_thres`                       | 施加外力的触发阈值                                                                                                                                                                                                                                                                                                                |
+| `rewards.terminal_body_height`                   | 低于此高度判摔倒终止                                                                                                                                                                                                                                                                                                              |
+| `reward_scales.loco_energy`                      | 腿部能耗惩罚系数                                                                                                                                                                                                                                                                                                                  |
+| `reward_scales.response_consistency`             | **关键**：惩罚腿部 base 速度响应偏离 `commands_dog` 的**一阶参考模型**（见 `_reward_response_consistency` 与 `LeggedRobot._update_dog_vel_ref`）。作用：让腿在任意 payload/posture 扰动下都表现为**固定时间常数的可预测线性 plant**，上层 `v_ff` 前馈才能依赖它。这是 project-design-v3.md §2.3 的落地 |
+
+---
+
+## 7. 狗 policy 布局与 critic 特权观测
+
+| 参数                                                                        | 含义                                                                                                                                                                         |
+| --------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `dog.num_actions_loco`                                                    | **环境侧**的腿部执行 DOF 数（12）= dof/torque/action 张量里 **腿 slice `[:12]` 与臂 slice `[12:]` 的分界索引**，rewards、切片到处用它。是机器人 DOF 布局属性 |
+| `dog.dog_actions`                                                         | **狗 policy 的动作输出维**（12）= 狗 actor 网络输出宽度（`load_policy.py:35`）与 `dog_actions` 观测项宽度（`wbc_env.py:1374`）                                   |
+| `dog.dog_num_observation_history`                                         | 狗观测历史长度                                                                                                                                                               |
+| `dog.dog_num_commands`                                                    | 狗命令维                                                                                                                                                                     |
+| `dog.use_adaptation_module`                                               | 是否用 adaptation module（当前关）                                                                                                                                           |
+| `dog.observe_lin_vel` / `observe_pose_actual` / `observe_track_error` | 狗观测内容开关                                                                                                                                                               |
+
+**狗 critic 独有的特权动力学观测**（`dog.priv_observe_*`）：腿的共享因子紧凑表示，臂因子按关节采样故逐关节保留。
+
+| 参数                                                                                                         | 值                             | 说明                                                                                       |
+| ------------------------------------------------------------------------------------------------------------ | ------------------------------ | ------------------------------------------------------------------------------------------ |
+| `dog.priv_observe_motor_strength` / `motor_offset` / `gravity` / `contact_states` / `arm_dynamics` | True                           | 加入狗 critic 特权观测                                                                     |
+| `dog.priv_observe_com_displacement` / `joint_friction` / `dof_damping`                                 | False                          | 本 profile 中这些是**固定值**，故从狗特权观测中省略（臂 critic 仍可见共享 env 字段） |
+| `dog.control.stiffness_leg` / `damping_leg`                                                              | `{joint:35}` / `{joint:1}` | 腿 PD 增益                                                                                 |
+
+---
+
+## 8. 臂 policy 布局与目标采样
+
+### 8.0 臂布局参数
+
+| 参数                                | 含义                                                                                                                                                                                                                                                                                                                                                                                                 | 当前值    |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------- |
+| `arm.num_actions_arm`             | 臂**执行**的关节残差维数 = env 在 arm slice 上实际施加的 Δq 维度（6 轴 → 6）                                                                                                                                                                                                                                                                                                                 | `6`     |
+| `arm.num_actions_arm_cd`          | 上层 actor 输出宽度。默认兼容模式为 6；`--goal_reaching` 下为 12：`Δq_arm(6) + Δv_base(3) + posture(height,pitch,roll)(3)`。只有前 6 维进入机械臂执行 slice，其余 6 维由 `WBCEnv.plan()` 在狗 policy 推理前写入四足命令。 | `6` / `12` |
+| `arm.num_privileged_links`        | 进入**臂 critic 特权观测**的臂连杆数（其随机化 link-mass-scale / com-offset 打包进 priv obs）。运行时会与实际臂刚体数断言相等（`wbc_env.py:866`），改臂/改 URDF 连杆数时需同步                                                                                                                                                                                                               | `8`     |
+| `arm.arm_num_observation_history` | 臂观测历史长度                                                                                                                                                                                                                                                                                                                                                                                       | `60`    |
+| `arm.arm_num_commands`            | 暴露给狗 policy 观测的臂命令槽位数                                                                                                                                                                                                                                                                                                                                                                   | `6`     |
+| `arm.use_adaptation_module`       | 是否用 adaptation module（当前关）                                                                                                                                                                                                                                                                                                                                                                   | `False` |
+
+> `num_actions_arm` vs `num_actions_arm_cd`：前者始终是环境真正施加的 6 维臂关节残差；后者是上层
+> actor 总输出宽度。默认模式二者相等，`--goal_reaching` 下 `_cd=12`。
+
+### 8.1 目标采样（绝对 box SE(3)）
+
+每个 episode（以及每 `resample_time_s` 秒）在**基座坐标系**里独立采一个静态 SE(3) 目标。
+**采用绝对 box，不做任何可达性筛选 / nominal 中心化**：目标可能落在 6 自由度机械臂
+工作空间之外，此时 IK 会在关节限位/奇异处饱和，由 IK + 策略残差学着尽量逼近。
+
+消费位置：`WBCEnv._resample_arm_target`（wbc_env.py）。
+
+| 参数                           | 含义                                                          | 当前值                                 | 备注                                                                                     |
+| ------------------------------ | ------------------------------------------------------------- | -------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `arm.target.pos_range`       | 位置 box`[[x_lo,x_hi],[y_lo,y_hi],[z_lo,z_hi]]`，m，基座系  | `[[0.0,0.55],[-0.4,0.4],[0.25,0.9]]` | 均匀采样。参考：默认位姿 nominal EE ≈ (0.26,0,0.71)；臂挂载点 (0.1,0,0.1)，臂展约 0.6 m |
+| `arm.target.roll_ee`         | 普通 arm reaching 的姿态 roll 范围（rad）                     | `±20°`                             | 绝对姿态，非 delta                                                                       |
+| `arm.target.pitch_ee`        | 普通 arm reaching 的姿态 pitch 范围（rad）                    | `±20°`                             | pitch=0 → 夹爪指向基座 +x（水平向前）                                                   |
+| `arm.target.yaw_ee`          | 普通 arm reaching 的姿态 yaw 范围（rad）                      | `±20°`                             |                                                                                          |
+| `arm.target.resample_time_s` | episode 内目标重采样周期`[lo,hi]` 秒                        | `[2.0, 3.0]`                         | 每次在`[lo/dt, hi/dt]` 内随机                                                          |
+
+**采样公式**（`_resample_arm_target`）：
+
+```
+pos  = pos_range[:,0] + (pos_range[:,1]-pos_range[:,0]) * U(0,1)^3
+quat = Rz(yaw) · Ry(pitch) · Rx(roll)          # 绝对姿态，基座系
+```
+
+### 8.2 全身 6D goal reaching 中间目标
+
+`--goal_reaching` 不生成轨迹，也没有 `γ(s)`、preview 或 time law。每次从
+`wbc.goal_reaching.pos_range` 采样目标时，将当时的基座系 SE(3) 目标转换并锁定到世界系；之后底座运动
+不会拖着目标移动。达到位置/姿态阈值时立即换目标，否则默认每 4–6 s 重采样。
+
+Goal-reaching 的完整 SE(3) 采样范围独立配置在：
+
+```python
+wbc.goal_reaching.pos_range
+wbc.goal_reaching.roll_ee
+wbc.goal_reaching.pitch_ee
+wbc.goal_reaching.yaw_ee
+```
+
+当前 goal 姿态范围均为 `±20°`。这些字段不再复用或影响普通
+`arm.target.roll_ee/pitch_ee/yaw_ee`。
+
+上层仍使用单 critic，动作固定为 12D：
+
+```
+[0:6]   Δq_arm
+[6:9]   Δv_base = (Δvx, Δvy, Δwz)
+[9:12]  posture = (height, pitch, roll)
+```
+
+环境根据当前目标和肩部位置计算低通的 `v_ff`，再把 `v_ff + Δv_base` 写入四足速度命令。posture
+经过范围映射、逐步限速和平滑后写入四足命令。`gait_frequency`、`footswing_height` 和
+`stance_width` 暂不由 actor 输出，分别使用
+`fixed_gait_frequency=4.0`、`fixed_footswing_height=0.06` 和
+`fixed_stance_width=0.35`；`stance_length` 和 `gait_duration` 保持默认中值。
+
+上层到四足的6个可学习辅助命令可以独立消融，且不会改变12D actor 或 dog observation 的宽度：
+
+```python
+wbc.goal_reaching.command_channels.vx
+wbc.goal_reaching.command_channels.vy
+wbc.goal_reaching.command_channels.yaw
+wbc.goal_reaching.command_channels.height
+wbc.goal_reaching.command_channels.pitch
+wbc.goal_reaching.command_channels.roll
+```
+
+关闭某项后，对应 actor 输出槽位仍存在，但环境将其 mask 为0；对应四足 command 也固定为中性值0。
+其中关闭 `vx/vy/yaw` 也会屏蔽该轴的自动 `v_ff`，而不只是屏蔽 policy 的 `Δv`。
+
+**调参方向**
+
+- 想缩小任务难度 / 提高收敛率：收窄 `pos_range`、减小三个 `*_ee` 半角，让 box 更贴合可达工作空间。
+- 想让策略见到更广的 SE(3)：放大 box——但要接受相当比例目标不可达、稳态误差偏大。
+- 姿态 box 中心当前隐含为 identity；若想把中心挪到「向前向下」自然位姿（nominal pitch≈-37°），把
+  `pitch_ee` 改成非对称区间即可，无需改代码。
+
+---
+
+## 9. stage-2 臂动作接口与 DLS-IK 控制器
+
+### 9.0 臂动作接口 `arm.action_mode`
+
+同一套 6 维臂动作头（`arm.num_actions_arm=6`），**三种解释方式**，由 `arm.action_mode` 切换
+（CLI：`--arm_action_mode`）。三种模式的观测/动作维度、actor 网络形状、checkpoint 形状**完全相同**，
+只有 `WBCEnv._apply_stage2_arm_action` 里从 action 到关节位置目标的解码不同，因此可以在同一份
+config / 同一套 obs 上直接做消融对比。
+
+| 模式                | action 语义                                                                                  | IK 是否参与                | 相关参数                                          |
+| ------------------- | -------------------------------------------------------------------------------------------- | -------------------------- | ------------------------------------------------- |
+| `ik_residual`（默认，历史行为） | 每关节 `Δq` 残差，`tanh(a)*residual_scale`                                     | 是，IK 直接追任务目标      | `arm.ik.residual_scale`                           |
+| `ik_waypoint`       | **中间 EE 目标**：`Δpos(3)` + 轴角 `Δrot(3)`，**base 系**，从 anchor 偏移               | 是，但 IK 追的是这个 waypoint | `arm.waypoint.*`                                  |
+| `end_to_end`        | 臂关节位置目标本身，`q_target = default + a * scale`（与腿同一套编码）                     | **否**，回路里没有 IK      | `arm.end_to_end.action_scale`                     |
+
+| 参数                          | 含义                                                     | 当前值        | 备注                                                                                                       |
+| ----------------------------- | -------------------------------------------------------- | ------------- | ---------------------------------------------------------------------------------------------------------- |
+| `arm.action_mode`           | 动作接口选择                                             | `ik_residual` | `ik_residual` / `ik_waypoint` / `end_to_end`；非法值在 config 构建期报错                                 |
+| `arm.waypoint.anchor`       | waypoint 的锚点                                          | `target`    | `target`=以任务/轨迹参考点为中心的绕行量（**零动作 == 纯 IK baseline**）；`ee`=以当前 EE 为中心的位移指令 |
+| `arm.waypoint.pos_scale`    | 位置偏移在 **base 系每轴**的半宽（m）              | `0.15`      | 是 box 不是球；且 box 定义在 base 系，转到世界系会混轴，**范数**上界是 `√3×scale`（≈0.26）。日志 `perf_waypoint_pos_offset_m` 记的就是范数，贴近该值说明限幅是瓶颈、可放大 |
+| `arm.waypoint.rot_scale`    | 姿态偏移在 **base 系每轴**的半宽（rad）            | `0.50`      | 同上，作用在轴角向量上                                                                                     |
+| `arm.end_to_end.action_scale` | end-to-end 下臂关节目标幅度（rad）                     | `0.25`      | 替代腿共用的 `control.action_scale`；相等时为恒等变换                                                    |
+
+**选型提示**
+
+- `ik_waypoint` + `anchor=target`：零动作精确退化为纯 DLS-IK baseline（已验证，差异为 1e-6 rad 量级的
+  float32 舍入），所以 §10 里按该 baseline 标定的 `terminate_*` 阈值在这个模式下仍然成立。策略学的是
+  「相对参考轨迹绕多远」，奖励仍只看 EE 相对**参考**的误差（`ee_pos_err` 不受 waypoint 影响），
+  策略不会因为「到达自己设的 waypoint」拿到奖励。
+- `anchor=ee`：waypoint 相对当前 EE，IK 退化为纯速度解算器，策略完全掌管 EE 路径；自由度最大但没有
+  baseline 兜底，训练早期更容易漂。
+- `end_to_end`：回路里没有 IK，也就没有 `max_step_rad` 那样的天然步长限幅，随机动作下臂关节速度可
+  达 IK 模式的 ~2 倍（实测 12 vs 5–6 rad/s）。若发现动作太抖，先降 `arm.end_to_end.action_scale`，
+  再考虑加大 `wbc.reward_scales.arm_action_rate` / `arm_action_smoothness_*`。
+- 部署侧：`end_to_end` 的策略输出可直接下发关节目标；两种 IK 模式都要求真机侧复现同一个 DLS-IK 环
+  （同 Jacobian 列、同 `ee_local_pos` 点转移、同权重与限幅）。
+
+`wbc.reward_scales.arm_control_limits` 在三种模式下含义一致：惩罚 `|a|>1`，即让策略待在该模式
+标定的残差 / waypoint / 关节目标量程内。
+
+### 9.1 DLS-IK 控制器
+
+每个控制步做**一次**阻尼最小二乘（DLS）一阶修正（不是收敛求解器；FK 只在真实 `simulate()` 后更新，
+靠多步在仿真时间里收敛，等价于真实机器人的伺服环）。消费位置：`_solve_arm_dls_ik_step` /
+`_apply_arm_action_ik_residual` / `_apply_arm_action_ik_waypoint`（`end_to_end` 不调用）。
+
+```
+err  = [pos_err(3); axis_angle_rot_err(3)]
+W^.5 = diag([√pos_weight]*3, [√rot_weight]*3)   # 任务空间加权
+J   ← W^.5 · J,   err ← W^.5 · err               # 同时缩放 J 行与 err
+dq  = Jᵀ (J Jᵀ + λ²I)⁻¹ · err                    # 加权阻尼最小二乘
+dq *= step_gain
+dq  = clamp_by_norm(dq, max_step_rad)             # 按范数裁剪，保方向
+q_target = dof_pos + dq + tanh(policy_raw) * residual_scale   # ik_residual
+q_target = dof_pos + dq                                       # ik_waypoint（残差项不用）
+```
+
+`err` 的来源随模式而变：`ik_residual` 用任务目标的误差（`ee_pos_err` / `ee_rot_err_axis_angle`），
+`ik_waypoint` 用策略 waypoint 的误差；其余数学完全相同。
+
+其中 Jacobian 取 IsaacGym 世界系 Jacobian 在 `ee_body_name` 行、机械臂 6 列，并把线速度行
+从连杆原点**点转移**到抓取点（`ee_local_pos` 偏移），使线性 Jacobian 与实际跟踪的抓取点一致。
+
+| 参数                      | 含义                                             | 当前值                   | 备注                                                                                                                         |
+| ------------------------- | ------------------------------------------------ | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------- |
+| `arm.ik.damping`        | DLS 阻尼 λ                                      | `0.1`                  | 越大越稳、越慢；奇异附近抗爆                                                                                                 |
+| `arm.ik.step_gain`      | 每步修正增益                                     | `1.0`                  | full resolved-rate；位置驱动 + 足够刚度下可直接用 1.0                                                                        |
+| `arm.ik.max_step_rad`   | 单步 Δq 范数上限（rad）                         | `0.5`                  | 仅作奇异位形安全帽，常态不触发                                                                                               |
+| `arm.ik.residual_scale` | 策略 Δq 残差幅度（rad），`tanh(action)*scale` | `0.07`（≈4°）        | IK 给基线跟踪，策略只做小幅微调                                                                                              |
+| `arm.ik.pos_weight`     | 位置误差任务权重                                 | `1.0`                  | 加权 DLS 里 pos 块的权重；相对 `rot_weight` 越大，6-DoF 臂越优先消位置误差、牺牲姿态                                        |
+| `arm.ik.rot_weight`     | 姿态误差任务权重                                 | `3.0`                  | 同上，越大越优先姿态。两者只看**相对比例**（等值 = 未加权，与原行为完全一致）。当前 `3.0` = 姿态优先于位置                    |
+| `arm.ik.ee_local_pos`   | 抓取点在`ee_body_name` 系下的固定偏移（m）     | `[0.1424,0,0.0001057]` | URDF`gripper_center`（fixed joint 被 collapse），EE 状态每步按此平移。与 `ROBOT_ARM_SPEC` 保持一致，由 core 按机器人覆盖 |
+
+**架构说明**：actor 前 6 维按 §9.0 的 `arm.action_mode` 解码（默认作为 `Δq` 残差进 DLS）；
+`--goal_reaching` 额外提供 6 个 plan-action 通道，由 `WBCEnv.plan()` 转成四足速度/posture 命令，
+三种模式下都不进入 DLS。
+
+**已知精度**（`scripts/debug_ik_reach.py`，纯 IK、策略残差置零）
+
+- 干净条件（贴合可达 box、无复位噪声、无臂 DR）：位置 median ~2 cm。
+- 绝对 box（当前设置、无筛选）：位置 median 偏大、收敛率偏低——源于 box 含大量不可达目标，
+  非 IK 数学问题（同一 DLS 在可达目标上收敛到 1–2 cm）。
+
+**注意**
+
+- 臂在 `control_type "M"` 下是**位置驱动**，PD 用 DOF 属性刚度（见 §2），`Kp_factor` 域随机化对臂无效。
+- 位置指令**不再**乘 `motor_strengths`（那会给关节角注入 IK 补不掉的误差，历史 bug）；
+  执行器强度域随机化若要对臂生效，应加在 DOF 驱动刚度上。
+
+---
+
+## 10. WBC 奖励与终止
+
+默认 stage-2 仍保留 DLS-IK-only 兼容路径。加 `--goal_reaching` 后训练静态世界系 SE(3) goal
+reaching：上层同时输出臂残差、底座速度修正和 posture，使用单 critic。`γ(s)/s_ref(t)`、轨迹
+preview、multi-critic 和安全滤波器本轮不在范围内。
+
+| 参数                                                        | 含义 / 备注                                                                   |
+| ----------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| `wbc.use_vision`                                          | 视觉开关（本轮 False）                                                        |
+| `wbc.rewards.use_terminal_body_height`                    | 是否因 body height 超限终止（True）                                           |
+| `wbc.rewards.use_terminal_roll` / `use_terminal_pitch`  | 是否因 roll/pitch 超限终止（当前 False）                                      |
+| `wbc.rewards.terminal_body_{height,roll,pitch}`           | 对应终止阈值                                                                  |
+| `rewards.ee_pos_tracking_sigma`                           | `exp(-err²/σ)` 位置跟踪 σ（m²）；`0.02` → 约 14 cm 误差时 reward=0.5 |
+| `rewards.ee_rot_tracking_sigma`                           | 姿态跟踪 σ（rad²）；`0.25` → 约 35° 误差时 reward=0.5                   |
+| `wbc.reward_scales.ee_pos_tracking` / `ee_rot_tracking` | 位置/姿态跟踪奖励权重（`4.0` / `1.0`）                                    |
+| `wbc.reward_scales.jump`                                  | 跳跃奖励                                                                      |
+| `wbc.reward_scales.hip_action_l2`                         | hip 动作 L2 惩罚                                                              |
+| `wbc.reward_scales.raibert_heuristic`                     | Raibert 落足启发（当前 0）                                                    |
+| `wbc.reward_scales.arm_control_limits`                    | 臂残差饱和惩罚（用 pre-combine 的`arm_residual_raw`）                       |
+| `wbc.reward_scales.ee_smoothness`                         | EE 平滑惩罚                                                                   |
+| `wbc.reward_scales.arm_contact`                           | 臂接触惩罚                                                                    |
+
+`WBC_REWARD_FACTORS`（非 Cfg 常量，用于派生 WBC 奖励）：`tracking_lin_vel`/`tracking_ang_vel` 及臂
+energy/dof_vel/dof_acc/action_rate/smoothness 的基础因子。
+
+---
+
+## 11. 域随机化
+
+**base / mount**
+
+| 参数                                                                | 含义 / 备注                                        |
+| ------------------------------------------------------------------- | -------------------------------------------------- |
+| `domain_rand.dog_obs_frame_drop_prob`                             | 狗观测丢帧概率                                     |
+| `domain_rand.added_mass_range`                                    | base 附加质量范围（kg）                            |
+| `domain_rand.randomize_end_effector_force`                        | 是否施加 EE 外力（配合`commands.T_force_range`） |
+| `domain_rand.max_force` / `max_force_offset`                    | 外力大小与作用点偏移                               |
+| `domain_rand.randomize_mount_position` / `mount_position_range` | 臂挂载点位置随机化`[[x],[y],[z]]`（m）           |
+| `domain_rand.randomize_mount_rotation` / `mount_rpy_range`      | 臂挂载点姿态随机化（rad，约 ±3°/±3°/±5°）    |
+| `domain_rand.mount_tf_buckets` / `mount_tf_bucket_seed`         | mount transform 分桶数与种子（离散化以复现）       |
+
+**stage1_arm.\***（臂动力学随机化，stage-1 用；范围较宽）：`Kp_factor` `[0.5,1.5]`、`Kd_factor` `[0.2,2.0]`、
+`motor_strength` `[0.7,1.3]`、`motor_offset` `0.05`、`link_mass` `[0.1,2.0]`、`link_com` `0.1`。
+
+**EE payload**（`stage1_arm.randomize_ee_payload`）：每 episode 随机质量 `ee_payload_mass_range=[0.0,1.5] kg`，
+以**持续的、重力对齐的力**施加在 EE 刚体上（不是刚体质量编辑——IsaacGym 只允许在 actor 创建时改质量）。
+按与其余臂扰动相同的 stage1 课程强度缩放（见 `_get_stage1_arm_curriculum_intensity`）。
+
+**stage2_arm.\***（臂动力学随机化，stage-2 用；范围较窄，因为 stage-2 要 cm 级精度，DR 过猛会向 EE 误差
+注入不可消除的噪声——见 project-design-v3.md §1.2）：`Kp/Kd_factor` `[0.9,1.1]`、`motor_strength`
+`[0.85,1.15]`、`motor_offset` `0.025`、`link_mass`/`link_com` 随机化**关闭**。
+
+---
+
+## 12. Reset 高度与姿态课程
+
+> 注意：这些参数**不在 `wbc.py`**，而在 `go1.py`（基准高度）与 `wtw.py`（reset 课程），
+> 消费位置 `LeggedRobot._reset_root_states` / `_get_reset_curriculum_range`。此处一并说明。
+
+每次 episode reset 时基座位姿：
+```
+reset_z   = init_state.pos[2] + env_origin_z + Uniform(0, z_init_range · intensity)
+reset_rpy = ±(yaw/pitch/roll_init_range · intensity)          # 各轴独立均匀采样
+```
+- **高度只往上抬**（从 `[0, range]` 采样再相加），所以 reset z 恒 ≥ `init_state.pos[2]`（平地 `env_origin_z=0`）。
+- 配合姿态随机化 = **随机高度 + 随机朝向摔落后自恢复**的鲁棒性训练。
+- `intensity` 由 reset 课程门控 + 线性爬升，同时缩放高度和姿态三个范围。
+
+| 参数 | 位置 | 含义 | 当前值 |
+|---|---|---|---|
+| `init_state.pos[2]` | `go1.py` | 站立基准高度（m） | `0.34` |
+| `terrain.z_init_range` | `wtw.py` | 最大下落高度（m） | `0.5` |
+| `terrain.yaw_init_range` / `pitch_init_range` / `roll_init_range` | `wtw.py` | 各轴最大姿态扰动（rad） | `3.14`（±π，可完全翻转） |
+| `terrain.reset_curriculum` | `wtw.py` | 是否启用 reset 课程（False = 直接满难度） | `True` |
+| `terrain.reset_curriculum_initial_fraction` | `wtw.py` | 起步强度 | `0.1` |
+| `terrain.reset_curriculum_growth_iterations` | `wtw.py` | 达标启动后爬到满强度的迭代数 | `5000` |
+| `terrain.reset_curriculum_stability_iterations` | `wtw.py` | 启动前需连续达标的迭代数 | `100` |
+| `terrain.reset_curriculum_tracking_threshold` | `wtw.py` | 启动门槛（速度跟踪分 EMA） | `0.7` |
+| `terrain.reset_curriculum_tracking_ema_alpha` | `wtw.py` | 跟踪分 EMA 系数 α | `0.05` |
+
+**课程机制**（`_update_reset_curriculum_intensity`）
+1. `intensity` 起步 = `initial_fraction`（0.1）→ 有效 z 范围 = 0.5×0.1 = 0.05 m → reset z ∈ [0.34, 0.39]。
+2. 每迭代累积 lin/ang 速度跟踪分，算 EMA；EMA ≥ `tracking_threshold`（0.7）**连续** `stability_iterations`（100）次 → `started`。
+3. started 后 `intensity = 0.1 + 0.9·min(1, elapsed / growth_iterations)`，5000 迭代内爬到 1.0。
+4. 满强度 → z 范围 0.5 m → reset z ∈ [0.34, 0.84]，姿态 ±π。
+
+**调参方向**
+- 想让早期更稳/更慢加压：调大 `stability_iterations`、`tracking_threshold`，或拉长 `growth_iterations`。
+- 想更激进的自恢复能力：调大 `z_init_range` / 姿态范围，或减小 `initial_fraction` 让它从更低难度起步但最终更高。
+- 想完全关掉 reset 扰动课程（直接满难度）：`reset_curriculum=False`（此时直接用 max_range）。
+
+**wandb 日志**（`train/episode/` 下，仅当 `reset_curriculum=True`）
+- `reset_curriculum_intensity` —— 当前课程强度 [initial_fraction, 1.0]
+- `reset_curriculum_lin_tracking_score` / `_ang_tracking_score` / `_tracking_score` / `_tracking_score_ema` —— 门控用的速度跟踪分
+- `reset_curriculum_stable_iterations` / `_started` —— 距启动的进度
+- `reset_curriculum_{z,yaw,pitch,roll}_init_range_eff` —— **本次新增**：当前实际生效的 reset 高度/姿态包络（= max_range × intensity），直接读出「现在从多高、多歪的姿态摔下来」

@@ -1,10 +1,15 @@
-"""Dog-only policy benchmark with GPU-parallel multi-policy evaluation.
+"""Dog-only policy benchmark with layout-aware GPU-parallel evaluation.
 
-All policies under comparison share **one** IsaacGym simulation.
-``total_envs = num_envs_per_policy × N_policies``.
-Each policy owns a contiguous slice of envs; ``env.step()`` advances every
-slice simultaneously, so the expensive GPU step is paid only once per
-scenario point regardless of how many policies are compared.
+Policies with the same observation/control layout share one IsaacGym
+simulation and own contiguous environment slices. Policies with incompatible
+layouts are partitioned into separate groups, evaluated sequentially, and
+merged into the same report.
+
+Each policy's slice is subdivided again, one cell of ``--num_envs_per_policy``
+envs per scenario point, so a whole command grid is measured in a single
+rollout instead of one rollout per point. ``--max_num_envs`` caps the pool and
+therefore how many points run at once; grids larger than that are split across
+successive rollouts.
 
 Scenarios
 ---------
@@ -28,11 +33,12 @@ Usage::
     python -m benchmark.dog_policy.cli \\
         --logdirs runs/my_run --ckptids last --headless
 
-    # multi-run GPU-parallel comparison (N policies, one shared sim)
+    # multi-run comparison (compatible policies share a sim automatically)
     python -m benchmark.dog_policy.cli \\
         --logdirs runs/run_A runs/run_B runs/run_C \\
         --names v1 v2 v3 --ckptids last last 040000 \\
-        --headless --num_envs_per_policy 32 --num_eval_steps 2000
+        --headless --num_envs_per_policy 32 --max_num_envs 4096 \\
+        --num_eval_steps 2000
 
 Stage-2 hook: ``--stage2`` is reserved (not yet implemented).
 """
@@ -60,17 +66,19 @@ from benchmark.dog_policy.evaluation import (
     ScenarioResult,
     _acc_to_result,
     _eval_loop_parallel,
+    describe_shared_env_group,
     detect_command_layout,
+    group_shared_env_compatible_runs,
     load_dog_policy_for_benchmark,
     load_env_benchmark,
+    preview_command_layout,
     print_comparison_table,
-    read_dog_num_commands,
+    record_command_writes,
     save_metadata,
     save_results,
     set_gait_cmd,
     set_pose_cmd,
     set_vel_cmd,
-    validate_shared_env_compatibility,
 )
 from benchmark.metadata import build_benchmark_metadata
 
@@ -82,6 +90,18 @@ VEL_GRID: List[tuple] = [(xv, 0.0, yaw) for xv in [-0.5, 0.0, 0.5, 1.0, 1.5] for
 
 ARM_INTENSITY_SWEEP = [0.0, 0.25, 0.5, 0.75, 1.0]
 FORWARD_CMD = (1.0, 0.0, 0.0)
+# Step-response targets (vx, vy, yaw): each point resets (which zeroes both the
+# base velocity and the first-order reference model dog_vel_ref) then holds the
+# target, so it is a step from rest. response_consistency_rmse then measures how
+# closely the realised velocity follows the fixed-time-constant reference model.
+STEP_TARGETS: List[tuple] = [
+    (0.5, 0.0, 0.0),
+    (1.0, 0.0, 0.0),
+    (1.5, 0.0, 0.0),
+    (0.0, 0.5, 0.0),
+    (0.0, 0.0, 1.0),
+    (1.0, 0.0, 1.0),
+]
 VELOCITY_GROUPS = {
     "stand": (0.0, 0.0, 0.0),
     "forward": (0.5, 0.0, 0.0),
@@ -212,6 +232,78 @@ def _fmt_metric(results: List[ScenarioResult], metrics: List[tuple]) -> str:
     return "  ".join(parts)
 
 
+def _plan_point_batches(
+    points: List[Point],
+    default_arm_intensity: Optional[float],
+    cap: int,
+    scenario: str,
+) -> List[tuple]:
+    """Split points into groups that can share one rollout.
+
+    Arm intensity is a process-global stage-1 setting rather than a per-env one,
+    so points stop batching wherever it changes -- which keeps scenario B's
+    intensity sweep sequential without special-casing it.
+    """
+    batches: List[tuple] = []
+    current: List[Point] = []
+    current_intensity: Optional[float] = None
+    for point in points:
+        label, _, extra_kw = point
+        intensity = extra_kw.get("arm_intensity", default_arm_intensity)
+        if intensity is None:
+            raise ValueError(f"{scenario}/{label}: arm_intensity was not provided")
+        if current and (intensity != current_intensity or len(current) >= cap):
+            batches.append((current, current_intensity))
+            current = []
+        current_intensity = intensity
+        current.append(point)
+    if current:
+        batches.append((current, current_intensity))
+    return batches
+
+
+def _batched_cmd_fn(
+    env: HistoryWrapper,
+    handles: List[PolicyHandle],
+    batch: List[Point],
+) -> tuple:
+    """Lay one command per scenario point across every policy's env cells.
+
+    Scenario command functions write uniformly to all envs, so running one and
+    reading a single row back yields that point's command vector; the rows are
+    then scattered to their cells. Only the columns a scenario actually wrote
+    are replayed, leaving env-owned command dims untouched.
+
+    Returns the per-step command function and the metric groups it commands,
+    ordered handle-major then point-minor.
+    """
+    commands = env.env.commands_dog
+    rows = []
+    columns: set = set()
+    for _, cmd_fn, _ in batch:
+        with record_command_writes() as written:
+            cmd_fn(env)
+        columns |= written
+        rows.append(commands[0].clone())
+
+    per_env = commands.clone()
+    cells: List[tuple] = []
+    for h in handles:
+        for point_index in range(h.points_per_batch):
+            start, end = h.cell(point_index)
+            # Cells past the batch's last point are unmeasured; hold them at the
+            # final point's command rather than whatever the env last resampled.
+            per_env[start:end] = rows[min(point_index, len(rows) - 1)]
+            if point_index < len(batch):
+                cells.append((start, end))
+    cols = torch.tensor(sorted(columns), device=commands.device, dtype=torch.long)
+
+    def apply_commands(target_env: HistoryWrapper):
+        target_env.env.commands_dog[:, cols] = per_env[:, cols]
+
+    return apply_commands, cells
+
+
 def _run_points(
     env: HistoryWrapper,
     handles: List[PolicyHandle],
@@ -224,22 +316,36 @@ def _run_points(
     header: str,
     fmt_fn: Callable,
     indent: str = "  ",
+    settle_steps: int = 0,
+    settle_cmd_fn: Optional[Callable] = None,
 ) -> ResultsMap:
     out = _empty_results(handles)
     print(header)
     total = len(points)
-    for i, (label, cmd_fn, extra_kw) in enumerate(points):
-        arm_intensity = extra_kw.get("arm_intensity", default_arm_intensity)
-        if arm_intensity is None:
-            raise ValueError(f"{scenario}/{label}: arm_intensity was not provided")
-        print(f"{indent}[{i + 1:2d}/{total}] {label}", end="  ", flush=True)
-        accs = _eval_loop_parallel(env, handles, layout, n_steps, arm_intensity, device, cmd_fn)
-        point_results = []
-        for h, acc in zip(handles, accs):
-            result = _acc_to_result(acc, layout, h.name, scenario, label, n_steps, **extra_kw)
-            out[h.name].append(result)
-            point_results.append(result)
-        print(fmt_fn(point_results))
+    done = 0
+    batches = _plan_point_batches(points, default_arm_intensity, handles[0].points_per_batch, scenario)
+    for batch, arm_intensity in batches:
+        cmd_fn, cells = _batched_cmd_fn(env, handles, batch)
+        if len(batch) > 1:
+            print(
+                f"{indent}[{done + 1:2d}-{done + len(batch):2d}/{total}] "
+                f"{len(batch)} points x {len(handles)} policies in one rollout",
+                flush=True,
+            )
+        accs = _eval_loop_parallel(
+            env, handles, layout, n_steps, arm_intensity, device, cmd_fn,
+            settle_steps=settle_steps, settle_cmd_fn=settle_cmd_fn,
+            metric_groups=cells,
+        )
+        for point_index, (label, _, extra_kw) in enumerate(batch):
+            point_results = []
+            for handle_index, h in enumerate(handles):
+                acc = accs[handle_index * len(batch) + point_index]
+                result = _acc_to_result(acc, layout, h.name, scenario, label, n_steps, **extra_kw)
+                out[h.name].append(result)
+                point_results.append(result)
+            done += 1
+            print(f"{indent}[{done:2d}/{total}] {label}  {fmt_fn(point_results)}")
     return out
 
 
@@ -391,6 +497,88 @@ def run_scenario_b(
             ],
         ),
     )
+
+
+def run_scenario_e(
+    env: HistoryWrapper,
+    handles: List[PolicyHandle],
+    layout: CommandLayout,
+    n_steps: int,
+    arm_intensity: float,
+    device: str,
+    scenario_config: Optional[dict] = None,
+) -> ResultsMap:
+    cfg = _scenario_cfg(scenario_config, "vel_step")
+    fixed_gait = _fixed_gait_cfg(cfg)
+    fixed_pose = _fixed_pose_cfg(cfg)
+    settle_steps = int(cfg.get("settle_steps", 40))
+    targets = cfg.get("targets")
+    if targets:
+        targets = [tuple(float(v) for v in t) for t in targets]
+    else:
+        targets = STEP_TARGETS
+    points = [
+        (
+            f"step vx={xv:+.1f} vy={yv:+.1f} yaw={yaw:+.1f}",
+            _command_fn((xv, yv, yaw), fixed_gait, fixed_pose),
+            dict(
+                cmd_x=xv,
+                cmd_y=yv,
+                cmd_yaw=yaw,
+                cmd_pitch=float(fixed_pose["pitch"]),
+                cmd_roll=float(fixed_pose["roll"]),
+                cmd_height_delta=float(fixed_pose["height_delta"]),
+                cmd_gait_freq=float(fixed_gait["gait_freq"]),
+                cmd_footswing_height=float(fixed_gait["footswing_height"]),
+                cmd_stance_width=float(fixed_gait["stance_width"]),
+                cmd_stance_length=float(fixed_gait["stance_length"]),
+                cmd_gait_duration=float(fixed_gait["gait_duration"]),
+                arm_intensity=arm_intensity,
+            ),
+        )
+        for xv, yv, yaw in targets
+    ]
+    # Settle at zero velocity (same gait/pose) before each step.
+    settle_cmd_fn = _command_fn((0.0, 0.0, 0.0), fixed_gait, fixed_pose)
+
+    # Disable reset perturbation for this scenario only: a step-response
+    # measurement must start from a nominal, settled pose, not a random
+    # drop/tilt. Zero the reset position/orientation spreads on the shared env
+    # cfg for the duration and restore them afterwards. (The reset's hardcoded
+    # +-0.5 m/s initial base velocity is not config-gated; the settle phase
+    # damps it out.)
+    terrain = env.env.cfg.terrain
+    reset_range_keys = ("z_init_range", "yaw_init_range", "pitch_init_range", "roll_init_range")
+    saved_ranges = {k: getattr(terrain, k) for k in reset_range_keys}
+    for k in reset_range_keys:
+        setattr(terrain, k, 0.0)
+    try:
+        return _run_points(
+            env,
+            handles,
+            layout,
+            n_steps,
+            arm_intensity,
+            device,
+            points,
+            "vel_step",
+            f"\n[E] Velocity step response  arm_intensity={arm_intensity:.2f}  "
+            f"reset disabled + {settle_steps}-step settle  "
+            f"{len(points)} steps x {n_steps} steps  {len(handles)} policies in parallel",
+            lambda rs: _fmt_metric(
+                rs,
+                [
+                    ("resp", "response_consistency_rmse", 1.0, ".4f"),
+                    ("xy", "lin_vel_xy_rmse", 1.0, ".4f"),
+                    ("fall_h", "fall_rate_height", 100.0, ".1f%"),
+                ],
+            ),
+            settle_steps=settle_steps,
+            settle_cmd_fn=settle_cmd_fn,
+        )
+    finally:
+        for k, v in saved_ranges.items():
+            setattr(terrain, k, v)
 
 
 def run_scenario_c(
@@ -619,6 +807,7 @@ SCENARIO_FLAGS = {
     "arm_sweep": "skip_b",
     "body_pose": "skip_c",
     "gait": "skip_d",
+    "vel_step": "skip_e",
 }
 
 def _load_json_config(path: str) -> dict:
@@ -646,6 +835,7 @@ def _apply_profile(args):
         "sim_device",
         "robot",
         "num_envs_per_policy",
+        "max_num_envs",
         "num_eval_steps",
         "seed",
         "arm_intensity",
@@ -739,7 +929,16 @@ def parse_args(argv: Optional[List[str]] = None):
         "--num_envs_per_policy",
         type=int,
         default=32,
-        help="Envs per policy. Total envs = num_envs_per_policy × N_policies.",
+        help="Envs averaged for one policy at one scenario point.",
+    )
+    p.add_argument(
+        "--max_num_envs",
+        type=int,
+        default=4096,
+        help=(
+            "Env pool ceiling. Scenario points are spread across the pool and "
+            "evaluated in one rollout, as many at a time as this allows."
+        ),
     )
     p.add_argument("--num_eval_steps", type=int, default=100, help="Sim steps per scenario point (per env)")
     p.add_argument("--seed", type=int, default=1, help="Benchmark RNG seed, independent from training seed")
@@ -750,6 +949,7 @@ def parse_args(argv: Optional[List[str]] = None):
     p.add_argument("--skip_b", action="store_true")
     p.add_argument("--skip_c", action="store_true")
     p.add_argument("--skip_d", action="store_true")
+    p.add_argument("--skip_e", action="store_true")
     p.add_argument("--stage2", action="store_true", help="[Reserved] Stage-2 WBC evaluation (not yet implemented)")
     args = p.parse_args(argv)
     args.scenario_config = {}
@@ -757,6 +957,39 @@ def parse_args(argv: Optional[List[str]] = None):
     _apply_profile(args)
     _apply_candidate_dir(args)
     return args
+
+
+def _max_points_per_rollout(args, layout: CommandLayout) -> int:
+    """Most points any enabled scenario can put into a single rollout.
+
+    Env slots beyond this would simply idle. Under-estimating is safe --
+    _run_points just splits a grid across more batches -- so scenarios whose
+    points cannot share a rollout (B, whose arm intensity is global) count as 1.
+    """
+    counts = [1]
+    if not args.skip_a:
+        cfg = _scenario_cfg(args.scenario_config, "vel_grid")
+        vx = _list_cfg(cfg, "vx", sorted({v for v, _, _ in VEL_GRID}))
+        vy = _list_cfg(cfg, "vy", sorted({v for _, v, _ in VEL_GRID}))
+        yaw = _list_cfg(cfg, "yaw", sorted({v for _, _, v in VEL_GRID}))
+        counts.append(len(vx) * len(vy) * len(yaw))
+    if not args.skip_c and layout.has_body_pitch:
+        cfg = _scenario_cfg(args.scenario_config, "body_pose")
+        counts.append(len(_list_cfg(cfg, "pitch", PITCH_CMDS)))
+        if layout.has_body_roll:
+            counts.append(len(_list_cfg(cfg, "roll", ROLL_CMDS)))
+        if layout.has_body_height:
+            counts.append(len(_list_cfg(cfg, "height_delta", HEIGHT_DELTA_CMDS)))
+    if not args.skip_d and layout.has_dynamic_gait:
+        cfg = _scenario_cfg(args.scenario_config, "gait")
+        counts.append(len(_list_cfg(cfg, "gait_freq", GAIT_FREQ_CMDS)))
+        counts.append(len(_list_cfg(cfg, "stance_width", STANCE_WIDTH_CMDS)))
+        if layout.has_stance_length:
+            counts.append(len(_list_cfg(cfg, "stance_length", STANCE_LENGTH_CMDS)))
+    if not args.skip_e:
+        cfg = _scenario_cfg(args.scenario_config, "vel_step")
+        counts.append(len(cfg.get("targets") or STEP_TARGETS))
+    return max(counts)
 
 
 def set_benchmark_seed(seed: int, device: str):
@@ -767,47 +1000,64 @@ def set_benchmark_seed(seed: int, device: str):
         torch.cuda.manual_seed_all(seed)
 
 
-def _profile_requires_full_gait_layout(args) -> bool:
-    scenario_config = args.scenario_config or {}
-    for scenario, skip_attr in SCENARIO_FLAGS.items():
-        if getattr(args, skip_attr):
-            continue
-        cfg = scenario_config.get(scenario, {})
-        if not isinstance(cfg, dict):
-            continue
-        if "stance_length" in cfg or "gait_duration" in cfg:
-            return True
-        fixed_gait = cfg.get("fixed_gait")
-        if isinstance(fixed_gait, dict) and (
-            "stance_length" in fixed_gait or "gait_duration" in fixed_gait
-        ):
-            return True
-    return False
-
-
-def _validate_layout_for_profile(args, layout: CommandLayout):
-    if not _profile_requires_full_gait_layout(args):
-        return
-    if not layout.has_gait_duration:
-        raise ValueError(
-            "Profile gait scenario requires dog_num_commands >= 11 "
-            "(indices 9=stance_length and 10=gait_duration). "
-            f"Current runtime layout has dog_num_commands={layout.n_dims}. "
-            "Use the smoke profile or a checkpoint trained with the full dog command layout."
+def _run_enabled_scenarios(
+    args,
+    env: HistoryWrapper,
+    handles: List[PolicyHandle],
+    layout: CommandLayout,
+) -> Dict[str, ResultsMap]:
+    """Run every enabled scenario for one shared-env-compatible group."""
+    scenarios: Dict[str, ResultsMap] = {}
+    if not args.skip_a:
+        scenarios["vel_grid"] = run_scenario_a(
+            env,
+            handles,
+            layout,
+            args.num_eval_steps,
+            args.arm_intensity,
+            args.sim_device,
+            args.scenario_config,
         )
-
-
-def _validate_checkpoint_layout_for_profile(args, base_logdir: str):
-    if not _profile_requires_full_gait_layout(args):
-        return
-    n_dims = read_dog_num_commands(base_logdir)
-    if n_dims < 11:
-        raise ValueError(
-            "Profile gait scenario requires dog_num_commands >= 11 "
-            "(indices 9=stance_length and 10=gait_duration). "
-            f"Base checkpoint parameters.pkl has dog_num_commands={n_dims}. "
-            "Use the smoke profile or a checkpoint trained with the full dog command layout."
+    if not args.skip_b:
+        scenarios["arm_sweep"] = run_scenario_b(
+            env,
+            handles,
+            layout,
+            args.num_eval_steps,
+            args.sim_device,
+            args.scenario_config,
         )
+    if not args.skip_c:
+        scenarios["body_pose"] = run_scenario_c(
+            env,
+            handles,
+            layout,
+            args.num_eval_steps,
+            args.arm_intensity,
+            args.sim_device,
+            args.scenario_config,
+        )
+    if not args.skip_d:
+        scenarios["gait"] = run_scenario_d(
+            env,
+            handles,
+            layout,
+            args.num_eval_steps,
+            args.arm_intensity,
+            args.sim_device,
+            args.scenario_config,
+        )
+    if not args.skip_e:
+        scenarios["vel_step"] = run_scenario_e(
+            env,
+            handles,
+            layout,
+            args.num_eval_steps,
+            args.arm_intensity,
+            args.sim_device,
+            args.scenario_config,
+        )
+    return scenarios
 
 
 def main(argv: Optional[List[str]] = None):
@@ -829,84 +1079,130 @@ def main(argv: Optional[List[str]] = None):
 
     num_envs_per_policy = args.num_envs_per_policy
     total_envs = num_envs_per_policy * n_runs
+    env_groups = group_shared_env_compatible_runs(args.logdirs)
 
-    print(f"[Benchmark] {n_runs} policies × {num_envs_per_policy} envs = {total_envs} total envs")
-    print(f"[Benchmark] Seed = {args.seed}")
-    set_benchmark_seed(args.seed, args.sim_device)
-    validate_shared_env_compatibility(args.logdirs[0], args.logdirs[1:])
-    _validate_checkpoint_layout_for_profile(args, args.logdirs[0])
-    print(f"[Benchmark] Creating shared env from {args.logdirs[0]}")
+    # Compatible policies share one sim; incompatible ones need their own, so
+    # each group spends the env budget on its own policy count and layout.
+    group_points_per_batch: List[int] = []
+    for run_indices in env_groups:
+        group_layout = preview_command_layout(args.logdirs[run_indices[0]], robot=args.robot)
+        floor = num_envs_per_policy * len(run_indices)
+        if floor > args.max_num_envs:
+            print(
+                f"[Benchmark] WARNING: {len(run_indices)} policies × {num_envs_per_policy} envs "
+                f"= {floor} exceeds --max_num_envs {args.max_num_envs}; using {floor}."
+            )
+        group_points_per_batch.append(
+            min(max(1, args.max_num_envs // floor), _max_points_per_rollout(args, group_layout))
+        )
+    group_env_counts = [
+        num_envs_per_policy * len(group) * points_per_batch
+        for group, points_per_batch in zip(env_groups, group_points_per_batch)
+    ]
+    peak_sim_envs = max(group_env_counts)
 
-    env, cfg = load_env_benchmark(
-        logdir=args.logdirs[0],
-        total_envs=total_envs,
-        envs_per_policy=num_envs_per_policy,
-        headless=args.headless,
-        device=args.sim_device,
-        robot=args.robot,
-    )
-    layout = detect_command_layout(cfg)
-    _validate_layout_for_profile(args, layout)
-
+    print(f"[Benchmark] {n_runs} policies × {num_envs_per_policy} envs = {total_envs} envs averaged per point")
     print(
-        f"[Benchmark] Layout: {layout.n_dims} cmd dims  "
-        f"pose={'on' if layout.has_body_pitch else 'off'}  "
-        f"gait_metrics={'on' if layout.has_dynamic_gait else 'off'}  "
-        f"stance_length={'on' if layout.has_stance_length else 'off'}  "
-        f"base_h={layout.base_height_target:.3f}m"
+        f"[Benchmark] {len(env_groups)} layout group(s); "
+        f"points per rollout = {group_points_per_batch}; "
+        f"peak simultaneous envs = {peak_sim_envs} (max {args.max_num_envs})"
     )
+    print(f"[Benchmark] Seed = {args.seed}")
+    all_results: Dict[str, Dict[str, List[ScenarioResult]]] = {name: {} for name in names}
+    group_metadata = []
+    layouts: List[CommandLayout] = []
+    control_dts: List[object] = []
 
-    # Build one PolicyHandle per run; each owns a contiguous env slice.
-    # The shared-sim benchmark intentionally requires identical obs/control
-    # semantics across all compared checkpoints.
-    print("[Benchmark] Loading policies...")
-    handles: List[PolicyHandle] = []
-    for i, (name, logdir, ckpt_id) in enumerate(zip(names, args.logdirs, ckptids)):
-        s = i * num_envs_per_policy
-        e = s + num_envs_per_policy
-        print(f"  [{i + 1}/{n_runs}] {name:24s}  envs [{s}:{e})  ckpt={ckpt_id}")
-        policy = load_dog_policy_for_benchmark(logdir, ckpt_id, cfg)
-        handles.append(PolicyHandle(name=name, policy=policy, env_start=s, env_end=e))
+    for group_number, run_indices in enumerate(env_groups, start=1):
+        points_per_batch = group_points_per_batch[group_number - 1]
+        envs_per_policy_slice = num_envs_per_policy * points_per_batch
+        group_total_envs = group_env_counts[group_number - 1]
+        base_index = run_indices[0]
+        group_names = [names[i] for i in run_indices]
+        print(
+            f"\n[Benchmark] Layout group {group_number}/{len(env_groups)}: "
+            f"{', '.join(group_names)}"
+        )
+        print(f"[Benchmark] Creating shared env from {args.logdirs[base_index]}")
 
-    all_results: Dict[str, Dict[str, List[ScenarioResult]]] = {h.name: {} for h in handles}
+        # Reset all RNGs for every layout group so sequential execution does
+        # not make later layouts inherit earlier groups' random stream.
+        set_benchmark_seed(args.seed, args.sim_device)
+        env, cfg = load_env_benchmark(
+            logdir=args.logdirs[base_index],
+            total_envs=group_total_envs,
+            envs_per_policy=num_envs_per_policy,
+            headless=args.headless,
+            device=args.sim_device,
+            robot=args.robot,
+        )
+        layout = detect_command_layout(cfg)
+        layouts.append(layout)
+        control_dts.append(getattr(env.env, "dt", "unknown"))
 
-    def _merge(scenario_key: str, per_policy: ResultsMap):
-        for name, results in per_policy.items():
-            all_results[name][scenario_key] = results
-
-    if not args.skip_a:
-        _merge(
-            "vel_grid",
-            run_scenario_a(
-                env,
-                handles,
-                layout,
-                args.num_eval_steps,
-                args.arm_intensity,
-                args.sim_device,
-                args.scenario_config,
-            ),
+        print(
+            f"[Benchmark] Layout: {layout.n_dims} cmd dims  "
+            f"policy_obs={env.benchmark_dog_dims['dog_num_observations']}  "
+            f"policy_priv={env.benchmark_dog_dims['dog_num_privileged_obs']}  "
+            f"adapter={env.benchmark_observation_mode}  "
+            f"pose={'on' if layout.has_body_pitch else 'off'}  "
+            f"gait_metrics={'on' if layout.has_dynamic_gait else 'off'}  "
+            f"stance_length={'on' if layout.has_stance_length else 'off'}  "
+            f"base_h={layout.base_height_target:.3f}m"
         )
 
-    if not args.skip_b:
-        _merge("arm_sweep", run_scenario_b(env, handles, layout, args.num_eval_steps, args.sim_device, args.scenario_config))
+        try:
+            handles: List[PolicyHandle] = []
+            print("[Benchmark] Loading policies...")
+            for local_index, run_index in enumerate(run_indices):
+                s = local_index * envs_per_policy_slice
+                e = s + envs_per_policy_slice
+                print(
+                    f"  [{local_index + 1}/{len(run_indices)}] "
+                    f"{names[run_index]:24s}  envs [{s}:{e})  "
+                    f"{points_per_batch} x {num_envs_per_policy}  ckpt={ckptids[run_index]}"
+                )
+                policy = load_dog_policy_for_benchmark(
+                    args.logdirs[run_index],
+                    ckptids[run_index],
+                    cfg,
+                    expected_dims=env.benchmark_dog_dims,
+                    device=args.sim_device,
+                )
+                handles.append(
+                    PolicyHandle(
+                        name=names[run_index],
+                        policy=policy,
+                        env_start=s,
+                        env_end=e,
+                        envs_per_point=num_envs_per_policy,
+                    )
+                )
 
-    if not args.skip_c:
-        _merge(
-            "body_pose",
-            run_scenario_c(
-                env,
-                handles,
-                layout,
-                args.num_eval_steps,
-                args.arm_intensity,
-                args.sim_device,
-                args.scenario_config,
-            ),
-        )
+            for scenario_key, per_policy in _run_enabled_scenarios(
+                args, env, handles, layout
+            ).items():
+                for name, results in per_policy.items():
+                    all_results[name][scenario_key] = results
 
-    if not args.skip_d:
-        _merge("gait", run_scenario_d(env, handles, layout, args.num_eval_steps, args.arm_intensity, args.sim_device, args.scenario_config))
+            group_metadata.append(
+                {
+                    "group": group_number,
+                    "runs": group_names,
+                    "num_policies": len(run_indices),
+                    "total_envs": group_total_envs,
+                    "points_per_rollout": points_per_batch,
+                    "observation_adapter": env.benchmark_observation_mode,
+                    "layout": describe_shared_env_group(args.logdirs[base_index]),
+                }
+            )
+        finally:
+            # Isaac Gym simulations are evaluated one layout group at a time
+            # so layouts with different tensor widths never share an env.
+            env.env.close()
+            del env
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     print_comparison_table(all_results)
 
@@ -916,6 +1212,10 @@ def main(argv: Optional[List[str]] = None):
 
     json_path = os.path.join(run_dir, "results.json")
     metadata_path = os.path.join(run_dir, "metadata.json")
+    representative_layout = layouts[0]
+    control_dt_s: object = control_dts[0]
+    if any(dt != control_dt_s for dt in control_dts[1:]):
+        control_dt_s = control_dts
     metadata = build_benchmark_metadata(
         mode="dog_only",
         protocol=args.benchmark_protocol,
@@ -926,10 +1226,28 @@ def main(argv: Optional[List[str]] = None):
         ckptids=ckptids,
         args=args,
         total_envs=total_envs,
-        control_dt_s=getattr(env.env, "dt", "unknown"),
-        layout=layout,
+        control_dt_s=control_dt_s,
+        layout=representative_layout,
         command_argv=sys.argv,
     )
+    command_layouts = sorted({layout.n_dims for layout in layouts})
+    metadata.update(
+        {
+            "execution_mode": (
+                "shared_env" if len(env_groups) == 1 else "layout_grouped_shared_env"
+            ),
+            "num_layout_groups": len(env_groups),
+            "peak_simultaneous_envs": peak_sim_envs,
+            "layout_groups": group_metadata,
+            "dog_num_commands": (
+                command_layouts[0] if len(command_layouts) == 1 else command_layouts
+            ),
+            "use_dynamic_gait": any(layout.has_dynamic_gait for layout in layouts),
+            "scenario_d_enabled": any(layout.has_dynamic_gait for layout in layouts)
+            and not args.skip_d,
+        }
+    )
+    metadata["scenarios"]["gait"] = metadata["scenario_d_enabled"]
     save_results(all_results, json_path)
     save_metadata(metadata, metadata_path)
     try:

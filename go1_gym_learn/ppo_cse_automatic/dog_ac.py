@@ -130,6 +130,9 @@ class DogActorCritic(nn.Module):
         if self.use_adaptation_module:
             actor_input = (observation_history, self.adaptation_module(observation_history))
         mean = self.actor_body(torch.cat(actor_input, dim=-1))
+        guard = getattr(self, 'numerical_guard', None)
+        if guard is not None:
+            guard.check_distribution(mean, self.std)
         self.distribution = Normal(mean, mean * 0.0 + self.std)
 
     def act(self, observation_history, **kwargs):

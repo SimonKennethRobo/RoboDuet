@@ -68,7 +68,7 @@ def train_go1(headless=True):
     args.seed = set_seed(args.seed)
     args.tags.append(f"seed{args.seed}")
 
-    cfg = build_roboduet_config(args, traj_track_reward_scale=1.0)
+    cfg = build_roboduet_config(args)
     Unified2AC_Args.num_actions_arm = cfg.arm.num_actions_arm_cd
     configure_train_stage(args, cfg)
     UnifiedRunnerArgs.num_steps_per_env = args.num_steps_per_env
@@ -123,8 +123,6 @@ def train_go1(headless=True):
             f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet/wbc_env.py",
             f"{args.log_dir}/scripts/wbc_env.py",
         )
-        shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet/observation_builder.py", f"{args.log_dir}/scripts/observation_builder.py")
-        shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet/trajectory_geometry.py", f"{args.log_dir}/scripts/trajectory_geometry.py")
         shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet/utils.py", f"{args.log_dir}/scripts/utils.py")
         shutil.copytree(
             f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/config",
@@ -138,9 +136,6 @@ def train_go1(headless=True):
         shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/go1_gym_learn/ppo_cse_unified/ppo.py", f"{args.log_dir}/scripts/ppo.py")
         shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/go1_gym_learn/ppo_cse_unified/rollout_storage.py", f"{args.log_dir}/scripts/rollout_storage.py")
 
-
-        wandb.run.log_code(f"{args.log_dir}/scripts")
-
         temp_dict = {"Cfg": cfg_to_dict(cfg), "RunnerArgs": vars(UnifiedRunnerArgs), "Unified2AC_Args": vars(Unified2AC_Args), "PPO_Args": vars(UnifiedPPO_Args),}
 
         with open(f"{args.log_dir}/params.txt", "w", encoding="utf-8") as f:
@@ -151,10 +146,7 @@ def train_go1(headless=True):
             pickle.dump(temp_dict, f)
         wandb.save(osp.join(args.log_dir, "parameters.pkl"), policy="now")
 
-        wandb.log({
-            "Global_Switch/start": global_switch.pretrained_to_wbc_start,
-            "Global_Switch/end": global_switch.pretrained_to_wbc_end,
-            }, step=0)
+
 
     env = WBCEnv(
         sim_device=args.sim_device,
@@ -186,11 +178,14 @@ if __name__ == '__main__':
     parser.add_argument('--tags', nargs='+', default=[])
     parser.add_argument('--notes', type=str, default=None)
     parser.add_argument('--seed', type=int, default=-1)
-    parser.add_argument('--robot', type=str, default="go1", choices=["go1", "go2"])
+    parser.add_argument('--robot', type=str, default="go2_x5", choices=["go1", "go2", "go2_x5"])
     parser.add_argument('--train_stage', type=str, default="two_stage", choices=["stage1", "stage2", "two_stage"])
     parser.add_argument('--use_rot6d', action='store_true', default=False)
     parser.add_argument('--dyna_gait', action='store_true', default=False)
-    parser.add_argument('--traj_track', action='store_true', default=False)
+    parser.add_argument('--clock_free_gait', action='store_true', default=False,
+                        help="Train the locomotion gait with the clock-free reward table (rewards.gait_reward_mode='clock_free'): contact-stopwatch trot sync, leg-symmetry and foot-geometry terms ported from robot_lab replace tracking_contacts_shaped_*, feet_clearance_cmd_linear and raibert_heuristic, none of which the actor can satisfy once dog.observe_clock_inputs is off. Omit to keep the clock-based table.")
+    parser.add_argument('--raibert_exp', action='store_true', default=False,
+                        help="Score raibert_heuristic as exp(-err/raibert_sigma), a bounded reward in [0,1] with a positive scale, instead of the legacy unbounded squared-error cost. Removes its multiplicative effect: under rewards.only_positive_rewards_ji22_style the cost form gates the whole reward by exp(scale*err), which is what collapsed stage1_sim2real_abl_4/7/9/11.")
 
     args = parser.parse_args()
 

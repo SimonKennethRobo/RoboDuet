@@ -159,7 +159,7 @@ class RolloutStorage:
                 last_was_done[0] = True
                 trajectories_batch_size = torch.sum(last_was_done[:, start:stop])
                 last_traj = first_traj + trajectories_batch_size
-                
+
                 masks_batch = trajectory_masks[:, first_traj:last_traj]
                 obs_batch = padded_obs_trajectories[:, first_traj:last_traj]
                 critic_obs_batch = padded_critic_obs_trajectories[:, first_traj:last_traj]
@@ -176,5 +176,5 @@ class RolloutStorage:
 
                 yield obs_batch, critic_obs_batch, privileged_obs_batch, obs_history_batch, actions_batch, values_batch, advantages_batch, returns_batch, \
                        old_actions_log_prob_batch, old_mu_batch, old_sigma_batch, masks_batch
-                
+
                 first_traj = last_traj

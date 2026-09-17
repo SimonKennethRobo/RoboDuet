@@ -19,11 +19,16 @@ SCENARIO_TITLES = {
     "arm_sweep": "Arm Disturbance Sweep",
     "body_pose": "Body Pose Tracking",
     "gait": "Gait Tracking",
+    "wbc_aggregate": "WBC Curriculum Aggregate",
+    "wbc_trajectories": "WBC Per-Trajectory Results",
 }
 
-SCENARIO_ORDER = ["vel_grid", "arm_sweep", "body_pose", "gait"]
+SCENARIO_ORDER = ["vel_grid", "arm_sweep", "body_pose", "gait", "wbc_aggregate", "wbc_trajectories"]
 
 PRIMARY_METRICS = [
+    ("ee_pos_rmse_m", "EE pos RMSE", "lower"),
+    ("ee_rot_rmse_rad", "EE rot RMSE", "lower"),
+    ("completion_rate", "completion rate", "higher"),
     ("lin_vel_xy_rmse", "xy RMSE", "lower"),
     ("lin_vel_x_rmse", "vx RMSE", "lower"),
     ("lin_vel_y_rmse", "vy RMSE", "lower"),
@@ -87,6 +92,28 @@ DETAIL_METRICS = {
         ("height fall", "fall_rate_height"),
         ("fall rate", "fall_rate"),
     ],
+    "wbc_aggregate": [
+        ("EE pos RMSE m", "ee_pos_rmse_m"),
+        ("EE rot RMSE rad", "ee_rot_rmse_rad"),
+        ("lateral error m", "d_lat_mean_m"),
+        ("timing error m", "timing_err_mean_m"),
+        ("progress", "progress_mean"),
+        ("completion", "completion_rate"),
+        ("fall rate", "fall_rate"),
+        ("motor power W", "motor_power_mean_w"),
+    ],
+    "wbc_trajectories": [
+        ("EE pos RMSE m", "ee_pos_rmse_m"),
+        ("EE rot RMSE rad", "ee_rot_rmse_rad"),
+        ("lateral error m", "d_lat_mean_m"),
+        ("timing error m", "timing_err_mean_m"),
+        ("progress", "progress_mean"),
+        ("motor power W", "motor_power_mean_w"),
+        ("span x m", "span_x_m"),
+        ("span y m", "span_y_m"),
+        ("span z m", "span_z_m"),
+        ("curvature p90 rad/m", "curvature_p90_rad_m"),
+    ],
 }
 
 NEUTRAL_HEATMAP_METRICS = {"base_height_mean"}
@@ -147,6 +174,12 @@ def _metric_average(rows: Iterable[dict], metric: str) -> Optional[float]:
     if not values:
         return None
     return mean(values)
+
+
+def _preferred_result_rows(scenarios):
+    if scenarios.get("wbc_trajectories"):
+        return scenarios["wbc_trajectories"]
+    return [row for scenario_rows in scenarios.values() for row in scenario_rows]
 
 
 def _table(headers: List[str], rows: List[List[Tuple[str, str]]], sortable: bool = True) -> str:
@@ -316,7 +349,7 @@ def _candidate_cards(results: Dict[str, Dict[str, List[dict]]]) -> str:
         points = sum(len(rows) for rows in scenarios.values())
         scenario_names = _scenario_names({run_name: scenarios})
         scenario_text = ", ".join(SCENARIO_TITLES.get(name, name) for name in scenario_names)
-        all_rows = [row for scenario_rows in scenarios.values() for row in scenario_rows]
+        all_rows = _preferred_result_rows(scenarios)
         cards.append(
             '<div class="card">'
             f"<h3>{escape(run_name)}</h3>"
@@ -362,6 +395,9 @@ def _metadata_panel(metadata: Dict[str, Any]) -> str:
         ("sim_device", "sim_device", None),
         ("seed", "seed", None),
         ("num_envs_per_policy", "num_envs_per_policy", None),
+        ("requested_total_envs", "requested_total_envs", None),
+        ("peak_total_envs", "peak_total_envs", None),
+        ("representative_video_errors", "representative_video_errors", None),
         ("total_envs", "total_envs", None),
         ("num_eval_steps", "num_eval_steps", None),
         ("ckptids", "ckptids", None),
@@ -395,6 +431,21 @@ def _json_for_script(data: Any) -> str:
     return json.dumps(data, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
 
 
+def _comparison_metadata(results_path: Path, output_path: Path) -> dict:
+    metadata = _load_metadata(results_path)
+    videos = []
+    for record in metadata.get("representative_videos", []):
+        item = dict(record)
+        for key in ("video_path", "poster_path"):
+            value = item.get(key)
+            if value:
+                target = results_path.parent / value
+                item[key] = os.path.relpath(target, output_path.parent)
+        videos.append(item)
+    metadata["representative_videos"] = videos
+    return metadata
+
+
 def _comparison_result_payload(source: Path, output_path: Path, limit: int = 16) -> List[dict]:
     root = _find_results_root(source)
     if not root.is_dir():
@@ -421,7 +472,7 @@ def _comparison_result_payload(source: Path, output_path: Path, limit: int = 16)
                 "scenarios": entry["scenarios"],
                 "points": entry["points"],
                 "results": entry["loaded_results"],
-                "metadata": _load_metadata(results_path),
+                "metadata": _comparison_metadata(results_path, output_path),
             }
         )
         if len(payload) >= limit:
@@ -634,6 +685,9 @@ def _report_script(comparison_series: List[dict]) -> str:
         ["sim_device", "sim_device", null],
         ["seed", "seed", null],
         ["num_envs_per_policy", "num_envs_per_policy", null],
+        ["requested_total_envs", "requested_total_envs", null],
+        ["peak_total_envs", "peak_total_envs", null],
+        ["representative_video_errors", "representative_video_errors", null],
         ["total_envs", "total_envs", null],
         ["num_eval_steps", "num_eval_steps", null],
         ["ckptids", "ckptids", null],
@@ -2060,7 +2114,7 @@ def _report_script(comparison_series: List[dict]) -> str:
         return `<a href="${esc(href)}">${esc(label)}</a>`;
       }
 
-      function renderReportNav(scenarios, hasMetadata, isHome) {
+      function renderReportNav(scenarios, hasMetadata, isHome, hasVideos) {
         const container = document.getElementById("report-nav-links");
         if (!container) return;
         if (isHome) {
@@ -2075,6 +2129,7 @@ def _report_script(comparison_series: List[dict]) -> str:
         }
         const links = [navLink("Summary", "#summary")];
         if (hasMetadata) links.push(navLink("Metadata", "#metadata"));
+        if (hasVideos) links.push(navLink("Videos", "#representative-videos"));
         scenarios.forEach((scenario) => {
           if (DETAIL_METRICS[scenario]) links.push(navLink(SCENARIO_TITLES[scenario] || scenario, `#detail-${scenario}`));
         });
@@ -2090,6 +2145,44 @@ def _report_script(comparison_series: List[dict]) -> str:
         });
       }
 
+      function renderRepresentativeVideos(selected) {
+        const methods = selected.map((entry) => ({
+          label: entry.name,
+          rows: (entry.metadata?.representative_videos || []).filter((row) => row.run_name === entry.candidate),
+        })).filter((method) => method.rows.length);
+        if (!methods.length) return "";
+        const keys = [...new Set(methods.flatMap((method) => method.rows.map((row) => row.trajectory_id)))];
+        const rowFor = (method, key) => method.rows.find((row) => row.trajectory_id === key);
+        keys.sort((left, right) => {
+          const a = methods.map((method) => rowFor(method, left)).find(Boolean) || {};
+          const b = methods.map((method) => rowFor(method, right)).find(Boolean) || {};
+          return (a.cell_A ?? 0) - (b.cell_A ?? 0) || (a.cell_B ?? 0) - (b.cell_B ?? 0) || (a.bank_row ?? 0) - (b.bank_row ?? 0);
+        });
+        const head = "<th>difficulty / trajectory</th>" + methods.map((method) => "<th>" + esc(method.label) + "</th>").join("");
+        const body = keys.map((key) => {
+          const first = methods.map((method) => rowFor(method, key)).find(Boolean) || {};
+          const label = "A=" + first.cell_A + ", B=" + first.cell_B + "<br><small>row " + first.bank_row + " · axis " + esc(first.dominant_axis ?? "-") + " · span " + fmt(first.span_x_m, 2) + "/" + fmt(first.span_y_m, 2) + "/" + fmt(first.span_z_m, 2) + " m · curvature p90 " + fmt(first.curvature_p90_rad_m, 2) + "</small>";
+          const cells = methods.map((method) => {
+            const row = rowFor(method, key);
+            if (!row) return '<td class="video-empty">not recorded</td>';
+            const poster = row.poster_path ? ' poster="' + esc(row.poster_path) + '"' : "";
+            const status = row.completed ? "completed" : (row.fall ? "fall" : "incomplete");
+            let replay = "";
+            if (row.video_terminated !== undefined) {
+              replay = row.video_terminated
+                ? (row.video_traj_early_term ? "video: trajectory early termination" : (row.video_timed_out ? "video: timeout" : "video: fall/termination")) + " at step " + row.replay_steps
+                : "video: full " + row.replay_steps + "-step replay";
+              replay += " · captured " + row.captured_frames + " frames";
+            }
+            const replayLine = replay ? "<span>" + esc(replay) + "</span>" : "";
+            return '<td><video controls preload="metadata"' + poster + '><source src="' + esc(row.video_path) + '" type="video/mp4"></video>' +
+              '<div class="video-caption"><strong>benchmark: ' + esc(status) + "</strong><span>EE pos RMSE " + fmt(row.ee_pos_rmse_m, 3) + " m · rot " + fmt(row.ee_rot_rmse_rad, 3) + " rad</span>" + replayLine + "<span>orange: reference · green: actual EE</span></div></td>";
+          }).join("");
+          return "<tr><th>" + label + "</th>" + cells + "</tr>";
+        }).join("");
+        return '<section class="panel" id="representative-videos"><h2>Representative Trajectory Videos</h2><p class="summary-note">Rows are fixed difficulty trajectories; columns are methods. Selection is policy-independent.</p><div class="video-matrix-shell"><table class="video-matrix"><thead><tr>' + head + "</tr></thead><tbody>" + body + "</tbody></table></div></section>";
+      }
+
       function renderReport() {
         const selected = selectedResults();
         const results = flattenSelected(selected);
@@ -2098,7 +2191,7 @@ def _report_script(comparison_series: List[dict]) -> str:
         syncResultSelectionState();
         const main = document.getElementById("report-main");
         if (!main) return;
-        renderReportNav(scenarios, selected.some((entry) => entry.metadata && Object.keys(entry.metadata).length), isHome);
+        renderReportNav(scenarios, selected.some((entry) => entry.metadata && Object.keys(entry.metadata).length), isHome, selected.some((entry) => (entry.metadata?.representative_videos || []).length));
         clearLinkedHighlights(true);
         if (isHome) {
           main.innerHTML = renderHome();
@@ -2107,6 +2200,7 @@ def _report_script(comparison_series: List[dict]) -> str:
             `<section class="cards">${renderCards(results)}</section>` +
             `<section class="panel" id="summary"><h2>Summary - Metric Mean</h2>${renderSummary(results, scenarios)}</section>` +
             renderMetadata(selected) +
+            renderRepresentativeVideos(selected) +
             renderScenarioSections(results, scenarios);
         }
         bindSortableTables();
@@ -2993,6 +3087,14 @@ def _render_html(results: Dict[str, Dict[str, List[dict]]], source: Path, output
       background: #f2f4f7;
       color: var(--muted);
     }}
+    .video-matrix-shell {{ overflow-x: auto; }}
+    .video-matrix {{ min-width: 760px; table-layout: fixed; }}
+    .video-matrix th, .video-matrix td {{ text-align: left; vertical-align: top; white-space: normal; }}
+    .video-matrix th:first-child, .video-matrix td:first-child {{ width: 180px; }}
+    .video-matrix video {{ display: block; width: 100%; min-width: 260px; border-radius: 7px; background: #111827; }}
+    .video-caption {{ display: grid; gap: 2px; margin-top: 6px; color: var(--muted); font-size: 11px; }}
+    .video-caption strong {{ color: var(--header); }}
+    .video-empty {{ color: var(--muted); padding: 24px 8px; text-align: center; }}
     footer {{ color: var(--muted); padding: 0 32px 30px; max-width: 1520px; margin: 0 auto; }}
     @media (prefers-reduced-motion: reduce) {{
       html {{ scroll-behavior: auto; }}

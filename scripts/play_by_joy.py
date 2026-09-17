@@ -51,6 +51,7 @@ JOYSTICK_COMMAND_MAP = {
         "mode": "absolute",
         "command": {"target": "dog", "cmd_key": "x_vel"},
         "deadzone": 0.08,
+        "scale": 1.5,
         "clamp": (-1.5, 1.5),
     },
     "left_stick_y": {
@@ -65,7 +66,8 @@ JOYSTICK_COMMAND_MAP = {
         "mode": "absolute",
         "command": {"target": "dog", "cmd_key": "yaw_vel"},
         "deadzone": 0.08,
-        "clamp": (-1, 1),
+        "scale": 1.5,
+        "clamp": (-1.5, 1.5),
     },
     "right_stick_x": {
         "source": "axis",
@@ -91,7 +93,7 @@ JOYSTICK_COMMAND_MAP = {
         "scale": 0.3,
         "clamp": (-0.4, 0.4),
     },
-    "f2": {
+    "back": {
         "source": "button",
         "mode": "reset",
         "command": {"target": "env", "cmd_key": "reset"},
@@ -239,15 +241,28 @@ def trigger_magnitude(value):
 # ---------------------------------------------------------------------------
 
 
+def _has_arm_commands(env):
+    # The legacy l/p/y arm-command buffer was removed when the arm switched to
+    # internal SE(3) box-target sampling; joystick arm control is a no-op now
+    # (and always absent in stage1_only). Guard every arm-command entry point.
+    return hasattr(env, "commands_arm")
+
+
+def _sync_arm_commands_to_obs(env):
+    fn = getattr(env.env, "sync_arm_commands_to_obs", None)
+    if fn is not None:
+        fn(env_ids=slice(0, 1))
+
+
 def set_command(env, target, index, value):
     if target == "dog" and index < env.commands_dog.shape[1]:
         env.commands_dog[:, index] = value
-    elif target == "arm" and index < env.commands_arm.shape[1]:
+    elif target == "arm" and _has_arm_commands(env) and index < env.commands_arm.shape[1]:
         env.commands_arm[:, index] = value
 
 
 def add_arm_command(env, index, delta, limits):
-    if index >= env.commands_arm.shape[1]:
+    if not _has_arm_commands(env) or index >= env.commands_arm.shape[1]:
         return
     value = float(env.commands_arm[0, index]) + delta
     env.commands_arm[:, index] = clamp(value, limits)
@@ -297,10 +312,12 @@ def apply_all_dog_commands(env, cfg, cmd: DogInitCmd):
 
 
 def apply_all_arm_commands(env, cmd: ArmInitCmd):
+    if not _has_arm_commands(env):
+        return
     values = [cmd.l, cmd.p, cmd.y, cmd.roll, cmd.pitch, cmd.yaw]
     for index, value in enumerate(values[: env.commands_arm.shape[1]]):
         env.commands_arm[:, index] = value
-    env.env.sync_arm_commands_to_obs(env_ids=slice(0, 1))
+    _sync_arm_commands_to_obs(env)
 
 
 def format_robot_state(env):
@@ -479,7 +496,7 @@ class JoystickController:
             for m in JOYSTICK_COMMAND_MAP.values()
             if m["source"] == "axis_combo"
         }
-        env.env.sync_arm_commands_to_obs(env_ids=slice(0, 1))
+        _sync_arm_commands_to_obs(env)
 
 
 def command_key(target, key):
@@ -487,15 +504,46 @@ def command_key(target, key):
     return f"commands_{target}[{idx}] ({key})"
 
 
+def maybe_export_rl_sar(args, logdir, ckpt_id):
+    """Export the rl_sar deployment bundle for the policy we are about to play.
+
+    See play_by_key_stage1.py's maybe_export_rl_sar for the rationale: this
+    keeps the deployed bundle in sync with whatever checkpoint was last
+    played, and it never aborts the run on export failure.
+    """
+    if getattr(args, "no_rl_sar_export", False):
+        return
+    import os
+
+    from scripts.export_rl_sar import export
+
+    config_name = args.rl_sar_config_name or os.path.basename(os.path.normpath(logdir))
+    try:
+        out_dir = export(
+            logdir,
+            args.rl_sar_root,  # None -> <logdir>/rl_sar
+            ckpt_id=ckpt_id,
+            robot=args.rl_sar_robot,
+            config_name=config_name,
+        )
+        print(f"[rl_sar] exported -> {out_dir}", flush=True)
+    except Exception as exc:  # noqa: BLE001 -- never block play on an export problem
+        print(f"[rl_sar] export FAILED ({type(exc).__name__}: {exc}); continuing to play",
+              flush=True)
+
+
 def main(args):
     logdir = args.logdir
     lock_arm = bool(getattr(args, "lock_arm", False))
+    if int(getattr(args, "num_envs", 1)) < 1:
+        raise ValueError("--num_envs must be at least 1")
     ckpt_id_arg = str(args.ckptid)
     ckpt_id = "last" if ckpt_id_arg == "last" else ckpt_id_arg.zfill(6)
 
     from go1_gym.utils.global_switch import global_switch
 
     stage1_only = bool(getattr(args, "stage1_only", False))
+    maybe_export_rl_sar(args, logdir, ckpt_id)
     stage1_arm_intensity = max(0.0, min(1.0, float(getattr(args, "stage1_arm_intensity", 1.0))))
     if stage1_only:
         global_switch.switch_flag = False
@@ -510,15 +558,25 @@ def main(args):
     arm_cmd = ArmInitCmd()
 
     env, cfg = load_env(
-        logdir, wrapper=WBCEnv, headless=False, device=args.sim_device, robot=getattr(args, "robot", None)
+        logdir,
+        wrapper=WBCEnv,
+        headless=False,
+        device=args.sim_device,
+        robot=getattr(args, "robot", None),
+        training_scene=bool(getattr(args, "training_scene", False)),
+        num_envs=int(getattr(args, "num_envs", 1)),
+        scene_spacing_scale=float(getattr(args, "scene_spacing_scale", 1.0)),
     )
     apply_checkpoint_command_limits(cfg)
 
-    config_path = os.path.join(os.path.dirname(joylink_client.__file__), "../../config/loco_ctrl.yaml")
+    # config_path = os.path.join(os.path.dirname(joylink_client.__file__), "../../config/loco_ctrl.yaml")
+    config_path = os.path.join(os.path.dirname(joylink_client.__file__), "../../config/xbox.yaml")
     joy_ctrl = JoystickController(config_path, dog_cmd, arm_cmd)
     joy_ctrl.print_command_mapping()
-    dog_policy = load_dog_policy(logdir, ckpt_id, cfg)
-    arm_policy = None if stage1_only else load_arm_policy(logdir, ckpt_id, cfg)
+    dog_policy = load_dog_policy(logdir, ckpt_id, cfg, device=args.sim_device)
+    arm_policy = None if stage1_only else load_arm_policy(
+        logdir, ckpt_id, cfg, device=args.sim_device
+    )
     if stage1_only:
         env.env.cfg.env.stage1_arm_curriculum = True
         env.env.stage1_arm_play_intensity = stage1_arm_intensity
@@ -573,7 +631,8 @@ def main(args):
             else:
                 obs = env.get_arm_observations()
                 actions_arm = arm_policy(obs).to(env.env.device)
-                env.plan(actions_arm[..., -2:])
+                if env.num_plan_actions > 0:
+                    env.plan(actions_arm)
 
             dog_obs = env.get_dog_observations()
             actions_dog = dog_policy(dog_obs).to(env.env.device)
@@ -581,7 +640,7 @@ def main(args):
         if lock_arm or arm_policy is None:
             env.step(actions_dog, actions_arm)
         else:
-            env.step(actions_dog, actions_arm[..., :-2])
+            env.step(actions_dog, actions_arm[..., : env.env.num_actions_arm])
 
         rerun_logger.log(env)
 
@@ -592,6 +651,25 @@ def parse_args():
     parser.add_argument("--logdir", type=str, required=True)
     parser.add_argument("--ckptid", type=str, default="last")
     parser.add_argument("--robot", type=str, default="go2", choices=["go1", "go2"])
+    parser.add_argument(
+        "--num_envs",
+        type=int,
+        default=1,
+        help="Number of parallel viewer environments. Use 4096 to reproduce the large training-scene look.",
+    )
+    parser.add_argument(
+        "--training_scene",
+        action="store_true",
+        default=False,
+        help="Preserve the checkpoint's training terrain for viewer capture; "
+        "domain randomization remains disabled for a stable capture.",
+    )
+    parser.add_argument(
+        "--scene_spacing_scale",
+        type=float,
+        default=1.0,
+        help="Scale training-scene terrain spacing; use 0.333333 to reduce it by 3x.",
+    )
     parser.add_argument(
         "--stage1_only",
         action="store_true",
@@ -609,6 +687,35 @@ def parse_args():
         action="store_true",
         default=False,
         help="Send zero arm actions every step (hold arm at default position), ignoring any loaded arm policy.",
+    )
+    # rl_sar export: on by default, so the deployment bundle is always in sync
+    # with whatever policy was last played. See maybe_export_rl_sar().
+    parser.add_argument(
+        "--rl_sar_root",
+        type=str,
+        default=None,
+        help="Output root for the export (default: <logdir>/rl_sar). Point this "
+        "at an rl_sar checkout to write the bundle straight into it.",
+    )
+    parser.add_argument(
+        "--rl_sar_config_name",
+        type=str,
+        default=None,
+        help="Policy subdirectory written under <rl_sar_root>/policy/<robot>/. "
+        "Default: the logdir's basename (e.g. stage1_robust_3_024201).",
+    )
+    parser.add_argument(
+        "--rl_sar_robot",
+        type=str,
+        default=None,
+        help="Robot key for the export. Default: inferred from the checkpoint's "
+        "recorded asset, which is more reliable than --robot here.",
+    )
+    parser.add_argument(
+        "--no_rl_sar_export",
+        action="store_true",
+        default=False,
+        help="Skip the automatic rl_sar export.",
     )
     add_rerun_args(parser)
     return parser.parse_args()

@@ -27,6 +27,11 @@ from go1_gym.envs.config import ConfigNode
 from go1_gym.utils import global_switch, quaternion_to_rpy
 from go1_gym.utils.math_utils import get_scale_shift, quat_apply_yaw
 from go1_gym.utils.terrain import Terrain
+from go1_gym.utils.height_sampling import sample_triangle_heights
+from go1_gym.envs.roboduet.robustness import FixedResetMixture, RobustnessMetrics
+from go1_gym.envs.roboduet.numerical_safety import quarantine_physics, record_physics_context
+
+from go1_gym.envs.config.domain_randomization import resolve_domain_randomization
 
 class LeggedRobot(BaseTask):
     def __init__(
@@ -41,6 +46,8 @@ class LeggedRobot(BaseTask):
         graphics_device_id=None,
     ):
 
+        cfg = resolve_domain_randomization(cfg)
+        eval_cfg = resolve_domain_randomization(eval_cfg)
         self.cfg = cfg
         self.eval_cfg = eval_cfg
         self.sim_params = sim_params
@@ -64,6 +71,10 @@ class LeggedRobot(BaseTask):
             self.set_camera(self.cfg.viewer.pos, self.cfg.viewer.lookat)
 
         self._init_buffers()
+        self.numerical_fault_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.numerical_fault_count = 0
+        self.numerical_fault_dumps = 0
+        self.numerical_fault_active = False
 
         self._prepare_reward_function()
         self.init_done = True
@@ -182,8 +193,16 @@ class LeggedRobot(BaseTask):
             torques = torques * self.motor_strengths
             torques = torch.clip(torques, -self.torque_limits, self.torque_limits)
 
+            # Only the arm slice of pos_target is used (legs use torques above).
+            # motor_strengths models actuator TORQUE scaling; multiplying it into
+            # a POSITION target distorts the commanded joint angle by ~+-15%
+            # (~0.2 rad on a ~1.5 rad joint), which the DLS-IK loop cannot
+            # compensate and was the dominant EE-tracking error floor -- so it is
+            # deliberately NOT applied to the arm position command. motor_offsets
+            # (a small +-0.025 rad zero-point error) is kept as a mild, realistic
+            # position disturbance. Arm actuator-strength domain randomization,
+            # if wanted, belongs on the DOF drive stiffness, not the target.
             pos_target = self.joint_pos_target + self.motor_offsets
-            pos_target = pos_target * self.motor_strengths
             pos_target = torch.clip(pos_target, -10, 10)  # max rads
             return torch.concat(
                 (torques[..., : self.num_actions_loco], pos_target[..., self.num_actions_loco :]), dim=-1
@@ -210,6 +229,7 @@ class LeggedRobot(BaseTask):
         clip_actions = self.cfg.normalization.clip_actions
         self.actions = torch.clip(actions, -clip_actions, clip_actions).to(self.device)
         self._arm_pre_step_hook()
+        record_physics_context(self)
         # step physics and render each frame
         self.prev_base_pos = self.base_pos.clone()
         self.prev_base_quat = self.base_quat.clone()
@@ -219,6 +239,8 @@ class LeggedRobot(BaseTask):
             self.render_gui()
         randomize_action_delay = getattr(self.cfg.domain_rand, "randomize_action_delay", False)
         self.step_locomotion_power.zero_()
+        self.step_locomotion_abs_energy_j.zero_()
+        self.step_locomotion_positive_energy_j.zero_()
         if randomize_action_delay:
             actions_start_decimation = torch.randint(
                 0,
@@ -242,13 +264,19 @@ class LeggedRobot(BaseTask):
             # if self.device == 'cpu':
             self.gym.fetch_results(self.sim, True)
             self.gym.refresh_dof_state_tensor(self.sim)
-            self.step_locomotion_power += torch.sum(
-                torch.abs(
-                    self.torques[:, : self.num_actions_loco]
-                    * self.dof_vel[:, : self.num_actions_loco]
-                ),
-                dim=-1,
-            ) / float(self.cfg.control.decimation)
+            leg_joint_power = (
+                self.torques[:, : self.num_actions_loco]
+                * self.dof_vel[:, : self.num_actions_loco]
+            )
+            leg_abs_power = torch.sum(torch.abs(leg_joint_power), dim=-1)
+            self.step_locomotion_power += leg_abs_power / float(
+                self.cfg.control.decimation
+            )
+            physics_dt = float(self.cfg.sim.dt)
+            self.step_locomotion_abs_energy_j += leg_abs_power * physics_dt
+            self.step_locomotion_positive_energy_j += torch.sum(
+                torch.clamp_min(leg_joint_power, 0.0), dim=-1
+            ) * physics_dt
         self.post_physics_step()
 
         return self.rew_buf_dog, self.rew_buf_arm, self.reset_buf, self.extras
@@ -289,7 +317,7 @@ class LeggedRobot(BaseTask):
 
     def _arm_resample_commands_train_hook(self, env_ids):
         """Per-episode arm command resampling alongside _resample_commands."""
-        pass
+        return False
 
     def _arm_post_dof_randomization_hook(self, env_ids):
         """Let arm tasks override generic DOF randomization for selected envs."""
@@ -339,6 +367,15 @@ class LeggedRobot(BaseTask):
         """Append arm/WBC episode metrics to ``extras['train/episode']``."""
         pass
 
+    def _arm_pre_reset_capture_hook(self, env_ids):
+        """Capture read-only terminal state before ``reset_idx`` mutates tensors.
+
+        The training environment intentionally leaves this as a no-op. Evaluation
+        subclasses can use it to retain the final physical sample without moving
+        any simulator-state writes out of the canonical reset path.
+        """
+        pass
+
     def post_physics_step(self):
         """check terminations, compute observations and rewards
         calls self._post_physics_step_callback() for common computations
@@ -347,6 +384,8 @@ class LeggedRobot(BaseTask):
         self.gym.refresh_actor_root_state_tensor(self.sim)
         self.gym.refresh_net_contact_force_tensor(self.sim)
         self.gym.refresh_rigid_body_state_tensor(self.sim)
+        if getattr(self.cfg.env, 'quarantine_invalid_physics', False):
+            quarantine_physics(self)
         self.episode_length_buf += 1
         self.common_step_counter += 1
 
@@ -362,15 +401,23 @@ class LeggedRobot(BaseTask):
         ]
         self.foot_positions = self.rigid_body_state.view(self.num_envs, self.num_bodies, 13)[:, self.feet_indices, 0:3]
 
+        self._update_foot_contact_times()
+
         self._arm_post_physics_hook()
+        if getattr(self, "coordination_arm", None) is not None:
+            self.coordination_arm.after_physics(self)
 
         self._post_physics_step_callback()
 
         # compute observations, rewards, resets, ...
         self.check_termination()
         self._update_performance_metrics()
+        self._update_dog_vel_ref()
         self.compute_reward()
+        if getattr(self, "coordination_commands", None) is not None:
+            self.coordination_commands.after_reward(self, global_switch.count)
         env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
+        self._arm_pre_reset_capture_hook(env_ids)
         self.reset_idx(env_ids)
 
         if getattr(self.cfg.env, "arm_policy_enabled", True):
@@ -390,6 +437,40 @@ class LeggedRobot(BaseTask):
 
         self._render_headless()
 
+    def _update_foot_contact_times(self):
+        """Per-foot air/contact stopwatches, the clock-free gait rewards' only
+        source of timing (see Rewards._reward_gait_sync / _reward_feet_air_time
+        _variance). Mirrors IsaacLab's ContactSensor bookkeeping:
+
+          feet_air_time / feet_contact_time -- time elapsed in the phase the
+              foot is in *right now*, zero while it is in the other phase.
+          last_air_time / last_contact_time -- duration of the most recently
+              *completed* phase of each kind, held until the next one ends.
+
+        A dedicated _gait_last_contacts is kept instead of reusing
+        last_contacts: _reward_feet_slip overwrites that one as a side effect
+        during compute_reward(), i.e. after this runs, so sharing it would make
+        the debounce depend on reward-registration order.
+        """
+        contact = self.contact_forces[:, self.feet_indices, 2] > 1.0
+        # Same one-step debounce _reward_feet_slip uses: PhysX reports the
+        # occasional zero-force frame mid-stance, which would otherwise split
+        # one stance into two and halve the measured contact time.
+        contact_filt = torch.logical_or(contact, self._gait_last_contacts)
+        self._gait_last_contacts[:] = contact
+
+        touchdown = contact_filt & (self.feet_air_time > 0.0)
+        liftoff = (~contact_filt) & (self.feet_contact_time > 0.0)
+        self.last_air_time = torch.where(touchdown, self.feet_air_time, self.last_air_time)
+        self.last_contact_time = torch.where(liftoff, self.feet_contact_time, self.last_contact_time)
+
+        self.feet_air_time = torch.where(
+            contact_filt, torch.zeros_like(self.feet_air_time), self.feet_air_time + self.dt
+        )
+        self.feet_contact_time = torch.where(
+            contact_filt, self.feet_contact_time + self.dt, torch.zeros_like(self.feet_contact_time)
+        )
+
     def check_termination(self):
         """Check if environments need to be reset"""
         self.reset_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
@@ -397,7 +478,8 @@ class LeggedRobot(BaseTask):
         self.reset_buf |= self.time_out_buf
         if self.cfg.rewards.use_terminal_body_height:
             self.body_height_buf = (
-                torch.mean(self.root_states[:, 2].unsqueeze(1) - self.measured_heights, dim=1)
+                (self._body_height() if self._uses_terrain_height() else
+                 torch.mean(self.root_states[:, 2].unsqueeze(1) - self.measured_heights, dim=1))
                 < self.cfg.rewards.terminal_body_height
             )
             self.reset_buf = torch.logical_or(self.body_height_buf, self.reset_buf)
@@ -406,8 +488,19 @@ class LeggedRobot(BaseTask):
         rpy = quaternion_to_rpy(self.base_quat)
         self.roll, self.pitch, self.y = rpy[:, 0], rpy[:, 1], rpy[:, 2]
 
+        if self.cfg.rewards.use_terminal_roll_pitch:
+            self.roll_pitch_buf = (torch.abs(self.roll) > self.cfg.rewards.terminal_body_ori) | (
+                torch.abs(self.pitch) > self.cfg.rewards.terminal_body_ori
+            )
+            grace_steps = int(self.cfg.rewards.terminal_roll_pitch_grace_s / self.dt)
+            if grace_steps > 0:
+                self.roll_pitch_buf &= self.episode_length_buf > grace_steps
+            self.reset_buf = torch.logical_or(self.roll_pitch_buf, self.reset_buf)
+
         self._arm_check_termination_hook()
         self.reset_buf |= self.reverse_buf
+        self.reset_buf |= self.numerical_fault_mask
+        self.time_out_buf &= ~self.numerical_fault_mask
 
     def reset_idx(self, env_ids):
         if len(env_ids) == 0:
@@ -424,7 +517,9 @@ class LeggedRobot(BaseTask):
         if self.cfg.domain_rand.randomize_rigids_after_start:
             self._randomize_rigid_body_props(env_ids, self.cfg)
             self.refresh_actor_rigid_shape_props(env_ids, self.cfg)
+            self.refresh_actor_rigid_body_props(env_ids, self.cfg)
 
+        self._assign_terrain_tiers(env_ids)
         self._reset_dofs(env_ids, self.cfg)
         self._reset_root_states(env_ids, self.cfg)
         self._arm_post_reset_refresh_hook(env_ids)
@@ -433,8 +528,14 @@ class LeggedRobot(BaseTask):
         self.last_actions[env_ids] = 0.0
         self.last_last_actions[env_ids] = 0.0
         self.last_dof_vel[env_ids] = 0.0
+        self.dog_vel_ref[env_ids] = 0.0
         self.feet_air_time[env_ids] = 0.0
+        self.feet_contact_time[env_ids] = 0.0
+        self.last_air_time[env_ids] = 0.0
+        self.last_contact_time[env_ids] = 0.0
+        self._gait_last_contacts[env_ids] = False
         self.episode_length_buf[env_ids] = 0
+        self._resample_push_interval(env_ids)
         self.reset_buf[env_ids] = 1
         # fill extras
         train_env_ids = env_ids[env_ids < self.num_train_envs]
@@ -694,7 +795,7 @@ class LeggedRobot(BaseTask):
             privileged_obs_buf = torch.cat(
                 (
                     privileged_obs_buf,
-                    ((self.root_states[: self.num_envs, 2]).view(self.num_envs, -1) - body_height_shift)
+                    ((self._body_height()).view(self.num_envs, -1) - body_height_shift)
                     * body_height_scale,
                 ),
                 dim=1,
@@ -736,13 +837,31 @@ class LeggedRobot(BaseTask):
         if name.startswith("arm_"):
             return True
         return name in {
-            "traj_track",
-            "trajectory_current_tracking",
-            "trajectory_completion_time",
+            "ee_pos_tracking",
+            "ee_rot_tracking",
             "ee_smoothness",
-            "vis_manip_commands_tracking_lpy",
-            "vis_manip_commands_tracking_rpy",
+            "goal_pos_l2",
+            "reachability_barrier",
+            "manipulability",
+            "joint_limit_barrier",
+            "rho_rate",
+            "upper_action_rate",
+            "delta_vel_magnitude",
+            "posture_command_rate",
+            "stay_still_in_reach_sector",
+            "traj_progress",
+            "traj_lateral_err",
+            "traj_timing",
+            "traj_twist_err",
         }
+
+    def _update_dog_vel_ref(self):
+        """Advance the first-order reference model tracked by the
+        response_consistency reward: v_ref += (v_cmd - v_ref) * dt / T.
+        Runs unconditionally (cheap) so the buffer stays valid even when the
+        reward scale is zero."""
+        T = max(float(self.cfg.rewards.response_consistency_T), 1e-3)
+        self.dog_vel_ref += (self.commands_dog[:, :2] - self.dog_vel_ref) * (self.dt / T)
 
     def compute_reward(self):
         """Compute rewards
@@ -765,6 +884,8 @@ class LeggedRobot(BaseTask):
                 continue
 
             rew = self.reward_functions[i]() * reward_scales[name]
+            if self.numerical_fault_active:
+                rew = torch.where(self.numerical_fault_mask, 0.0, rew)
 
             if name in ["vis_manip_commands_tracking_lpy", "vis_manip_commands_tracking_rpy"]:
                 self.episode_sums[name] += rew
@@ -811,6 +932,9 @@ class LeggedRobot(BaseTask):
                 self.episode_sums["termination"] += rew
                 self.command_sums["termination"] += rew
 
+        if self.numerical_fault_active:
+            self.rew_buf_dog[self.numerical_fault_mask] = 0
+            self.rew_buf_arm[self.numerical_fault_mask] = 0
         self.episode_sums["total"] += self.rew_buf_dog + self.rew_buf_arm
 
         self.command_sums["lin_vel_raw"] += self.base_lin_vel[:, 0]
@@ -910,11 +1034,14 @@ class LeggedRobot(BaseTask):
                 self.dof_pos_limits[i, 1] = m + 0.5 * r * self.cfg.rewards.soft_dof_pos_limit
 
             if self.cfg.control.control_type == "M":
-                for i in range(8):
-                    joint_name = f"zarx_j{i + 1}"
-                    joint_idx = self.num_actions_loco + i
-                    props[joint_idx]["stiffness"] = self.cfg.arm.control.stiffness_arm[joint_name]
-                    props[joint_idx]["damping"] = self.cfg.arm.control.damping_arm[joint_name]
+                # Position-drive gains for every arm/gripper DOF, looked up by
+                # the joint's actual name (URDF-specific -- see stiffness_arm in
+                # wbc.py). Covers all DOFs past the 12 leg DOFs.
+                for joint_idx in range(self.num_actions_loco, self.num_dof):
+                    joint_name = self.dof_names[joint_idx]
+                    if joint_name in self.cfg.arm.control.stiffness_arm:
+                        props[joint_idx]["stiffness"] = self.cfg.arm.control.stiffness_arm[joint_name]
+                        props[joint_idx]["damping"] = self.cfg.arm.control.damping_arm[joint_name]
 
             if env_id == 0:
                 dof_frictions = props["friction"] if "friction" in props.dtype.names else np.zeros(len(props))
@@ -927,6 +1054,27 @@ class LeggedRobot(BaseTask):
 
         return props
 
+    def _assign_terrain_tiers(self, env_ids):
+        """Sample baked roughness tiles at creation/reset, using the full tier range."""
+        for cfg, ids in ((self.cfg, env_ids[env_ids < self.num_train_envs]),
+                         (self.eval_cfg, env_ids[env_ids >= self.num_train_envs])):
+            if cfg is None or len(ids) == 0 or cfg.terrain.mesh_type not in ("trimesh", "heightfield"):
+                continue
+            bands = getattr(cfg.terrain, "roughness_tier_columns", None)
+            if not bands:
+                continue
+            tiers = torch.randint(len(bands), (len(ids),), device=self.device)
+            columns = torch.empty_like(tiers)
+            for tier, band in enumerate(bands):
+                selected = tiers == tier
+                choices = torch.tensor(band, dtype=torch.long, device=self.device)
+                columns[selected] = choices[torch.randint(len(band), (int(selected.sum()),), device=self.device)]
+            rows = cfg.terrain.num_rows
+            low, high = (1, rows - 1) if rows > 2 else (0, rows)
+            self.terrain_types[ids] = columns
+            self.terrain_levels[ids] = torch.randint(low, high, (len(ids),), device=self.device)
+            self.env_origins[ids] = cfg.terrain.terrain_origins[self.terrain_levels[ids], columns]
+
     def _randomize_rigid_body_props(self, env_ids, cfg):
         if cfg.domain_rand.randomize_base_mass:
             min_payload, max_payload = cfg.domain_rand.added_mass_range
@@ -936,7 +1084,7 @@ class LeggedRobot(BaseTask):
                 * (max_payload - min_payload)
                 + min_payload
             )
-        if cfg.domain_rand.randomize_com_displacement:
+        if cfg.domain_rand.randomize_com_displacement and not getattr(self, "_body_props_locked", False):
             min_com_displacement, max_com_displacement = cfg.domain_rand.com_displacement_range
             self.com_displacements[env_ids, :] = (
                 torch.rand(len(env_ids), 3, dtype=torch.float, device=self.device, requires_grad=False)
@@ -970,6 +1118,24 @@ class LeggedRobot(BaseTask):
 
             self.gym.set_actor_rigid_shape_properties(self.envs[env_id], 0, rigid_shape_props)
 
+    def refresh_actor_rigid_body_props(self, env_ids, cfg):
+        """Write the sampled chassis mass before reset state writes.
+
+        CoM stays fixed at actor creation. Do not call the creation callback
+        again: it caches nominal mass and adds the camera mass.
+        """
+        for env_id in env_ids:
+            env_id = int(env_id)
+            env_handle, actor_handle = self.envs[env_id], self.actor_handles[env_id]
+            body_props = self.gym.get_actor_rigid_body_properties(env_handle, actor_handle)
+            mass = self.default_body_mass + float(self.payloads[env_id])
+            if mass <= 0:
+                raise ValueError("domain_rand.added_mass_range produces nonpositive chassis mass")
+            body_props[self.base_mass_body_index].mass = mass
+            self.gym.set_actor_rigid_body_properties(
+                env_handle, actor_handle, body_props, recomputeInertia=True
+            )
+
     def _randomize_dof_props(self, env_ids, cfg):
         if cfg.domain_rand.randomize_motor_strength:
             min_strength, max_strength = cfg.domain_rand.motor_strength_range
@@ -1001,16 +1167,22 @@ class LeggedRobot(BaseTask):
             )
 
     def _process_rigid_body_props(self, props, env_id):
-        self.default_body_mass = props[0].mass
+        # Go2+arm assets have a light "base" at index 0 and the chassis at
+        # "trunk". Applying +/-2 kg to that light body creates negative mass.
+        self.base_mass_body_index = self.body_names.index("trunk") if "trunk" in self.body_names else 0
+        base_props = props[self.base_mass_body_index]
+        self.default_body_mass = base_props.mass
 
         if env_id == 0:
             assert len(props) == len(self.body_names), "props length is not equal to body_names length"
             for name, item in zip(self.body_names, props):
                 print(f"{name}: {item.mass}")
 
-        props[0].mass = self.default_body_mass + self.payloads[env_id]
+        base_props.mass = self.default_body_mass + float(self.payloads[env_id])
+        if base_props.mass <= 0:
+            raise ValueError("domain_rand.added_mass_range produces nonpositive chassis mass")
 
-        props[0].com = gymapi.Vec3(
+        base_props.com = gymapi.Vec3(
             self.com_displacements[env_id, 0], self.com_displacements[env_id, 1], self.com_displacements[env_id, 2]
         )
         props[self.ee_idx].mass += 100.0 / 1000  # camera
@@ -1030,6 +1202,7 @@ class LeggedRobot(BaseTask):
             "vertical_velocity_sq",
             "horizontal_angular_velocity_sq",
             "base_height_sq_error",
+            "base_height_signed_error",
             "foot_slip_speed_sum",
             "foot_contact_samples",
             "locomotion_power_sum",
@@ -1044,12 +1217,34 @@ class LeggedRobot(BaseTask):
             device=self.device,
             requires_grad=False,
         )
+        self.step_locomotion_abs_energy_j = torch.zeros_like(
+            self.step_locomotion_power
+        )
+        self.step_locomotion_positive_energy_j = torch.zeros_like(
+            self.step_locomotion_power
+        )
         self._arm_init_performance_metrics_hook()
 
     def _update_performance_metrics(self):
         """Accumulate one simulator-step sample in physical units, without reward functions or scales."""
+        rejected = {}
+        if self.numerical_fault_active:
+            rejected = {key: value[self.numerical_fault_mask].clone()
+                        for key, value in self.performance_metric_sums.items()}
         lin_vel_error = self.base_lin_vel[:, :2] - self.commands_dog[:, :2]
         yaw_rate_error = self.base_ang_vel[:, 2] - self.commands_dog[:, 2]
+        if self.robustness_metrics is not None:
+            self.robustness_age_steps += 1
+            n = self.num_train_envs
+            zeros = torch.zeros(n, dtype=torch.bool, device=self.device)
+            height_failure = self.body_height_buf[:n] if self.cfg.rewards.use_terminal_body_height else zeros
+            orientation_failure = self.roll_pitch_buf[:n] if self.cfg.rewards.use_terminal_roll_pitch else zeros
+            self.robustness_metrics.update(
+                torch.cat((lin_vel_error[:n], yaw_rate_error[:n, None]), dim=1),
+                self.robustness_age_steps[:n], self.reset_buf[:n], self.time_out_buf[:n],
+                height_failure, orientation_failure, self.robustness_push_mask[:n],
+                valid=~self.numerical_fault_mask[:n] if self.numerical_fault_active else None,
+            )
         sums = self.performance_metric_sums
         sums["vx_abs_error"] += torch.abs(lin_vel_error[:, 0])
         sums["vy_abs_error"] += torch.abs(lin_vel_error[:, 1])
@@ -1069,9 +1264,10 @@ class LeggedRobot(BaseTask):
         else:
             reference_height = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         height_command = self.commands_dog[:, 5] if self.commands_dog.shape[1] > 5 else 0.0
-        body_height = self.base_pos[:, 2] - reference_height
+        body_height = self._body_height() if self._uses_terrain_height() else self.base_pos[:, 2] - reference_height
         height_target = float(self.cfg.rewards.base_height_target) + height_command
         sums["base_height_sq_error"] += torch.square(body_height - height_target)
+        sums["base_height_signed_error"] += body_height - height_target
 
         foot_contact = self.contact_forces[:, self.feet_indices, 2] > 1.0
         foot_slip_speed = torch.norm(self.foot_velocities[:, :, :2], dim=-1)
@@ -1079,6 +1275,8 @@ class LeggedRobot(BaseTask):
         sums["foot_contact_samples"] += torch.sum(foot_contact, dim=-1).float()
         sums["locomotion_power_sum"] += self.step_locomotion_power
         self._arm_update_performance_metrics_hook()
+        for key, value in rejected.items():
+            self.performance_metric_sums[key][self.numerical_fault_mask] = value
 
     @staticmethod
     def _mean_valid_metric(values, valid):
@@ -1116,6 +1314,7 @@ class LeggedRobot(BaseTask):
             torch.sqrt(episode_mean("horizontal_angular_velocity_sq"))
         )
         extras["perf_base_height_rmse_m"] = mean_valid(torch.sqrt(episode_mean("base_height_sq_error")))
+        extras["perf_base_height_signed_error_m"] = mean_valid(episode_mean("base_height_signed_error"))
         contact_samples = sums["foot_contact_samples"][train_env_ids]
         contact_valid = valid & (contact_samples > 0)
         slip_speed = sums["foot_slip_speed_sum"][train_env_ids] / torch.clamp(contact_samples, min=1.0)
@@ -1126,7 +1325,19 @@ class LeggedRobot(BaseTask):
         self._arm_log_performance_metrics_hook(train_env_ids, steps)
 
     def _init_reset_curriculum(self):
-        self.reset_curriculum_enabled = bool(getattr(self.cfg.terrain, 'reset_curriculum', False))
+        self.reset_mixture = FixedResetMixture(self.cfg.terrain, self.num_envs, self.num_train_envs, self.device)
+        self.robustness_push_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        # Unlike episode_length_buf, this clock is never randomized by Runner.
+        self.robustness_age_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self.robustness_metrics = (
+            RobustnessMetrics(self.reset_mixture.hard[:self.num_train_envs], self.dt,
+                              self.cfg.terrain.robustness_early_window_s)
+            if self.cfg.terrain.robustness_metrics else None
+        )
+        self.reset_curriculum_enabled = bool(getattr(self.cfg.terrain, 'reset_curriculum', False)) and not self.reset_mixture.enabled
+        if self.reset_mixture.enabled:
+            n_hard = int(self.reset_mixture.hard[:self.num_train_envs].sum().item())
+            print(f"[reset mixture groups] train easy={self.num_train_envs - n_hard}, hard={n_hard}; legacy reset ramp bypassed", flush=True)
         self.reset_curriculum_started = False
         self.reset_curriculum_start_iteration = -1
         self.reset_curriculum_intensity = 1.0
@@ -1230,10 +1441,24 @@ class LeggedRobot(BaseTask):
             return max_range
         return max_range * float(getattr(self, 'reset_curriculum_intensity', 1.0))
 
+    def pop_robustness_metrics(self):
+        if self.robustness_metrics is None:
+            return {}
+        values = self.robustness_metrics.pop()
+        values["ResetMix/configured_hard_fraction"] = (
+            self.cfg.terrain.reset_mix_hard_fraction if self.reset_mixture.enabled else 0.0
+        )
+        values["Disturbance/configured_max_push_ang_vel_rad_s"] = self.cfg.domain_rand.max_push_ang_vel
+        values["Disturbance/configured_max_push_vel_xy_mps"] = self.cfg.domain_rand.max_push_vel_xy
+        return values
+
     def _resample_commands(self, env_ids):
         if len(env_ids) == 0:
             return
-        self._arm_resample_commands_train_hook(env_ids)
+        if getattr(self, "coordination_commands", None) is not None:
+            self.coordination_commands.reset(self, env_ids, global_switch.count)
+            return
+        arm_controls_commands = bool(self._arm_resample_commands_train_hook(env_ids))
 
         timesteps = int(self.cfg.commands.resampling_time / self.dt)
         ep_len = min(self.cfg.env.max_episode_length, timesteps)
@@ -1276,26 +1501,20 @@ class LeggedRobot(BaseTask):
         self.env_command_bins[env_ids.cpu().numpy()] = new_bin_inds
         self.env_command_categories[env_ids.cpu().numpy()] = 0
 
-        if not self.cfg.wbc.plan_vel and not self.cfg.wbc.trajectory.enabled:
+        if not arm_controls_commands:
             self.commands_dog[env_ids, 0] = new_commands[:, 0]
             self.commands_dog[env_ids, 1] = new_commands[:, 1]
             self.commands_dog[env_ids, 2] = new_commands[:, 2]
-            # self.commands_dog[env_ids, :2] *= (torch.norm(self.commands_dog[env_ids, :2], dim=1) > 0.1).unsqueeze(1)
 
-            # # Randomly select 10% of the environment to remain stationary
-            # num_zero_envs = int(0.1 * len(env_ids))
-            # zero_env_ids = torch.randperm(len(env_ids))[:num_zero_envs]
-            # self.commands_dog[env_ids[zero_env_ids], :3] = 0
-
-            zero_mask = torch.rand(len(env_ids), device=self.device) < 0.1
-            if len(zero_mask.nonzero()) > 0:
-                self.commands_dog[env_ids[zero_mask], :3] = 0
+        zero_mask = torch.rand(len(env_ids), device=self.device) < 0.1
+        if not arm_controls_commands and len(zero_mask.nonzero()) > 0:
+            self.commands_dog[env_ids[zero_mask], :3] = 0
 
             self.commands_dog[env_ids, 0] *= torch.abs(self.commands_dog[env_ids, 0]) > 0.07
             self.commands_dog[env_ids, 1] *= torch.abs(self.commands_dog[env_ids, 1]) > 0.07
             self.commands_dog[env_ids, 2] *= torch.abs(self.commands_dog[env_ids, 2]) > 0.1
 
-        else:
+        elif not arm_controls_commands:
             if not global_switch.switch_open:
                 self.commands_dog[env_ids, 0] = new_commands[:, 0]
                 self.commands_dog[env_ids, 1] = new_commands[:, 1]
@@ -1314,12 +1533,12 @@ class LeggedRobot(BaseTask):
                 self.commands_dog[env_ids, 1] *= torch.abs(self.commands_dog[env_ids, 1]) > 0.07
                 self.commands_dog[env_ids, 2] *= torch.abs(self.commands_dog[env_ids, 2]) > 0.1
 
-        if not global_switch.switch_open:
+        if not global_switch.switch_open and not arm_controls_commands:
             self.commands_dog[env_ids, 3] = new_commands[:, 3]
             self.commands_dog[env_ids, 4] = new_commands[:, 4]
             self.commands_dog[env_ids, 5] = new_commands[:, 5]  # body_height_cmd
 
-        if self.cfg.commands.use_dynamic_gait and not global_switch.switch_open:
+        if self.cfg.commands.use_dynamic_gait and not global_switch.switch_open and not arm_controls_commands:
             self.commands_dog[env_ids, 6] = new_commands[:, 6]
             self.commands_dog[env_ids, 7] = new_commands[:, 7]
             self.commands_dog[env_ids, 8] = new_commands[:, 8]
@@ -1334,6 +1553,15 @@ class LeggedRobot(BaseTask):
             self.command_sums[key][env_ids] = 0.0
 
     def _init_command_distribution(self, env_ids):
+        self.coordination_commands = None
+        if getattr(getattr(self.cfg.commands, "coordination", None), "enabled", False):
+            from .coordination_sampling import CoordinationCommands
+            self.coordination_commands = CoordinationCommands(self.cfg, self.num_envs, self.device, self.dt)
+            self.category_names = ["trot"]
+            self.curricula = [self.coordination_commands.curriculum]
+            self.env_command_bins = self.coordination_commands.bins
+            self.env_command_categories = np.zeros(self.num_envs, dtype=np.int64)
+            return
         # new style curriculum
         self.category_names = ["trot"]
 
@@ -1477,9 +1705,10 @@ class LeggedRobot(BaseTask):
         self._arm_post_callback_hook()
 
         # resample commands
-        sample_interval = int(self.cfg.commands.resampling_time / self.dt)
-        env_ids = (self.episode_length_buf % sample_interval == 0).nonzero(as_tuple=False).flatten()
-        self._resample_commands(env_ids)
+        if self.coordination_commands is None:
+            sample_interval = int(self.cfg.commands.resampling_time / self.dt)
+            env_ids = (self.episode_length_buf % sample_interval == 0).nonzero(as_tuple=False).flatten()
+            self._resample_commands(env_ids)
         self._step_contact_targets()
 
         # measure terrain heights
@@ -1510,6 +1739,7 @@ class LeggedRobot(BaseTask):
         if self.cfg.domain_rand.randomize_rigids_after_start:
             self._randomize_rigid_body_props(env_ids, self.cfg)
             self.refresh_actor_rigid_shape_props(env_ids, self.cfg)
+            self.refresh_actor_rigid_body_props(env_ids, self.cfg)
 
     def _reset_dofs(self, env_ids, cfg):
         """Resets DOF position and velocities of selected environmments
@@ -1541,6 +1771,12 @@ class LeggedRobot(BaseTask):
         yaw_init_range = self._get_reset_curriculum_range("yaw_init_range")
         pitch_init_range = self._get_reset_curriculum_range("pitch_init_range")
         roll_init_range = self._get_reset_curriculum_range("roll_init_range")
+        mixture = self.reset_mixture
+        self.robustness_age_steps[env_ids] = 0
+        if mixture.enabled:
+            z_init_range = cfg.terrain.reset_mix_z_m
+            yaw_init_range = cfg.terrain.reset_mix_yaw_rad
+            tilt_limit = mixture.limit(env_ids, int(global_switch.count))
 
         # base position
         if self.custom_origins:
@@ -1568,12 +1804,19 @@ class LeggedRobot(BaseTask):
         init_yaws = torch_rand_float(
             -yaw_init_range, yaw_init_range, (len(env_ids), 1), device=self.device
         )
-        init_pitches = torch_rand_float(
-            -pitch_init_range, pitch_init_range, (len(env_ids), 1), device=self.device
-        )
-        init_rolls = torch_rand_float(
-            -roll_init_range, roll_init_range, (len(env_ids), 1), device=self.device
-        )
+        if mixture.enabled:
+            init_pitches = torch_rand_float(-1., 1., (len(env_ids), 1), device=self.device) * tilt_limit
+            init_rolls = torch_rand_float(-1., 1., (len(env_ids), 1), device=self.device) * tilt_limit
+        else:
+            init_pitches = torch_rand_float(-pitch_init_range, pitch_init_range, (len(env_ids), 1), device=self.device)
+            init_rolls = torch_rand_float(-roll_init_range, roll_init_range, (len(env_ids), 1), device=self.device)
+            mixture.episode_tilt_limit[env_ids] = max(pitch_init_range, roll_init_range)
+        tilt = torch.acos(torch.clamp(torch.cos(init_pitches[:, 0]) * torch.cos(init_rolls[:, 0]), -1., 1.))
+        mixture.episode_tilt[env_ids] = tilt
+        if self.robustness_metrics is not None:
+            train_ids = env_ids[env_ids < self.num_train_envs]
+            self.robustness_metrics.record_reset(train_ids, mixture.episode_tilt[train_ids],
+                                                 mixture.episode_tilt_limit[train_ids])
         q_yaw = quat_from_angle_axis(init_yaws, torch.Tensor([0, 0, 1]).to(self.device))[:, 0, :]
         q_pitch = quat_from_angle_axis(init_pitches, torch.Tensor([0, 1, 0]).to(self.device))[:, 0, :]
         q_roll = quat_from_angle_axis(init_rolls, torch.Tensor([1, 0, 0]).to(self.device))[:, 0, :]
@@ -1604,15 +1847,38 @@ class LeggedRobot(BaseTask):
                 self.complete_video_frames_eval = self.video_frames_eval[:]
             self.video_frames_eval = []
 
+    def _get_push_curriculum_intensity(self):
+        if not getattr(self.cfg.domain_rand, 'push_curriculum', False):
+            return 1.0
+        growth_iters = max(1, int(getattr(self.cfg.domain_rand, 'push_curriculum_growth_iterations', 1)))
+        initial_fraction = min(
+            1.0, max(0.0, float(getattr(self.cfg.domain_rand, 'push_curriculum_initial_fraction', 0.0)))
+        )
+        progress = min(1.0, max(0.0, int(getattr(global_switch, 'count', 0)) / growth_iters))
+        return initial_fraction + (1.0 - initial_fraction) * progress
+
+    def _resample_push_interval(self, env_ids):
+        if len(env_ids) == 0:
+            return
+        lo, hi = self.cfg.domain_rand.push_interval_range
+        next_in = torch.randint(lo, hi + 1, (len(env_ids),), device=self.device)
+        self.next_push_step[env_ids] = self.episode_length_buf[env_ids] + next_in
+
     def _push_robots(self, env_ids, cfg):
         """Random pushes the robots. Emulates an impulse by setting a randomized base velocity."""
+        self.robustness_push_mask.zero_()
+        if self.numerical_fault_active:
+            env_ids = env_ids[~self.numerical_fault_mask[env_ids]]
         if cfg.domain_rand.push_robots:
-            push_env_ids = env_ids[self.episode_length_buf[env_ids] % int(cfg.domain_rand.push_interval) == 0]
+            push_env_ids = env_ids[self.episode_length_buf[env_ids] >= self.next_push_step[env_ids]]
             if len(push_env_ids) == 0:
                 return
+            self._resample_push_interval(push_env_ids)
+            self.robustness_push_mask[push_env_ids] = True
 
-            max_vel = cfg.domain_rand.max_push_vel_xy
-            max_push_ang = cfg.domain_rand.max_push_ang_vel
+            intensity = self._get_push_curriculum_intensity()
+            max_vel = cfg.domain_rand.max_push_vel_xy * intensity
+            max_push_ang = cfg.domain_rand.max_push_ang_vel * intensity
             n = len(push_env_ids)
             self.root_states[push_env_ids, 7:9] = torch_rand_float(-max_vel, max_vel, (n, 2), device=self.device)
             self.root_states[push_env_ids, 10:13] = torch_rand_float(
@@ -1811,8 +2077,15 @@ class LeggedRobot(BaseTask):
             requires_grad=False,
         )
 
+        # Foot air/contact stopwatches -- see _update_foot_contact_times.
         self.feet_air_time = torch.zeros(
             self.num_envs, self.feet_indices.shape[0], dtype=torch.float, device=self.device, requires_grad=False
+        )
+        self.feet_contact_time = torch.zeros_like(self.feet_air_time)
+        self.last_air_time = torch.zeros_like(self.feet_air_time)
+        self.last_contact_time = torch.zeros_like(self.feet_air_time)
+        self._gait_last_contacts = torch.zeros(
+            self.num_envs, len(self.feet_indices), dtype=torch.bool, device=self.device, requires_grad=False
         )
         self.last_contacts = torch.zeros(
             self.num_envs, len(self.feet_indices), dtype=torch.bool, device=self.device, requires_grad=False
@@ -1820,6 +2093,9 @@ class LeggedRobot(BaseTask):
         self.last_contact_filt = torch.zeros(
             self.num_envs, len(self.feet_indices), dtype=torch.bool, device=self.device, requires_grad=False
         )
+
+        self.next_push_step = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._resample_push_interval(torch.arange(self.num_envs, device=self.device))
         self.base_lin_vel = quat_rotate_inverse(self.base_quat, self.root_states[: self.num_envs, 7:10])
         self.base_ang_vel = quat_rotate_inverse(self.base_quat, self.root_states[: self.num_envs, 10:13])
         self.projected_gravity = quat_rotate_inverse(self.base_quat, self.gravity_vec)
@@ -1837,18 +2113,24 @@ class LeggedRobot(BaseTask):
                 self.d_gains[i] = 0.0
                 continue
 
-            for dof_name in self.cfg.control.stiffness.keys():
-                if dof_name in name:
-                    self.p_gains[i] = (
-                        self.cfg.dog.control.stiffness_leg[dof_name]
-                        if i < self.num_actions_loco
-                        else self.cfg.arm.control.stiffness_arm[dof_name]
-                    )  # [N*m/rad]
-                    self.d_gains[i] = (
-                        self.cfg.dog.control.damping_leg[dof_name]
-                        if i < self.num_actions_loco
-                        else self.cfg.arm.control.damping_arm[dof_name]
-                    )  # [N*m*s/rad]
+            if i < self.num_actions_loco:
+                # Legs: select a gain group by substring (leg DOF names all
+                # contain the group key, e.g. "joint").
+                for dof_name in self.cfg.dog.control.stiffness_leg.keys():
+                    if dof_name in name:
+                        self.p_gains[i] = self.cfg.dog.control.stiffness_leg[dof_name]  # [N*m/rad]
+                        self.d_gains[i] = self.cfg.dog.control.damping_leg[dof_name]  # [N*m*s/rad]
+                        found = True
+            else:
+                # Arm: look up by the joint's exact name. Substring matching is
+                # unsafe here because x5_joint* names contain the leg key
+                # "joint". (In control_type "M" the arm slice is position-driven
+                # via _process_dof_props, so these p/d gains only feed the
+                # torque path for the leg slice; the arm entries stay correct
+                # for any consumer that reads them.)
+                if name in self.cfg.arm.control.stiffness_arm:
+                    self.p_gains[i] = self.cfg.arm.control.stiffness_arm[name]  # [N*m/rad]
+                    self.d_gains[i] = self.cfg.arm.control.damping_arm[name]  # [N*m*s/rad]
                     found = True
 
             if not found:
@@ -1880,6 +2162,10 @@ class LeggedRobot(BaseTask):
             device=self.device,
             requires_grad=False,
         )[: self.cfg.dog.dog_num_commands]
+        # First-order reference model of commands_dog[:, :2], used by the
+        # response_consistency reward (see rewards.py) and updated every
+        # step in _update_dog_vel_ref().
+        self.dog_vel_ref = torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device, requires_grad=False)
         self.rew_buf_dog = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
         self.rew_buf_pos_dog = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
         self.rew_buf_neg_dog = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
@@ -1971,10 +2257,32 @@ class LeggedRobot(BaseTask):
         for key in list(self.wbc_reward_scales.keys()):
             self.wbc_reward_scales[key] *= self.dt
 
-        # Complete the WBC reward table with unchanged stage-1 scales.
+        # Complete the WBC reward table with unchanged stage-1 scales. A name
+        # explicitly zeroed under wbc.reward_scales.* (e.g. to disable it for
+        # WBC while stage-1 still uses it, like raibert_heuristic) must still
+        # count as "present" here so this inheritance doesn't revive the
+        # nonzero stage-1 value -- so zero-scale WBC entries are only dropped
+        # below, after inheritance is resolved.
         for name, scale in self.pretrained_reward_scales.items():
             if name not in self.wbc_reward_scales:
                 self.wbc_reward_scales[name] = scale
+
+        # remove WBC-side zero scales (dt-scaling above turns them into
+        # exactly 0 too, so this also catches those) -- EXCEPT a name stage 1
+        # still wants nonzero. Registration below walks self.wbc_reward_scales
+        # in *both* stages (compute_reward has one reward_names list, not one
+        # per stage -- see global_switch.get_reward_scales, which only
+        # switches which VALUES are used, not which names are computed), so
+        # dropping a name here means it is never computed in stage 1 either,
+        # however nonzero cfg.reward_scales.<name> is. That silently disabled
+        # raibert_heuristic for six weeks (2026-07-26 to 2026-09-05, commit
+        # 15a4581): wbc.py set it to -0.0 meaning "off for stage 2", and it
+        # went missing from stage-1 runs too, with no error and no changed log
+        # key. See config.core.resolve_reward_scales to check which rewards
+        # are actually registered without needing a live run to find out.
+        for key in list(self.wbc_reward_scales.keys()):
+            if self.wbc_reward_scales[key] == 0 and key not in self.pretrained_reward_scales:
+                self.wbc_reward_scales.pop(key)
 
         # prepare list of functions
         self.reward_functions = []
@@ -2066,8 +2374,8 @@ class LeggedRobot(BaseTask):
         )
 
     @staticmethod
-    def _format_xyz(xyz):
-        return " ".join(f"{float(v):.8g}" for v in xyz)
+    def _format_vector(values):
+        return " ".join(f"{float(value):.8g}" for value in values)
 
     @staticmethod
     def _write_xml_if_changed(tree, path):
@@ -2105,14 +2413,18 @@ class LeggedRobot(BaseTask):
                 raise ValueError(f"Invalid rpy on joint '{mount_joint_name}': {source_origin_local.get('rpy')}")
             return np.concatenate((xyz, rpy)).reshape(1, 6).astype(np.float32)
 
-        if arm_dr is None or not getattr(arm_dr, "randomize_mount_pos", False):
-            self.arm_mount_bucket_offsets = np.zeros((1, 3), dtype=np.float32)
+        randomize_position = arm_dr is not None and getattr(arm_dr, "randomize_mount_position", False)
+        randomize_rotation = arm_dr is not None and getattr(arm_dr, "randomize_mount_rotation", False)
+        if not randomize_position and not randomize_rotation:
+            self.arm_mount_bucket_position_offsets = np.zeros((1, 3), dtype=np.float32)
+            self.arm_mount_bucket_rpy_offsets = np.zeros((1, 3), dtype=np.float32)
             self.arm_mount_bucket_tfs = read_source_mount_tf()
             return [asset_file]
 
-        num_buckets = int(getattr(arm_dr, "mount_pos_buckets", 32))
+        num_buckets = int(getattr(arm_dr, "mount_tf_buckets", 32))
         if num_buckets <= 1 or not asset_file.lower().endswith(".urdf"):
-            self.arm_mount_bucket_offsets = np.zeros((1, 3), dtype=np.float32)
+            self.arm_mount_bucket_position_offsets = np.zeros((1, 3), dtype=np.float32)
+            self.arm_mount_bucket_rpy_offsets = np.zeros((1, 3), dtype=np.float32)
             self.arm_mount_bucket_tfs = read_source_mount_tf()
             return [asset_file]
 
@@ -2131,38 +2443,56 @@ class LeggedRobot(BaseTask):
         if base_rpy.shape != (3,):
             raise ValueError(f"Invalid rpy on joint '{mount_joint_name}': {source_origin.get('rpy')}")
 
-        ranges = np.asarray(arm_dr.mount_pos_range, dtype=np.float32)
-        if ranges.shape != (3, 2):
-            raise ValueError(f"mount_pos_range must have shape (3, 2), got {ranges.shape}")
+        rng = np.random.default_rng(int(getattr(arm_dr, "mount_tf_bucket_seed", 1234)))
+        position_offsets = np.zeros((num_buckets, 3), dtype=np.float32)
+        if randomize_position:
+            position_ranges = np.asarray(arm_dr.mount_position_range, dtype=np.float32)
+            if position_ranges.shape != (3, 2):
+                raise ValueError(
+                    f"mount_position_range must have shape (3, 2), got {position_ranges.shape}"
+                )
+            position_offsets = rng.uniform(
+                position_ranges[:, 0], position_ranges[:, 1], size=(num_buckets, 3)
+            ).astype(np.float32)
 
-        rng = np.random.default_rng(int(getattr(arm_dr, "mount_pos_bucket_seed", 1234)))
-        offsets = rng.uniform(ranges[:, 0], ranges[:, 1], size=(num_buckets, 3)).astype(np.float32)
-        offsets[0] = 0.0
+        rpy_offsets = np.zeros((num_buckets, 3), dtype=np.float32)
+        if randomize_rotation:
+            rpy_ranges = np.asarray(arm_dr.mount_rpy_range, dtype=np.float32)
+            if rpy_ranges.shape != (3, 2):
+                raise ValueError(f"mount_rpy_range must have shape (3, 2), got {rpy_ranges.shape}")
+            rpy_offsets = rng.uniform(rpy_ranges[:, 0], rpy_ranges[:, 1], size=(num_buckets, 3)).astype(
+                np.float32
+            )
+
+        # Always retain one nominal asset for a deterministic reference bucket.
+        position_offsets[0] = 0.0
+        rpy_offsets[0] = 0.0
+        bucket_xyz = base_xyz.reshape(1, 3) + position_offsets
+        # Mount errors are defined as component-wise offsets in the URDF RPY convention.
+        bucket_rpy = base_rpy.reshape(1, 3) + rpy_offsets
 
         stem, ext = os.path.splitext(asset_file)
         generated_files = []
         updated_files = 0
-        for bucket_id, offset in enumerate(offsets):
+        for bucket_id in range(num_buckets):
             tree = copy.deepcopy(source_tree)
             joint = tree.getroot().find(f"./joint[@name='{mount_joint_name}']")
             origin = joint.find("origin")
             if origin is None:
                 origin = ET.SubElement(joint, "origin")
-            origin.set("xyz", self._format_xyz(base_xyz + offset))
-            origin.set("rpy", source_origin.get("rpy", "0 0 0"))
+            origin.set("xyz", self._format_vector(bucket_xyz[bucket_id]))
+            origin.set("rpy", self._format_vector(bucket_rpy[bucket_id]))
 
             generated_file = f"{stem}_mount_bucket_{bucket_id:02d}{ext}"
             generated_path = os.path.join(asset_root, generated_file)
             updated_files += int(self._write_xml_if_changed(tree, generated_path))
             generated_files.append(generated_file)
 
-        self.arm_mount_bucket_offsets = offsets
-        self.arm_mount_bucket_tfs = np.concatenate(
-            (base_xyz.reshape(1, 3) + offsets, np.repeat(base_rpy.reshape(1, 3), num_buckets, axis=0)),
-            axis=1,
-        ).astype(np.float32)
+        self.arm_mount_bucket_position_offsets = position_offsets
+        self.arm_mount_bucket_rpy_offsets = rpy_offsets
+        self.arm_mount_bucket_tfs = np.concatenate((bucket_xyz, bucket_rpy), axis=1).astype(np.float32)
         print(
-            f"[RoboDuet] mount position URDF buckets ready: {len(generated_files)} ({updated_files} updated)",
+            f"[RoboDuet] mount TF URDF buckets ready: {len(generated_files)} ({updated_files} updated)",
             flush=True,
         )
         return generated_files
@@ -2230,6 +2560,14 @@ class LeggedRobot(BaseTask):
         self.dof_names = self.gym.get_asset_dof_names(self.robot_asset)
         self.num_bodies = len(body_names)
         self.num_dofs = len(self.dof_names)
+        # Resolve the EE body index by name (body ordering is URDF-specific, so
+        # the __init__ default of 23 is only a placeholder). end_effector_state
+        # tracks this body plus the fixed gripper offset (see WBCEnv).
+        ee_body_name = getattr(self.cfg.asset, "ee_body_name", None)
+        if ee_body_name is not None:
+            if ee_body_name not in body_names:
+                raise ValueError(f"asset.ee_body_name '{ee_body_name}' not in body_names: {body_names}")
+            self.ee_idx = body_names.index(ee_body_name)
         feet_names = [s for s in body_names if self.cfg.asset.foot_name in s]
         penalized_contact_names = []
         for name in self.cfg.asset.penalize_contacts_on:
@@ -2271,6 +2609,7 @@ class LeggedRobot(BaseTask):
         self.default_friction = rigid_shape_props_asset[1].friction
         self.default_restitution = rigid_shape_props_asset[1].restitution
         self._init_custom_buffers__()
+        self._assign_terrain_tiers(torch.arange(self.num_envs, device=self.device))
         self._randomize_rigid_body_props(torch.arange(self.num_envs, device=self.device), self.cfg)
         self._randomize_gravity()
 
@@ -2308,6 +2647,9 @@ class LeggedRobot(BaseTask):
             self.arm_mount_tfs[i] = to_torch(
                 self.arm_mount_bucket_tfs[bucket_id], device=self.device, dtype=torch.float
             )
+
+        # Past this point the actors exist and their CoM is fixed for the run.
+        self._body_props_locked = True
 
         self.feet_indices = torch.zeros(len(feet_names), dtype=torch.long, device=self.device, requires_grad=False)
         for i in range(len(feet_names)):
@@ -2549,7 +2891,14 @@ class LeggedRobot(BaseTask):
         cfg.env.max_episode_length = np.ceil(max_episode_length_s / self.dt)
         self.max_episode_length = cfg.env.max_episode_length
 
-        cfg.domain_rand.push_interval = np.ceil(cfg.domain_rand.push_interval_s / self.dt)
+        push_interval_s_range = getattr(cfg.domain_rand, 'push_interval_s_range', None) or [
+            cfg.domain_rand.push_interval_s,
+            cfg.domain_rand.push_interval_s,
+        ]
+        cfg.domain_rand.push_interval_range = [
+            int(np.ceil(push_interval_s_range[0] / self.dt)),
+            max(int(np.ceil(push_interval_s_range[1] / self.dt)), int(np.ceil(push_interval_s_range[0] / self.dt))),
+        ]
         cfg.domain_rand.rand_interval = np.ceil(cfg.domain_rand.rand_interval_s / self.dt)
         cfg.domain_rand.gravity_rand_interval = np.ceil(cfg.domain_rand.gravity_rand_interval_s / self.dt)
         cfg.domain_rand.gravity_rand_duration = np.ceil(
@@ -2594,6 +2943,41 @@ class LeggedRobot(BaseTask):
         points[:, :, 0] = grid_x.flatten()
         points[:, :, 1] = grid_y.flatten()
         return points
+
+    def _uses_terrain_height(self):
+        return getattr(self.cfg.terrain, "height_reference", "world") == "terrain"
+
+    def _ground_height_at(self, xy):
+        """World-space ground height at arbitrary XY positions, including after reset."""
+        if self.cfg.terrain.mesh_type == "plane":
+            return torch.zeros_like(xy[..., 0])
+        if self.height_samples is None:
+            raise RuntimeError("Terrain-relative heights require a height grid")
+        t = self.terrain.cfg
+        if t.mesh_type == "trimesh" and t.slope_treshold is not None:
+            raise ValueError("Terrain height queries require unshifted triangles (slope_treshold=None)")
+        return sample_triangle_heights(self.height_samples, xy, t.horizontal_scale,
+                                       t.vertical_scale, t.border_size)
+
+    def _body_ground_reference(self):
+        if not self._uses_terrain_height() or self.cfg.terrain.mesh_type == "plane":
+            return torch.zeros_like(self.base_pos[:, 2])
+        # Query current root pose, not the pre-reset measured_heights cache.
+        if not hasattr(self, "body_height_points"):
+            x = torch.tensor(self.cfg.terrain.measured_points_x, device=self.device)
+            y = torch.tensor(self.cfg.terrain.measured_points_y, device=self.device)
+            gx, gy = torch.meshgrid(x, y, indexing="ij")
+            self.body_height_points = torch.stack((gx.flatten(), gy.flatten(), torch.zeros_like(gx.flatten())), -1)
+        local = self.body_height_points.unsqueeze(0).expand(self.num_envs, -1, -1)
+        points = quat_apply_yaw(self.base_quat.repeat(1, local.shape[1]), local) + self.base_pos.unsqueeze(1)
+        return self._ground_height_at(points[..., :2]).mean(dim=1)
+
+    def _body_height(self):
+        return self.base_pos[:, 2] - self._body_ground_reference()
+
+    def _foot_clearance(self):
+        z = self.foot_positions[:, :, 2]
+        return z - self._ground_height_at(self.foot_positions[..., :2]) if self._uses_terrain_height() else z
 
     def _get_heights(self, env_ids, cfg):
         """Samples heights of the terrain at required points around each robot.

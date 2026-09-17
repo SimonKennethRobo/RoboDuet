@@ -59,6 +59,7 @@ class PPO:
         self.transition = RolloutStorage.Transition()
 
         self.learning_rate = learning_rate
+        self.numerical_guard = None
 
     def init_storage(
         self,
@@ -97,6 +98,10 @@ class PPO:
             self.storage.clear()
 
     def act(self, obs, privileged_obs, obs_history, deterministic=False):
+        if self.numerical_guard is not None:
+            self.numerical_guard.phase = 'rollout'
+            self.numerical_guard.last_inputs = dict(obs=obs, privileged_obs=privileged_obs, obs_history=obs_history)
+            self.numerical_guard.check('inputs', obs=obs, privileged_obs=privileged_obs, obs_history=obs_history)
         # Compute the actions and values
         if deterministic:
             self.actor_critic.update_distribution(obs_history)
@@ -107,6 +112,9 @@ class PPO:
         self.transition.actions_log_prob = self.actor_critic.get_actions_log_prob(self.transition.actions).detach()
         self.transition.action_mean = self.actor_critic.action_mean.detach()
         self.transition.action_sigma = self.actor_critic.action_std.detach()
+        if self.numerical_guard is not None:
+            self.numerical_guard.check('outputs', actions=self.transition.actions,
+                                       values=self.transition.values, log_prob=self.transition.actions_log_prob)
         # need to record obs and critic_obs before env.step()
         self.transition.observations = obs
         self.transition.critic_observations = obs
@@ -115,6 +123,8 @@ class PPO:
         return self.transition.actions
 
     def process_env_step(self, rewards, dones, infos):
+        if self.numerical_guard is not None:
+            self.numerical_guard.check('rewards', rewards=rewards)
         self.transition.rewards = rewards.clone()
         self.transition.dones = dones
         # self.transition.env_bins = infos["env_bins"]
@@ -131,10 +141,19 @@ class PPO:
         self.actor_critic.reset(dones)
 
     def compute_returns(self, last_critic_obs, last_critic_privileged_obs):
+        if self.numerical_guard is not None:
+            self.numerical_guard.phase = 'returns'
+            self.numerical_guard.check('inputs', obs=last_critic_obs, privileged_obs=last_critic_privileged_obs)
         last_values = self.actor_critic.evaluate(last_critic_obs, last_critic_privileged_obs).detach()
+        if self.numerical_guard is not None:
+            self.numerical_guard.check('last_values', last_values=last_values)
         self.storage.compute_returns(last_values, PPO_Args.gamma, PPO_Args.lam)
+        if self.numerical_guard is not None:
+            self.numerical_guard.check('returns_advantages', returns=self.storage.returns, advantages=self.storage.advantages)
 
     def update(self, un_adapt=False):
+        if self.numerical_guard is not None:
+            self.numerical_guard.phase = 'update'
         value_loss_log = []
         surrogate_loss_log = []
         adaptation_module_loss_log = []
@@ -206,12 +225,18 @@ class PPO:
                 value_loss = (returns_batch - value_batch).pow(2).mean()
 
             loss = surrogate_loss + PPO_Args.value_loss_coef * value_loss - PPO_Args.entropy_coef * entropy_batch.mean()
+            if self.numerical_guard is not None:
+                self.numerical_guard.check('loss', loss=loss, value_loss=value_loss, surrogate_loss=surrogate_loss)
 
             # Gradient step
             self.optimizer.zero_grad()
             loss.backward()
+            if self.numerical_guard is not None:
+                self.numerical_guard.check_gradients()
             nn.utils.clip_grad_norm_(self.actor_critic.parameters(), PPO_Args.max_grad_norm)
             self.optimizer.step()
+            if self.numerical_guard is not None:
+                self.numerical_guard.check_parameters()
 
             value_loss_log.append(value_loss.detach())
             surrogate_loss_log.append(surrogate_loss.detach())
