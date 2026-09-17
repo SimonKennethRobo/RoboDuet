@@ -18,8 +18,8 @@ from isaacgym.torch_utils import (
     torch_rand_float,
 )
 
-from go1_gym.envs.config import ARM_ACTION_MODES, ConfigNode
-from go1_gym.response import LatencyBuffer
+from go1_gym.envs.config import ARM_ACTION_MODES, ConfigNode, dog_obs_term_present
+from go1_gym.utils.latency import LatencyBuffer
 from go1_gym.utils.global_switch import global_switch
 from go1_gym.utils.math_utils import (
     ee_twist_body_6d,
@@ -52,7 +52,10 @@ dog_cmd_idx = {
     "gait_params": slice(6, 11),
 }
 
-goal_plan_channel_names = ("vx", "vy", "yaw", "height", "pitch", "roll", "gait_freq", "stance_width", "stance_length")
+goal_plan_channel_names = (
+    "vx", "vy", "yaw", "height", "pitch", "roll",
+    "gait_freq", "stance_width", "stance_length",
+)
 
 
 class WBCEnv(LeggedRobot):
@@ -537,11 +540,124 @@ class WBCEnv(LeggedRobot):
 
         fixed_commands = {
             dog_cmd_idx["footswing_height"]: self.cfg.wbc.goal_reaching.fixed_footswing_height,
+            dog_cmd_idx["gait_duration"]: 0.49,
         }
         for index, value in fixed_commands.items():
             self.goal_command_targets[:, index] = value
             self.goal_command_smoothed[:, index] = value
             self.commands_dog[:, index] = value
+
+    def apply_external_upper_commands(
+        self,
+        env_ids,
+        base_velocity_body,
+        body_posture,
+        *,
+        gait_commands=None,
+    ):
+        """Route an external upper controller through the dog command contract.
+
+        This is the explicit benchmark/deployment boundary for controllers that
+        already produce physical base commands (for example OCS2).  It applies
+        the same command limits, posture rate limits and EMA used by ``plan``;
+        callers must not write ``commands_dog`` directly.
+
+        Args:
+            env_ids: one-dimensional environment indices.
+            base_velocity_body: ``[vx, vy, yaw_rate]`` in m/s, m/s, rad/s.
+            body_posture: ``[height_offset, pitch, roll]`` in m, rad, rad.
+            gait_commands: optional ``[frequency, stance_width, stance_length]``
+                in Hz, m, m.  Fixed benchmark defaults are used when omitted.
+        """
+        env_ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long).flatten()
+        n = int(env_ids.numel())
+        velocity = torch.as_tensor(
+            base_velocity_body, device=self.device, dtype=self.commands_dog.dtype
+        )
+        posture = torch.as_tensor(
+            body_posture, device=self.device, dtype=self.commands_dog.dtype
+        )
+        if velocity.shape != (n, 3):
+            raise ValueError(
+                f"base_velocity_body must have shape {(n, 3)}, got {tuple(velocity.shape)}"
+            )
+        if posture.shape != (n, 3):
+            raise ValueError(f"body_posture must have shape {(n, 3)}, got {tuple(posture.shape)}")
+        if not torch.isfinite(velocity).all() or not torch.isfinite(posture).all():
+            raise ValueError("external upper-controller commands must be finite")
+
+        velocity_limits = (
+            self.cfg.commands.limit_vel_x,
+            self.cfg.commands.limit_vel_y,
+            self.cfg.commands.limit_vel_yaw,
+        )
+        for column, limits in enumerate(velocity_limits):
+            velocity[:, column].clamp_(float(limits[0]), float(limits[1]))
+
+        posture_specs = (
+            (dog_cmd_idx["body_height"], self.cfg.commands.limit_body_height),
+            (dog_cmd_idx["body_pitch"], self.cfg.commands.limit_body_pitch),
+            (dog_cmd_idx["body_roll"], self.cfg.commands.limit_body_roll),
+        )
+        for column, (_index, limits) in enumerate(posture_specs):
+            posture[:, column].clamp_(float(limits[0]), float(limits[1]))
+            posture[:, column] = self._rate_limit_command(
+                posture[:, column],
+                self.goal_command_smoothed[env_ids, _index],
+                self.cfg.wbc.goal_reaching.posture_rate_limit[column],
+            )
+
+        if gait_commands is None:
+            gait = torch.tensor(
+                [
+                    self.cfg.wbc.goal_reaching.fixed_gait_frequency,
+                    self.cfg.wbc.goal_reaching.fixed_stance_width,
+                    0.5 * sum(self.cfg.commands.limit_stance_length),
+                ],
+                device=self.device,
+                dtype=self.commands_dog.dtype,
+            ).expand(n, -1).clone()
+        else:
+            gait = torch.as_tensor(
+                gait_commands, device=self.device, dtype=self.commands_dog.dtype
+            )
+            if gait.shape != (n, 3):
+                raise ValueError(f"gait_commands must have shape {(n, 3)}, got {tuple(gait.shape)}")
+            if not torch.isfinite(gait).all():
+                raise ValueError("external gait commands must be finite")
+        gait_specs = (
+            (dog_cmd_idx["gait_frequency"], self.cfg.commands.limit_gait_frequency),
+            (dog_cmd_idx["stance_width"], self.cfg.commands.limit_stance_width),
+            (dog_cmd_idx["stance_length"], self.cfg.commands.limit_stance_length),
+        )
+        for column, (_index, limits) in enumerate(gait_specs):
+            gait[:, column].clamp_(float(limits[0]), float(limits[1]))
+
+        alpha = float(self.cfg.wbc.goal_reaching.command_smoothing_alpha)
+
+        def write(columns, values):
+            columns = list(columns)
+            old = self.goal_command_smoothed[env_ids[:, None], columns]
+            smoothed = alpha * values + (1.0 - alpha) * old
+            self.goal_command_targets[env_ids[:, None], columns] = values
+            self.goal_command_smoothed[env_ids[:, None], columns] = smoothed
+            self.commands_dog[env_ids[:, None], columns] = smoothed
+
+        write((0, 1, 2), velocity)
+        write((spec[0] for spec in posture_specs), posture)
+        write((spec[0] for spec in gait_specs), gait)
+        for index, value in (
+            (dog_cmd_idx["footswing_height"], self.cfg.wbc.goal_reaching.fixed_footswing_height),
+            (dog_cmd_idx["gait_duration"], 0.49),
+        ):
+            self.goal_command_targets[env_ids, index] = value
+            self.goal_command_smoothed[env_ids, index] = value
+            self.commands_dog[env_ids, index] = value
+
+        self.base_feedforward_cmd[env_ids] = velocity
+        self.delta_velocity_cmd[env_ids] = 0.0
+        self.upper_plan_actions_raw[env_ids] = 0.0
+        self.arm_policy_actions[env_ids, self.num_actions_arm :] = 0.0
 
     # ============================================================
     # EE force / arm action curriculum
@@ -618,6 +734,9 @@ class WBCEnv(LeggedRobot):
             return
         intensity = self._get_stage1_arm_curriculum_intensity()
         self.stage1_arm_curriculum_intensity = intensity
+        if getattr(self, "coordination_arm", None) is not None:
+            self.coordination_arm.step(self, intensity)
+            return
         arm_slice = slice(self.num_actions_loco, self.num_actions_loco + self.num_actions_arm)
         arm_default = self.default_dof_pos[:, arm_slice]
 
@@ -780,12 +899,14 @@ class WBCEnv(LeggedRobot):
         if self.num_plan_actions not in (0, 6, 9):
             raise ValueError(
                 "Upper policy must use either the legacy 6D arm layout or the "
-                f"12D (6-plan) or 15D (9-plan) goal-reaching layout; got {self.cfg.arm.num_actions_arm_cd} actions"
+                f"12D (6-plan) or 15D (9-plan) goal-reaching layout; got "
+                f"{self.cfg.arm.num_actions_arm_cd} actions"
             )
         if self.num_plan_actions:
             channel_cfg = getattr(self.cfg.wbc.goal_reaching, "command_channels", None)
             self.goal_command_channel_enabled = tuple(
-                bool(getattr(channel_cfg, name, True)) for name in goal_plan_channel_names
+                bool(getattr(channel_cfg, name, True))
+                for name in goal_plan_channel_names[:self.num_plan_actions]
             )
             self.goal_command_channel_mask = torch.tensor(
                 self.goal_command_channel_enabled,
@@ -802,6 +923,10 @@ class WBCEnv(LeggedRobot):
         self.stage1_arm_target_vel = torch.zeros_like(self.stage1_arm_target_offset)
         self.stage1_arm_target_accel = torch.zeros_like(self.stage1_arm_target_offset)
         self.stage1_arm_curriculum_intensity = 0.0
+        self.coordination_arm = None
+        if getattr(getattr(self.cfg.env, "coordination_arm", None), "enabled", False):
+            from .coordination_arm import CoordinationArm
+            self.coordination_arm = CoordinationArm(self.cfg, self.num_envs, self.device, self.dt)
 
         self.end_effector_state = self.rigid_body_state.view(self.num_envs, self.num_bodies, 13)[:, self.ee_idx]
 
@@ -885,8 +1010,21 @@ class WBCEnv(LeggedRobot):
         self.goal_rho_prev = torch.zeros_like(self.goal_rho)
         self.goal_rho_valid = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.goal_manipulability = torch.zeros_like(self.goal_rho)
+        # Kinematic diagnostics used by the backend-neutral benchmark.  The
+        # full-Jacobian value mixes translational and rotational row units and
+        # is therefore diagnostic only; the rotational sigma-min is the
+        # dimensionless quantity used for the explicit singularity category.
+        self.goal_jacobian_sigma_min = torch.zeros_like(self.goal_rho)
+        self.goal_rot_jacobian_sigma_min = torch.zeros_like(self.goal_rho)
         self.goal_joint_limit_distance = torch.zeros(
             self.num_envs, self.num_actions_arm, dtype=torch.float, device=self.device
+        )
+        self.goal_ik_step_norm_rad = torch.zeros_like(self.goal_rho)
+        self.goal_ik_step_saturated = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
+        self.goal_ik_solver_valid = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
         )
         # Fixed rotation from the trunk to the arm mount, so the shoulder frame
         # (the frame R_max(u) is defined in) can be formed each step.
@@ -981,7 +1119,7 @@ class WBCEnv(LeggedRobot):
         # the policy's own last action are known onboard without going through
         # a sensor, so delaying them would model a latency the robot does not
         # have -- and delaying a tracking error would delay the command inside
-        # it, which is worse still.  See go1_gym/response/latency.py.
+        # it, which is worse still.  See go1_gym/utils/latency.py.
         self.dog_measurement_slices = {}
         cursor = 0
         for name, width in self._dog_measurement_layout():
@@ -1027,7 +1165,7 @@ class WBCEnv(LeggedRobot):
         self.traj_bank = TrajectoryBank(
             self.traj_curriculum, per_cell=int(tcfg.bank_per_cell),
             max_gamma_points=self._traj_max_g, max_tl_points=self._traj_max_t,
-            device=self.device,
+            device=self.device, seed=int(getattr(tcfg, "bank_seed", 0)),
         )
         self.traj_batch = TrajectoryBatch(
             self.num_envs, self._traj_max_g, self._traj_max_t, device=self.device
@@ -1353,6 +1491,8 @@ class WBCEnv(LeggedRobot):
         self.stage1_arm_target_offset[env_ids] = self.stage1_arm_fixed_dof_pos[env_ids] - arm_default
         self.stage1_arm_target_vel[env_ids] = 0.0
         self.stage1_arm_target_accel[env_ids] = 0.0
+        if getattr(self, "coordination_arm", None) is not None:
+            self.coordination_arm.reset(self, env_ids)
         if self._goal_reaching_enabled():
             if self._traj_tracking_enabled():
                 self._reset_trajectories(env_ids)
@@ -1365,6 +1505,12 @@ class WBCEnv(LeggedRobot):
             self.goal_rho[env_ids] = 0.0
             self.goal_rho_prev[env_ids] = 0.0
             self.goal_rho_valid[env_ids] = False
+            self.goal_jacobian_sigma_min[env_ids] = 0.0
+            self.goal_rot_jacobian_sigma_min[env_ids] = 0.0
+            self.goal_joint_limit_distance[env_ids] = 0.0
+            self.goal_ik_step_norm_rad[env_ids] = 0.0
+            self.goal_ik_step_saturated[env_ids] = False
+            self.goal_ik_solver_valid[env_ids] = False
 
     def _reset_trajectories(self, env_ids):
         """For the reset envs: score the finished episode for the curriculum,
@@ -1422,32 +1568,45 @@ class WBCEnv(LeggedRobot):
             self.traj_curriculum.rng,
         )
         self.traj_batch.load_from_stacked(env_ids, self.traj_bank.batch, rows)
+        self._place_and_reset_trajectories(env_ids, ground_relative_z=True)
 
-        # Anchor the origin-centered path in front of the shoulder (world axes
-        # -- the base yaws to follow via v_ff). anchor_offset_body supplies the
-        # DIRECTION; the distance along it is rho_star * R_max(that direction),
-        # so the path starts exactly at the comfortable stand-off the base
-        # feedforward will try to hold. Deriving it instead of trusting the
-        # configured length keeps the anchor consistent with whichever reach
-        # model is live -- with the M2 table the comfortable forward distance
-        # (~0.44 m on go2_x5) is not the sphere's 0.6*0.6 = 0.36 m, and an
-        # anchor at the wrong radius makes v_ff back the base away from the
-        # path on the very first step.
-        n = len(env_ids)
-        sh_pos, sh_quat = self._shoulder_frame()
-        sh_pos, sh_quat = sh_pos[env_ids], sh_quat[env_ids]
-        dir_body = torch.nn.functional.normalize(self._traj_anchor_offset, dim=-1).expand(n, -1)
-        dir_world = quat_apply(self.base_quat[env_ids], dir_body)
-        if self.reach_table is None:
-            r_max = torch.full((n,), float(self.cfg.wbc.goal_reaching.reach_radius), device=self.device)
-        else:
-            u_sh = quat_apply(quat_conjugate(sh_quat), dir_world)
-            r_max = self.reach_table.query(u_sh).clamp_min(1e-3)
-        distance = float(self.cfg.wbc.goal_reaching.rho_star) * r_max
-        anchor = sh_pos + dir_world * distance.unsqueeze(-1)
-        self.traj_batch.gamma_p[env_ids] += anchor.unsqueeze(1)
+    def load_custom_trajectories(self, env_ids, gammas, time_laws, offset=None):
+        """Load caller-supplied (Gamma, TimeLaw) pairs instead of bank rows.
 
-        # clear per-env progress state + episode accumulators
+        This is the eval-side entry point (benchmark/wbc/): a probe trajectory --
+        a single-axis sinusoid for the bandwidth sweep, a straight reach for
+        the workspace scan -- is not something the curriculum bank contains,
+        but it has to go through exactly the same placement and progress-state
+        reset the training path uses or its s / d_lat / timing numbers are not
+        comparable to a training episode's.
+
+        ``offset`` (len(env_ids), 3) overrides the default reach-derived
+        stand-off anchor with an explicit world translation, for probes that
+        need to land on a specific point rather than the comfortable one.
+        """
+        if len(env_ids) == 0:
+            return
+        env_ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
+        self.traj_batch.load(env_ids.tolist(), gammas, time_laws)
+        self._place_and_reset_trajectories(env_ids, offset=offset)
+
+    def _place_and_reset_trajectories(self, env_ids, offset=None, ground_relative_z=False):
+        """Translate the freshly loaded origin-centered paths into the world
+        and clear the per-env progress state + episode accumulators.
+
+        Curriculum-bank trajectories encode Z relative to the terrain surface;
+        ``ground_relative_z=True`` adds pointwise terrain height after applying
+        the XY anchor. Custom probes keep the legacy full XYZ-translation
+        behavior by leaving this flag false.
+        """
+        env_ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
+        if offset is None:
+            offset = self._default_trajectory_anchor(env_ids)
+        path = self.traj_batch.gamma_p[env_ids]
+        self.traj_batch.gamma_p[env_ids] = self._place_trajectory_positions(
+            path, offset, ground_relative_z
+        )
+
         for buf in (
             self.traj_s, self.traj_s_prev, self.traj_sim_time, self.traj_d_lat,
             self.traj_sdot_meas, self.traj_sdot_ref, self.traj_timing_err,
@@ -1463,6 +1622,42 @@ class WBCEnv(LeggedRobot):
             self.traj_motor_power_sum, self.traj_manipulability_sum,
         ):
             buf[env_ids] = 0.0
+
+    def _place_trajectory_positions(self, path, offset, ground_relative_z):
+        """Apply placement semantics to an already selected trajectory view."""
+        if ground_relative_z:
+            path[:, :, :2] += offset[:, None, :2]
+            path[:, :, 2] += self._ground_height_at(path[:, :, :2])
+        else:
+            path += offset.unsqueeze(1)
+        return path
+
+    def _default_trajectory_anchor(self, env_ids):
+        """World translation that puts an origin-centered path in front of the
+        shoulder (world axes -- the base yaws to follow via v_ff).
+
+        anchor_offset_body supplies the XY DIRECTION; the distance along it is
+        rho_star * R_max(that direction), so the path starts exactly at the
+        comfortable stand-off the base feedforward will try to hold. Deriving
+        it instead of trusting the configured length keeps the XY anchor
+        consistent with whichever reach model is live -- with the M2 table the
+        comfortable forward distance (~0.44 m on go2_x5) is not the sphere's
+        0.6*0.6 = 0.36 m, and an anchor at the wrong radius makes v_ff back the
+        base away from the path on the very first step. Curriculum-bank Z is
+        ground-relative and therefore ignores this anchor's Z component.
+        """
+        n = len(env_ids)
+        sh_pos, sh_quat = self._shoulder_frame()
+        sh_pos, sh_quat = sh_pos[env_ids], sh_quat[env_ids]
+        dir_body = torch.nn.functional.normalize(self._traj_anchor_offset, dim=-1).expand(n, -1)
+        dir_world = quat_apply(self.base_quat[env_ids], dir_body)
+        if self.reach_table is None:
+            r_max = torch.full((n,), float(self.cfg.wbc.goal_reaching.reach_radius), device=self.device)
+        else:
+            u_sh = quat_apply(quat_conjugate(sh_quat), dir_world)
+            r_max = self.reach_table.query(u_sh).clamp_min(1e-3)
+        distance = float(self.cfg.wbc.goal_reaching.rho_star) * r_max
+        return sh_pos + dir_world * distance.unsqueeze(-1)
 
     def _randomize_arm_dof_props(self, env_ids):
         """Override arm DOF slice in Kp/Kd/strength/offset buffers with stage-specific ranges."""
@@ -1665,7 +1860,7 @@ class WBCEnv(LeggedRobot):
         if self.cfg.env.priv_observe_body_height:
             scale, shift = get_scale_shift(self.cfg.normalization.body_height_range)
             privileged_obs_buf = torch.cat(
-                (privileged_obs_buf, ((self.root_states[: self.num_envs, 2]).view(self.num_envs, -1) - shift) * scale),
+                (privileged_obs_buf, (self._body_height().view(self.num_envs, -1) - shift) * scale),
                 dim=1,
             )
 
@@ -1959,6 +2154,42 @@ class WBCEnv(LeggedRobot):
     # Viewer / video overlays
     # ------------------------------------------------------------------
 
+    def configure_benchmark_trajectory_viewer(self, enabled, max_draw_points=512):
+        """Enable live reference/actual EE path drawing for bounded benchmarks."""
+        self.benchmark_trajectory_viewer_enabled = bool(enabled)
+        self.benchmark_trajectory_viewer_max_draw_points = int(max_draw_points)
+        if self.benchmark_trajectory_viewer_max_draw_points < 2:
+            raise ValueError("trajectory viewer max_draw_points must be at least 2")
+        if enabled and (self.headless or self.viewer is None):
+            raise ValueError("trajectory visualization requires an IsaacGym viewer")
+        if enabled:
+            self.cfg.asset.render_sphere = True
+        self.reset_benchmark_viewer_trajectory()
+
+    def reset_benchmark_viewer_trajectory(self):
+        """Start a new actual-EE trail at a benchmark task boundary."""
+        self._benchmark_executed_trajectory_world = []
+
+    def _record_benchmark_viewer_trajectory(self, env_id=0):
+        if not getattr(self, "benchmark_trajectory_viewer_enabled", False):
+            return None
+        point = (
+            self.end_effector_state[env_id, :3]
+            .detach()
+            .cpu()
+            .numpy()
+            .astype(np.float32)
+            .copy()
+        )
+        history = self._benchmark_executed_trajectory_world
+        history.append(point)
+        points = np.asarray(history, dtype=np.float32)
+        limit = self.benchmark_trajectory_viewer_max_draw_points
+        if points.shape[0] > limit:
+            indices = np.linspace(0, points.shape[0] - 1, limit, dtype=np.int64)
+            points = points[indices]
+        return points
+
     def _draw_ee_ori_coord(self):
         grasper_offset = torch.tensor([0.1, 0, 0], dtype=torch.float, device=self.device).reshape(1, -1)
         grasper_in_world = (
@@ -2051,7 +2282,14 @@ class WBCEnv(LeggedRobot):
             return
 
         path, n_valid = self._trajectory_path_points(env_id)
-        self._draw_viewer_polyline(path.detach().cpu().numpy().astype(np.float32), (0.4, 0.4, 1.0), env_id)
+        benchmark_overlay = getattr(self, "benchmark_trajectory_viewer_enabled", False)
+        reference_color = (1.0, 0.55, 0.0) if benchmark_overlay else (0.4, 0.4, 1.0)
+        self._draw_viewer_polyline(
+            path.detach().cpu().numpy().astype(np.float32), reference_color, env_id
+        )
+        executed = self._record_benchmark_viewer_trajectory(env_id)
+        if executed is not None:
+            self._draw_viewer_polyline(executed, (0.1, 1.0, 0.1), env_id)
 
         # sparse orientation axes along the path (RGB = local frame)
         for i in torch.linspace(0, n_valid - 1, 8, device=self.device).long().tolist():
@@ -2221,7 +2459,26 @@ class WBCEnv(LeggedRobot):
             return
         for i in range(len(px) - 1):
             if valid[i] and valid[i + 1]:
-                cv2.line(frame, tuple(px[i]), tuple(px[i + 1]), (60, 180, 255, 255), 1, cv2.LINE_AA)
+                cv2.line(frame, tuple(px[i]), tuple(px[i + 1]), (255, 150, 40, 255), 1, cv2.LINE_AA)
+
+        trace = getattr(self, "_recording_ee_trace", None)
+        if trace is not None:
+            trace.append(
+                self.end_effector_state[env_id, :3].detach().cpu().numpy().astype(np.float32)
+            )
+            if len(trace) > 1200:
+                del trace[:-1200]
+            if len(trace) >= 2:
+                trace_np = np.asarray(trace, dtype=np.float32)
+                pxe, ve = self._project_world_points_to_camera(
+                    trace_np, env_handle, camera_handle
+                )
+                for i in range(len(pxe) - 1):
+                    if ve[i] and ve[i + 1]:
+                        cv2.line(
+                            frame, tuple(pxe[i]), tuple(pxe[i + 1]),
+                            (30, 255, 80, 255), 2, cv2.LINE_AA,
+                        )
 
         tcfg = self.cfg.wbc.goal_reaching.trajectory
         _, p_k, _, _ = tb.sample_preview(self.traj_s, float(tcfg.preview_horizon), int(tcfg.preview_points))
@@ -2229,14 +2486,17 @@ class WBCEnv(LeggedRobot):
         pxk, vk = self._project_world_points_to_camera(pk_np, env_handle, camera_handle)
         for i in range(len(pxk)):
             if vk[i]:
-                cv2.circle(frame, tuple(pxk[i]), 3, (0, 200, 255, 255), -1, cv2.LINE_AA)
+                cv2.circle(frame, tuple(pxk[i]), 3, (255, 190, 0, 255), -1, cv2.LINE_AA)
 
     def _arm_render_overlay_hook(self, frame, env_id, env_handle, camera_handle):
         self._overlay_trajectory_video(frame, env_id, env_handle, camera_handle)
         self._overlay_policy_trajectory(frame, env_id, env_handle, camera_handle)
         if self.cfg.env.recording_overlay_text:
             self._overlay_policy_text(frame, env_id)
-
+            cv2.putText(
+                frame, "reference: orange   actual EE: green", (12, frame.shape[0] - 12),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 255, 255, 255), 1, cv2.LINE_AA,
+            )
 
     def _arm_jacobian(self):
         """(num_envs, 6, num_actions_arm) world-frame Jacobian of the EE body
@@ -2292,6 +2552,10 @@ class WBCEnv(LeggedRobot):
         J, arm_slice = self._arm_jacobian()
         singular_values = torch.linalg.svdvals(J)
         self.goal_manipulability[:] = torch.prod(singular_values, dim=-1)
+        self.goal_jacobian_sigma_min[:] = singular_values.min(dim=-1).values
+        self.goal_rot_jacobian_sigma_min[:] = torch.linalg.svdvals(
+            J[:, 3:6, :]
+        ).min(dim=-1).values
 
         q = self.dof_pos[:, arm_slice]
         lo = self.dof_pos_limits[arm_slice, 0].unsqueeze(0)
@@ -2355,6 +2619,9 @@ class WBCEnv(LeggedRobot):
         delta_q = delta_q * self.cfg.arm.ik.step_gain
         norm = delta_q.norm(dim=-1, keepdim=True)
         max_step = self.cfg.arm.ik.max_step_rad
+        self.goal_ik_step_norm_rad[:] = norm.squeeze(-1)
+        self.goal_ik_step_saturated[:] = norm.squeeze(-1) > max_step
+        self.goal_ik_solver_valid[:] = torch.isfinite(delta_q).all(dim=-1)
         return delta_q * torch.clamp(max_step / torch.clamp(norm, min=1e-8), max=1.0)
 
     @property
@@ -2381,6 +2648,9 @@ class WBCEnv(LeggedRobot):
         self.arm_policy_actions[:, : self.num_actions_arm] = self.arm_residual_raw
 
         if self.arm_action_mode == "end_to_end":
+            self.goal_ik_step_norm_rad.zero_()
+            self.goal_ik_step_saturated.zero_()
+            self.goal_ik_solver_valid.zero_()
             self._apply_arm_action_end_to_end(arm_slice)
         elif self.arm_action_mode == "ik_waypoint":
             self._apply_arm_action_ik_waypoint(arm_slice)
@@ -2590,7 +2860,7 @@ class WBCEnv(LeggedRobot):
                 (self.dof_pos[:, arm_slice] - self.default_dof_pos[:, arm_slice])
                 * self.obs_scales.dof_pos,
                 self.dof_vel[:, arm_slice] * self.obs_scales.dof_vel,
-                torch.stack((self.roll, self.pitch, self.base_pos[:, 2]), dim=-1),
+                torch.stack((self.roll, self.pitch, self._body_height()), dim=-1),
                 self.base_lin_vel,
                 self.base_ang_vel,
                 vel_residual,
@@ -2720,10 +2990,10 @@ class WBCEnv(LeggedRobot):
                 ("arm_commands", cfg.arm.arm_num_commands, 0.0, False),
             ]
         if cfg.env.observe_two_prev_actions:
-            layout.append(("two_prev_actions", self.num_actions_loco, 0.0, False))
+            layout.append(("two_prev_actions", cfg.env.num_actions, 0.0, False))
         if cfg.env.observe_timing_parameter:
             layout.append(("timing_parameter", 1, 0.0, False))
-        if cfg.env.observe_clock_inputs:
+        if cfg.dog.observe_clock_inputs:
             layout.append(("clock_inputs", 4, 0.0, False))
 
         # Velocity and pose measurements are noised explicitly in
@@ -2731,13 +3001,13 @@ class WBCEnv(LeggedRobot):
         # same noisy actual values. Keep their independent noise scales zero
         # here to avoid adding a second noise sample after concatenation.
         layout.append(("base_ang_vel", 3, 0.0, True))
-        layout.append(("base_lin_vel", 3, 0.0, True))
-        # Fixed tracking slot. Pose actual and tracking errors are independently
-        # zero-filled by their dog-policy switches. Only the measured actual
-        # pose gets sensor noise; errors receive no independent noise.
-        layout.append(("body_pose_actual", 3, 0.0, False))
-        layout.append(("body_pose_error", 3, 0.0, False))
-        layout.append(("velocity_error", 3, 0.0, False))
+        if dog_obs_term_present(cfg, "observe_lin_vel"):
+            layout.append(("base_lin_vel", 3, 0.0, True))
+        if dog_obs_term_present(cfg, "observe_pose_actual"):
+            layout.append(("body_pose_actual", 3, 0.0, False))
+        if dog_obs_term_present(cfg, "observe_track_error"):
+            layout.append(("body_pose_error", 3, 0.0, False))
+            layout.append(("velocity_error", 3, 0.0, False))
 
         if cfg.env.observe_yaw:
             layout.append(("heading", 1, 0.0, False))
@@ -2820,7 +3090,7 @@ class WBCEnv(LeggedRobot):
             self.dof_vel[:, : self.num_actions_loco],
             self.base_ang_vel,
             self.base_lin_vel,
-            torch.stack((self.base_pos[:, 2], self.pitch, self.roll), dim=-1),
+            torch.stack((self._body_height(), self.pitch, self.roll), dim=-1),
             self.dof_pos[:, arm_slice],
             self.dof_vel[:, arm_slice],
             self.response_ee_pos_in_base,
@@ -2843,16 +3113,20 @@ class WBCEnv(LeggedRobot):
         latency_on = getattr(self.cfg.domain_rand, "randomize_dog_obs_latency", False)
         if not latency_on or self.dog_obs_latency.max_steps == 0:
             return snapshot
-        if self._dog_latency_step != self.common_step_counter:
+        advanced = self._dog_latency_step != self.common_step_counter
+        refilled = bool(torch.any(self.dog_obs_latency_fill))
+        if advanced:
             self._dog_latency_step = self.common_step_counter
             self.dog_obs_latency.push(snapshot)
-            if torch.any(self.dog_obs_latency_fill):
-                self.dog_obs_latency.reset_idx(
-                    self.dog_obs_latency_fill.nonzero(as_tuple=False).flatten(), snapshot
-                )
-                self.dog_obs_latency_fill[:] = False
-        jitter = int(getattr(self.cfg.domain_rand, "dog_obs_latency_jitter_steps", 0))
-        return self.dog_obs_latency.read(jitter_steps=jitter)
+        if refilled:
+            self.dog_obs_latency.reset_idx(
+                self.dog_obs_latency_fill.nonzero(as_tuple=False).flatten(), snapshot
+            )
+            self.dog_obs_latency_fill[:] = False
+        if advanced or refilled:
+            jitter = int(getattr(self.cfg.domain_rand, "dog_obs_latency_jitter_steps", 0))
+            self._dog_delayed_measurements = self.dog_obs_latency.read(jitter_steps=jitter)
+        return self._dog_delayed_measurements
 
     def _response_observation(self, ee_pos_in_base):
         """R7.1's five new segments, in layout order.
@@ -2937,7 +3211,7 @@ class WBCEnv(LeggedRobot):
         if self.cfg.env.observe_timing_parameter:
             obs_buf = torch.cat((obs_buf, self.gait_indices.unsqueeze(1)), dim=-1)
 
-        if self.cfg.env.observe_clock_inputs:
+        if self.cfg.dog.observe_clock_inputs:
             obs_buf = torch.cat((obs_buf, self.clock_inputs), dim=-1)
 
         # Generate each measured actual once, then reuse it in the associated
@@ -2984,21 +3258,14 @@ class WBCEnv(LeggedRobot):
             tracking_lin_vel_measured = tracking_lin_vel_measured + lin_vel_noise
             pose_measured = pose_measured + torch.randn_like(pose_measured) * pose_noise_scale
 
-        # Fixed width regardless of dog.observe_lin_vel: ang_vel is always
-        # real; lin_vel's slot always exists but is zeros when the switch is
-        # off, so toggling it never changes dog_num_observations.
-        if self.cfg.dog.observe_lin_vel:
-            lin_vel_term = lin_vel_measured
-        else:
-            lin_vel_term = torch.zeros(self.num_envs, 3, device=self.device)
-        obs_buf = torch.cat((obs_buf, ang_vel_measured, lin_vel_term), dim=-1)
+        obs_buf = torch.cat((obs_buf, ang_vel_measured), dim=-1)
+        if dog_obs_term_present(self.cfg, "observe_lin_vel"):
+            lin_vel_term = lin_vel_measured if self.cfg.dog.observe_lin_vel else torch.zeros_like(lin_vel_measured)
+            obs_buf = torch.cat((obs_buf, lin_vel_term), dim=-1)
+        if dog_obs_term_present(self.cfg, "observe_pose_actual"):
+            pose_actual = pose_measured if self.cfg.dog.observe_pose_actual else torch.zeros_like(pose_measured)
+            obs_buf = torch.cat((obs_buf, pose_actual), dim=-1)
 
-        # Fixed 9-wide tracking slot: pose actual is controlled independently
-        # from pose/velocity errors. Errors are command - actual.
-        if self.cfg.dog.observe_pose_actual:
-            pose_actual = pose_measured
-        else:
-            pose_actual = torch.zeros(self.num_envs, 3, device=self.device)
         if self.cfg.dog.observe_track_error:
             height_target = float(self.cfg.rewards.base_height_target) + self.commands_dog[:, dog_cmd_idx["body_height"]]
             pose_target = torch.stack(
@@ -3020,8 +3287,8 @@ class WBCEnv(LeggedRobot):
         else:
             pose_error = torch.zeros(self.num_envs, 3, device=self.device)
             velocity_error = torch.zeros(self.num_envs, 3, device=self.device)
-        track_obs = torch.cat((pose_actual, pose_error, velocity_error), dim=-1)
-        obs_buf = torch.cat((obs_buf, track_obs), dim=-1)
+        if dog_obs_term_present(self.cfg, "observe_track_error"):
+            obs_buf = torch.cat((obs_buf, pose_error, velocity_error), dim=-1)
 
         if self.cfg.env.observe_yaw:
             forward = quat_apply(self.base_quat, self.forward_vec)

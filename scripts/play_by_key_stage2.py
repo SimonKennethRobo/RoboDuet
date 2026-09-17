@@ -19,10 +19,10 @@ def maybe_export_rl_sar(args, logdir, ckpt_id):
         return
     import os
 
-    try:
-        from scripts.export_rl_sar import export
+    from scripts.export_rl_sar import export
 
-        config_name = args.rl_sar_config_name or os.path.basename(os.path.normpath(logdir))
+    config_name = args.rl_sar_config_name or os.path.basename(os.path.normpath(logdir))
+    try:
         out_dir = export(
             logdir,
             args.rl_sar_root,  # None -> <logdir>/rl_sar

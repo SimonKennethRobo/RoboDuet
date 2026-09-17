@@ -39,7 +39,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
-from rl_sar_obs import RlSarObservation, quat_rotate_inverse_np  # noqa: E402
+from rl_sar_obs import RlSarObservation, quat_rotate_inverse_np, effective_gait_frequency  # noqa: E402
 
 
 class RlSarMujoco:
@@ -108,11 +108,13 @@ class RlSarMujoco:
             "cmd_height": self.command[5],
             "gait_indices": self.gait_indices,
         }
+        if hasattr(self, "arm_commands"):
+            state["arm_commands"] = self.arm_commands
         # ComputeObservation() advances the gait clock as a side effect, in the
         # same call that reads the commands -- matching training, where
         # _step_contact_targets() and compute_observations() see one command.
         self.gait_indices = np.fmod(
-            self.gait_indices + self.policy_dt * float(self.p["gait_frequency"]), 1.0)
+            self.gait_indices + self.policy_dt * effective_gait_frequency(self.p, self.command[:3]), 1.0)
         state["gait_indices"] = self.gait_indices
 
         obs = self.obs_builder.assemble(state)

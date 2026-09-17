@@ -1,5 +1,7 @@
 # RoboDuet Benchmark Roadmap
 
+2026-09-14 更新：下一阶段执行以 [M12 合并与 MuJoCo benchmark 交接](benchmark-handoff-20260914.md) 为准，其中记录了当前分支差异、已复现问题、合并边界、公共指标协议和分阶段验收。下文保留历史 roadmap；其中“暂不推进 WBC”等优先级不再适用于本次任务。
+
 本文记录当前 `feat/benchmark` 分支中 benchmark 工具的现状、优缺点，以及后续建设方向。目标不是只增加几个 metric，而是把 benchmark 做成一个长期可维护、可比较、可视化、可自动化的评估系统。
 
 ## 目标

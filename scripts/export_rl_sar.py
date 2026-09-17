@@ -1,10 +1,14 @@
 """Export a RoboDuet stage-1 dog policy into an rl_sar-compatible bundle.
 
-By default, writes ``config.yaml`` and ``policy.pt`` under
-``<logdir>/rl_sar/<config_name>/``, without a robot-level ``base.yaml``.
+By default (no ``--rl_sar_root``), produces, under ``<logdir>/rl_sar/<config_name>/``
+(no ``policy/<robot>/`` layer, no ``base.yaml`` -- a run directory holds exactly
+one policy)::
 
-With an explicit ``--rl_sar_root``, produces under
-``<rl_sar_root>/policy/<robot>/``::
+    config.yaml                     policy-level, training (policy) joint order
+    policy.pt                       TorchScript actor, forward([1, H]) -> [1, A]
+
+Pass ``--rl_sar_root`` to target an rl_sar checkout directly instead; there the
+bundle is written using rl_sar's own layout, under ``<rl_sar_root>/policy/<robot>/``::
 
     base.yaml                       robot-level, hardware joint order
     <config_name>/config.yaml       policy-level, training (policy) joint order
@@ -30,6 +34,7 @@ checkout directly instead.
 import argparse
 import importlib.util
 import pickle as pkl
+import re
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -45,7 +50,8 @@ from go1_gym.envs.config import (  # noqa: E402
     RoboDuetRuntimeOptions,
     apply_config_snapshot,
     build_roboduet_config,
-    recompute_observation_dims,
+    dog_obs_term_present,
+    restore_dog_observation_layout,
 )
 
 
@@ -60,8 +66,11 @@ RL_SAR_DIR = "rl_sar"
 def default_rl_sar_root(logdir):
     """Where to write the bundle for `logdir`: inside the run itself.
 
-    Contains <config_name>/config.yaml and policy.pt. Copy <config_name>/
-    into an rl_sar checkout under policy/<robot>/ to deploy.
+    Written to <this>/<config_name>/ (config.yaml + policy.pt), skipping the
+    policy/<robot>/ layer and base.yaml, since a run directory holds exactly
+    one policy -- see docs/RL_SAR_DEPLOY.md §2.8. To deploy, copy the
+    <config_name>/ directory into <rl_sar checkout>/policy/<robot>/, or, for
+    that layout directly, pass --rl_sar_root at export time.
     """
     return str(Path(logdir) / RL_SAR_DIR)
 
@@ -123,7 +132,7 @@ def load_runtime_cfg(logdir, robot):
         run_parameters = pkl.load(handle)
     cfg = build_roboduet_config(options=RoboDuetRuntimeOptions(num_envs=1, robot=robot))
     apply_config_snapshot(cfg, run_parameters["Cfg"], drop_unknown=True)
-    recompute_observation_dims(cfg)
+    restore_dog_observation_layout(cfg, run_parameters["Cfg"])
     return cfg, run_parameters
 
 
@@ -187,8 +196,8 @@ def dog_command_layout(cfg):
 
     The first six dog commands are operator-driven in rl_sar
     (x/y/yaw/body_pitch/body_roll/body_height). With dynamic gait the policy
-    also observes five gait commands; those are not exposed as operator inputs,
-    so they are frozen at the midpoint of the range they were trained over.
+    also observes five gait commands. Export walking defaults within the
+    checkpoint ranges; deployment gates dynamic frequency to zero at stand.
     """
     obs_scales = cfg.obs_scales
     scale = [
@@ -207,7 +216,7 @@ def dog_command_layout(cfg):
             return float(lo + hi) / 2.0
         extra = [
             midpoint("limit_gait_frequency"),
-            0.06,  # footswing_height: the constant WBCEnv.plan() sends
+            midpoint("limit_footswing_height"),  # Stage-1 sampling, not Stage-2 plan()'s constant
             midpoint("limit_stance_width"),
             midpoint("limit_stance_length"),
             0.49,  # gait_duration: the constant WBCEnv.plan() sends
@@ -240,15 +249,15 @@ def observation_terms(cfg):
         raise NotImplementedError("env.observe_two_prev_actions has no rl_sar term")
     if bool(cfg.env.observe_timing_parameter):
         raise NotImplementedError("env.observe_timing_parameter has no rl_sar term")
-    if bool(cfg.env.observe_clock_inputs):
+    if bool(cfg.dog.observe_clock_inputs):
         terms.append("roboduet/clock_inputs")                     # 4
-    terms += [
-        "ang_vel",                    # base_ang_vel * scale         3
-        "roboduet/base_lin_vel",      # base_lin_vel * scale         3
-        "roboduet/body_pose_actual",  # [height, pitch, roll]        3
-        "roboduet/body_pose_error",   # target - actual              3
-        "roboduet/velocity_error",    # command - actual             3
-    ]
+    terms.append("ang_vel")
+    if dog_obs_term_present(cfg, "observe_lin_vel"):
+        terms.append("roboduet/base_lin_vel")
+    if dog_obs_term_present(cfg, "observe_pose_actual"):
+        terms.append("roboduet/body_pose_actual")
+    if dog_obs_term_present(cfg, "observe_track_error"):
+        terms += ["roboduet/body_pose_error", "roboduet/velocity_error"]
     if bool(cfg.env.observe_yaw):
         raise NotImplementedError("env.observe_yaw has no rl_sar term")
     if bool(cfg.env.observe_contact_states):
@@ -394,9 +403,29 @@ HEADER = (
 )
 
 
-def write_base_yaml(path, robot, cfg, ctx):
+def active_config_name(path, config_name):
+    """Which policy directory rl_sar loads for this robot.
+
+    base.yaml owns the selection so switching policies costs a yaml edit rather
+    than a rebuild -- which means a re-export must not silently hijack a choice
+    someone made by hand. An entry already in base.yaml wins; the run being
+    exported only fills in the blank.
+    """
+    if path.exists():
+        match = re.search(r'^\s*config_name:\s*"([^"]+)"', path.read_text(), re.M)
+        if match:
+            return match.group(1)
+    return config_name
+
+
+def write_base_yaml(path, robot, config_name, cfg, ctx):
     controllers = [name.replace("_joint", "_controller") for name in ctx["hardware_joints"]]
     body = f"""{robot}:
+  # Policy directory under policy/{robot}/ that the RL states load (its
+  # config.yaml + policy.pt). Change this line to switch policies -- it is read
+  # at state entry, so no rebuild is needed. Re-exporting keeps whatever is set
+  # here; it only fills in a name when base.yaml has none.
+  config_name: "{active_config_name(path, config_name)}"
   dt: {float(cfg.sim.dt):g}
   decimation: {int(cfg.control.decimation)}
   num_of_dofs: {ctx['num_dofs']}
@@ -462,16 +491,25 @@ def write_config_yaml(path, robot, config_name, cfg, ctx):
   num_arm_dofs: {ctx['num_arm']}
   arm_num_commands: {int(cfg.arm.arm_num_commands)}
 {float_entry('dog_commands_scale', ctx['dog_commands_scale'], 6)}
-  # Gait command slots the operator does not drive, frozen at their trained
-  # midpoints. Empty unless the run used dynamic gait.
+  # Walking gait defaults; dynamic frequency is zeroed at stand by rl_sar.
+  # Swing height comes from this checkpoint's training range.
 {float_entry('dog_commands_extra', ctx['dog_commands_extra'], 5)}
+  use_dynamic_gait: {str(bool(cfg.commands.use_dynamic_gait)).lower()}
   gait_frequency: {ctx['gait_frequency']:g}
   gait_duration: {ctx['gait_duration']:g}
-  # trotting: [phases, offsets, bounds]
-  gait_phases: [0.5, 0.0, 0.0]
+  # Stage 1 always trains trotting (see LeggedRobot._step_contact_targets()'s
+  # gaits["trotting"]) -- these are that gait's relative foot-phase offsets.
+  gait_phases:
+    phases: 0.5
+    offsets: 0.0
+    bounds: 0.0
+  # base_height input must follow this reference (world z / height above local ground).
+  height_reference: "{cfg.terrain.height_reference}"
   base_height_target: {float(cfg.rewards.base_height_target):g}
-  # These mirror the dog.observe_* switches. When false the slot stays at its
-  # trained width but is zero-filled, exactly as in WBCEnv.
+  # Version 2 omits disabled terms from observations; version 1 retains
+  # legacy zero slots. The observations list determines concatenation order.
+  dog_observation_layout_version: {int(cfg.dog.observation_layout_version)}
+  observe_clock_inputs: {str(bool(cfg.dog.observe_clock_inputs)).lower()}
   observe_lin_vel: {str(bool(cfg.dog.observe_lin_vel)).lower()}
   observe_pose_actual: {str(bool(cfg.dog.observe_pose_actual)).lower()}
   observe_track_error: {str(bool(cfg.dog.observe_track_error)).lower()}
@@ -588,9 +626,13 @@ def export(logdir, rl_sar_root=None, ckpt_id="last", robot=None,
     """Write the rl_sar bundle for one run. Returns the output directory.
 
     ``rl_sar_root`` defaults to ``<logdir>/rl_sar`` -- the bundle lives with the
-    run that produced it, under ``<logdir>/rl_sar/<config_name>/`` without
-    ``base.yaml``. An explicit root uses the rl_sar checkout layout:
-    ``<rl_sar_root>/policy/<robot>/<config_name>/`` plus robot ``base.yaml``.
+    run that produced it, written to ``<rl_sar_root>/<config_name>/`` directly
+    (``config.yaml`` + ``policy.pt``), skipping the ``policy/<robot>/`` layer
+    and ``base.yaml`` -- a run directory holds exactly one policy and there is
+    no robot-level file to share or policy to switch between. Pass an explicit
+    path to write somewhere else, e.g. straight into an rl_sar checkout --
+    there the real ``policy/<robot>/<config_name>/`` + ``base.yaml`` layout is
+    required, so it is kept.
 
     Importable so callers other than this script's CLI can export -- notably
     scripts/play_by_key_stage1.py, which exports the same policy it is about
@@ -621,8 +663,7 @@ def export(logdir, rl_sar_root=None, ckpt_id="last", robot=None,
             f"observation_terms() have diverged"
         )
 
-    out_dir = (Path(rl_sar_root) / config_name if flat else
-               Path(rl_sar_root) / "policy" / robot / config_name)
+    out_dir = Path(rl_sar_root) / config_name if flat else Path(rl_sar_root) / "policy" / robot / config_name
     out_dir.mkdir(parents=True, exist_ok=True)
     ckpt_path, num_actions = export_policy(logdir, ckpt_id, cfg, out_dir / "policy.pt")
 
@@ -655,9 +696,6 @@ def export(logdir, rl_sar_root=None, ckpt_id="last", robot=None,
         "provenance": {"logdir": str(Path(logdir).resolve()), "ckpt": str(ckpt_path)},
     }
 
-    if not flat:
-        base_yaml = Path(rl_sar_root) / "policy" / robot / "base.yaml"
-        write_base_yaml(base_yaml, robot, cfg, ctx)
     write_config_yaml(out_dir / "config.yaml", robot, config_name, cfg, ctx)
 
     log(f"[export_rl_sar] robot        : {robot}  (ckpt {ckpt_path.name})")
@@ -665,14 +703,26 @@ def export(logdir, rl_sar_root=None, ckpt_id="last", robot=None,
     log(f"[export_rl_sar] obs history  : {int(cfg.dog.dog_num_observation_history)}"
         f" x {width} = {int(cfg.dog.dog_num_obs_history)}")
     log(f"[export_rl_sar] actions      : {num_actions} over {num_dofs} DoFs")
-    if not flat:
+    if flat:
+        log(f"[export_rl_sar] wrote {out_dir / 'config.yaml'}")
+        log(f"[export_rl_sar] wrote {out_dir / 'policy.pt'}")
+    else:
+        base_yaml = Path(rl_sar_root) / "policy" / robot / "base.yaml"
+        active = active_config_name(base_yaml, config_name)
+        write_base_yaml(base_yaml, robot, config_name, cfg, ctx)
+        log(f"[export_rl_sar] active policy: {active}"
+            + ("" if active == config_name else f"  (this export is {config_name}; edit {base_yaml} to switch)"))
         log(f"[export_rl_sar] wrote {base_yaml}")
-    log(f"[export_rl_sar] wrote {out_dir / 'config.yaml'}")
-    log(f"[export_rl_sar] wrote {out_dir / 'policy.pt'}")
-    if bool(cfg.dog.observe_lin_vel) or bool(cfg.dog.observe_pose_actual):
+        log(f"[export_rl_sar] wrote {out_dir / 'config.yaml'}")
+        log(f"[export_rl_sar] wrote {out_dir / 'policy.pt'}")
+    if any((cfg.dog.observe_lin_vel, cfg.dog.observe_pose_actual, cfg.dog.observe_track_error)):
         log("[export_rl_sar] NOTE: this policy observes base linear velocity "
             "and/or base height. rl_sar must be fed a state estimate "
-            "(RobotState::base.lin_vel in BODY frame, base.position in WORLD frame).")
+            "(RobotState::base.lin_vel in BODY frame).")
+        log(f"[export_rl_sar] height_reference={cfg.terrain.height_reference}: "
+            + ("base_height must be height above the local ground; world z is valid only on ground at z=0. "
+               "The deployment state estimator must provide this value; YAML metadata does not convert it."
+               if cfg.terrain.height_reference == "terrain" else "base_height must be world-frame z."))
     return out_dir
 
 
@@ -682,11 +732,14 @@ def main():
     parser.add_argument("--logdir", type=str, required=True, help="RoboDuet run directory")
     parser.add_argument("--ckptid", type=str, default="last")
     parser.add_argument("--rl_sar_root", type=str, default=None,
-                        help="Default: <logdir>/rl_sar/<config_name>/ (config.yaml + policy.pt). "
-                             "An explicit root uses policy/<robot>/<config_name>/ and base.yaml.")
+                        help="Output root. Default: <logdir>/rl_sar/<config_name>/ "
+                             "(config.yaml + policy.pt, no policy/<robot>/ layer). "
+                             "Pass this to target an rl_sar checkout, using its "
+                             "policy/<robot>/<config_name>/ layout instead.")
     parser.add_argument("--robot", type=str, default=None, choices=sorted(ARM_JOINTS),
                         help="default: inferred from the checkpoint's recorded asset")
-    parser.add_argument("--config_name", type=str, default="roboduet_stage1")
+    parser.add_argument("--config_name", type=str, default="roboduet_stage1",
+                        help="Policy subdirectory name, under either layout.")
     args = parser.parse_args()
 
     export(args.logdir, args.rl_sar_root, ckpt_id=args.ckptid, robot=args.robot,

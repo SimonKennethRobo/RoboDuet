@@ -114,6 +114,17 @@ def apply_config_snapshot(cfg, snapshot, *, strict=True, drop_unknown=False):
     # Full pre-mixture checkpoint snapshots must not inherit a newly enabled
     # reset mode from today's wbc.py. Partial config updates keep their meaning.
     if "env" in snapshot and "terrain" in snapshot and hasattr(cfg, "terrain"):
+        # Reusing a config that had a coordination recipe enabled must not
+        # change an older checkpoint's sampler or attitude convention.
+        if hasattr(cfg.commands, "coordination"):
+            cfg.commands.coordination.enabled = snapshot.get("commands", {}).get("coordination", {}).get("enabled", False)
+        if hasattr(cfg.env, "coordination_arm"):
+            cfg.env.coordination_arm.enabled = snapshot["env"].get("coordination_arm", {}).get("enabled", False)
+        if hasattr(cfg.rewards, "attitude_command_convention"):
+            cfg.rewards.attitude_command_convention = snapshot.get("rewards", {}).get("attitude_command_convention", "legacy")
+        if hasattr(cfg, "coordination_experiment"):
+            cfg.coordination_experiment = {}
+        cfg.terrain.height_reference = snapshot["terrain"].get("height_reference", "world")
         if "reset_mode" not in snapshot["terrain"]:
             cfg.terrain.reset_mode = "legacy"
         if "robustness_metrics" not in snapshot["terrain"]:
@@ -123,16 +134,25 @@ def apply_config_snapshot(cfg, snapshot, *, strict=True, drop_unknown=False):
     if "domain_rand" in snapshot:
         snapshot = dict(snapshot)
         dr = dict(snapshot["domain_rand"])
-        # Preserve the push schedule when restoring a full legacy checkpoint.
-        # Partial overrides and new snapshots keep their explicit preference.
-        if "env" in snapshot and "push_use_response_curriculum" not in dr:
-            dr["push_use_response_curriculum"] = True
         legacy_enabled = dr.pop("enabled", None)
         if legacy_enabled is False:
             dr["mode"] = "none"
         elif "mode" not in dr and (legacy_enabled is not None or "env" in snapshot):
             dr["mode"] = "sim2real"
+        if "env" in snapshot:
+            # Full pre-feature snapshots keep their original sensing/load model.
+            dr.setdefault("randomize_dog_obs_latency", False)
+            dr.setdefault("dog_obs_latency_steps_range", [0, 0])
+            dr.setdefault("dog_obs_latency_jitter_steps", 0)
+            if "stage1_arm" in dr:
+                dr["stage1_arm"] = dict(dr["stage1_arm"])
+                dr["stage1_arm"].setdefault("ee_payload_com_offset_range", [0.0, 0.0, 0.0])
+        if "env" in snapshot and "push_use_response_curriculum" not in dr:
+            dr["push_use_response_curriculum"] = True
         snapshot["domain_rand"] = dr
+    if "env" in snapshot and "terrain" in snapshot and "roughness_tiers" not in snapshot["terrain"]:
+        snapshot = dict(snapshot)
+        snapshot["terrain"] = dict(snapshot["terrain"], roughness_tiers=[])
     for key, value in snapshot.items():
         if not hasattr(cfg, key):
             if drop_unknown:
@@ -196,6 +216,7 @@ class RoboDuetRuntimeOptions:
     robot: str
     use_rot6d: bool = True
     dyna_gait: bool = False
+    # Legacy compatibility input; gait-frequency bounds belong to the profile.
     dyna_gait_min_frequency: float = 0.0
     stage1_arm_curriculum: bool = True
     goal_reaching: bool = False
@@ -209,12 +230,20 @@ class RoboDuetRuntimeOptions:
     # of the M2 direction-dependent table -- the ablation the design doc's
     # A.3 calls for (2D table vs sphere approximation).
     reach_table: bool = True
+    # 'clock' | 'clock_free' | None. None keeps whatever the wbc.py override
+    # tables set (currently 'clock'); a value swaps the gait reward table via
+    # set_gait_reward_mode. Pair 'clock_free' with --no_clock_inputs.
+    gait_reward_mode: str = None
+    # 'quadratic' | 'exp' | None. None keeps the config default (currently
+    # 'quadratic', the legacy multiplicative cost). 'exp' makes
+    # raibert_heuristic a bounded additive reward -- see set_raibert_form.
     raibert_form: str = None
     domain_rand_mode: str = None
 
     @classmethod
     def from_args(cls, args):
         return cls(
+            domain_rand_mode=getattr(args, "domain_rand_mode", None),
             num_envs=args.num_envs,
             robot=args.robot,
             use_rot6d=getattr(args, "use_rot6d", True),
@@ -225,8 +254,14 @@ class RoboDuetRuntimeOptions:
             traj_tracking=getattr(args, "traj_tracking", False),
             arm_action_mode=getattr(args, "arm_action_mode", None),
             reach_table=not getattr(args, "no_reach_table", False),
-            raibert_form="exp" if getattr(args, "raibert_exp", False) else getattr(args, "raibert_form", None),
-            domain_rand_mode=getattr(args, "domain_rand_mode", None),
+            gait_reward_mode=(
+                "clock_free" if getattr(args, "clock_free_gait", False)
+                else getattr(args, "gait_reward_mode", None)
+            ),
+            raibert_form=(
+                "exp" if getattr(args, "raibert_exp", False)
+                else getattr(args, "raibert_form", None)
+            ),
         )
 
 
@@ -336,6 +371,59 @@ def arm_obs_dim_parts(cfg):
     return parts
 
 
+def dog_obs_term_present(cfg, switch):
+    """Old checkpoints retain zero slots; new policies omit disabled terms."""
+    version = cfg.dog.observation_layout_version
+    if version not in (1, 2):
+        raise ValueError(f"Unsupported dog observation layout version: {version}")
+    return version == 1 or bool(getattr(cfg.dog, switch))
+
+
+def restore_dog_observation_layout(cfg, snapshot):
+    """Restore actor input semantics, including pre-versioned checkpoints.
+
+    Also used when loading a stage-1 dog into stage-2 training. Do not inherit
+    today's observation switches for a saved actor, even if widths coincide.
+    Call before creating the environment/history buffers.
+    """
+    cfg.terrain.height_reference = snapshot.get("terrain", {}).get("height_reference", "world")
+    dog = snapshot.get("dog", {})
+    # Width equality alone cannot prove command/rotation semantics agree.
+    for section, names in (
+        ("dog", ("dog_num_commands", "num_actions_loco")),
+        ("arm", ("arm_num_commands", "num_actions_arm")),
+        ("env", ("observe_two_prev_actions", "observe_timing_parameter",
+                 "observe_yaw", "observe_contact_states")),
+        ("wbc", ("use_vision",)),
+    ):
+        saved = snapshot.get(section, {})
+        for name in names:
+            if name in saved and saved[name] != getattr(getattr(cfg, section), name):
+                raise ValueError(f"Dog checkpoint requires {section}.{name}={saved[name]}; "
+                                 "the runtime observation layout differs")
+    if "use_rot6d" in snapshot and snapshot["use_rot6d"] != cfg.use_rot6d:
+        raise ValueError("Dog checkpoint and runtime use different rot6d representations")
+    cfg.dog.observation_layout_version = dog.get("observation_layout_version", 1)
+    cfg.dog.observe_clock_inputs = dog.get(
+        "observe_clock_inputs", snapshot.get("env", {}).get("observe_clock_inputs", True)
+    )
+    for name in ("observe_lin_vel", "observe_pose_actual", "observe_track_error"):
+        setattr(cfg.dog, name, dog.get(name, True))
+    if "dog_num_observation_history" in dog:
+        cfg.dog.dog_num_observation_history = dog["dog_num_observation_history"]
+    recompute_observation_dims(cfg)
+    recorded = dog.get("dog_num_observations")
+    if recorded is not None and int(recorded) != cfg.dog.dog_num_observations:
+        raise ValueError(
+            f"Dog checkpoint observation layout mismatch: saved={recorded}, "
+            f"reconstructed={cfg.dog.dog_num_observations}. Check command widths, "
+            "rot6d and observation switches against parameters.pkl."
+        )
+    recorded_history = dog.get("dog_num_obs_history")
+    if recorded_history is not None and int(recorded_history) != cfg.dog.dog_num_obs_history:
+        raise ValueError("Dog checkpoint history width disagrees with frame width and history length")
+
+
 def dog_obs_dim_parts(cfg):
     parts = {
         "projected_gravity": 3,
@@ -351,19 +439,16 @@ def dog_obs_dim_parts(cfg):
         parts["two_prev_actions"] = cfg.env.num_actions
     if cfg.env.observe_timing_parameter:
         parts["timing_parameter"] = 1
-    if cfg.env.observe_clock_inputs:
+    if cfg.dog.observe_clock_inputs:
         parts["clock_inputs"] = 4
-    # Fixed width regardless of dog.observe_lin_vel: ang_vel is always real;
-    # lin_vel's slot always exists but is zero-filled when the switch is
-    # off (see WBCEnv._dog_obs_layout / get_dog_observations), so toggling
-    # it never changes dog_num_observations.
     parts["base_ang_vel"] = 3
-    parts["base_lin_vel"] = 3
-    # Fixed width regardless of dog.observe_pose_actual/observe_track_error:
-    # [height, pitch, roll]_actual and the pose/velocity error slots are
-    # independently zero-filled when their switch is off, so toggling either
-    # never changes dog_num_observations.
-    parts["tracking"] = 9
+    if dog_obs_term_present(cfg, "observe_lin_vel"):
+        parts["base_lin_vel"] = 3
+    if dog_obs_term_present(cfg, "observe_pose_actual"):
+        parts["body_pose_actual"] = 3
+    if dog_obs_term_present(cfg, "observe_track_error"):
+        parts["body_pose_error"] = 3
+        parts["velocity_error"] = 3
     if cfg.env.observe_yaw:
         parts["heading"] = 1
     if cfg.env.observe_contact_states:
@@ -560,6 +645,13 @@ def enable_dyna_gait(cfg, layout):
     # Command ranges, limits and bins belong to the profile. Enabling the
     # layout must not replace values edited in COMMON_OVERRIDES.
     cfg.commands.use_dynamic_gait = True
+    # Keep the profile's sampling range and curriculum limits independent.
+    # A layout toggle must not reset the configured frequency lower bound.
+    cfg.commands.limit_footswing_height = deepcopy(cfg.commands.footswing_height_range)
+    cfg.commands.limit_gait_duration = deepcopy(cfg.commands.gait_duration_cmd_range)
+    cfg.commands.limit_stance_width = deepcopy(cfg.commands.stance_width_range)
+    cfg.commands.limit_stance_length = deepcopy(cfg.commands.stance_length_range)
+
     layout.dog_cmd += FEATURE_LAYOUT["dynamic_gait_command_dims"]
     cfg.env.observe_gait_commands = True
 
@@ -607,6 +699,235 @@ def validate_arm_action_mode(cfg):
         )
 
 
+# ============================================================
+# cfg.reward_scales and cfg.wbc.reward_scales are two CO-EQUAL SIBLING
+# tables, not a namespace/override pair -- despite "wbc." reading like a
+# sub-namespace the way every other wbc.* field is. They are read by
+# global_switch.get_reward_scales(): "stage 1" (a.k.a. "pretrained") reads
+# cfg.reward_scales; "stage 2" (a.k.a. "wbc") reads cfg.wbc.reward_scales;
+# a --train_stage two_stage run interpolates between them; a --train_stage
+# stage1 run pins the switch threshold past the end of training, so it ALWAYS
+# reads cfg.reward_scales and cfg.wbc.reward_scales is never consulted for
+# its VALUES at all.
+#
+# But both tables still matter for stage-1-only training, for a second and
+# entirely different reason: LeggedRobot._prepare_reward_function's merge
+# step decides, ONCE, which reward names get computed *at all* (a single
+# reward_names list shared by every stage -- get_reward_scales only ever
+# picks which VALUES those names use). A name absent from cfg.wbc.reward_
+# scales inherits cfg.reward_scales' value into the registration check; a
+# name PRESENT there at exactly 0.0 does not, and is dropped for every
+# stage regardless of cfg.reward_scales. Before the fix below, that dropped
+# raibert_heuristic silently for six weeks (2026-07-26 to 2026-09-05, commit
+# 15a4581) purely because wbc.py had it at -0.0 to mean "off for stage 2" --
+# a --train_stage stage1 run was affected exactly as much as a two_stage one,
+# and nothing in the log said so.
+#
+# Use resolve_reward_scales(cfg) to answer "is X actually computed, and with
+# what value in each stage" from a plain cfg object -- no simulator, no env,
+# no live run needed. Every ad-hoc reimplementation of this merge (there have
+# been several, each risking drifting from the real algorithm) should go
+# through this function instead.
+def resolve_reward_scales(cfg):
+    """Non-mutating preview of _prepare_reward_function's registration logic.
+
+    Returns {name: {"stage1": float, "stage2": float | None, "active": bool}}
+    for every key appearing in either cfg.reward_scales or cfg.wbc.reward_
+    scales. "stage2" is None when the name is absent from cfg.wbc.reward_
+    scales (i.e. it would inherit "stage1" into the registration check, per
+    the comment above). "active" is a single flag, not one per stage: exactly
+    one reward_names list is built and walked in every stage, so a name is
+    either computed everywhere or nowhere.
+
+    dt does not affect any of this (scaling by a positive dt never changes
+    whether a value is zero), so this reports the raw config scales, not the
+    dt-scaled values LeggedRobot._parse_cfg/_prepare_reward_function compute
+    at env creation.
+    """
+    stage1 = {k: v for k, v in vars(cfg.reward_scales).items() if not k.startswith("_")}
+    stage2 = {k: v for k, v in vars(cfg.wbc.reward_scales).items() if not k.startswith("_")}
+
+    # Matches _prepare_reward_function's fixed pop condition directly, rather
+    # than replaying its dict-mutation sequence (an earlier version of this
+    # function did that and reproduced the *pre-fix* bug: dict-mutation order
+    # matters and is easy to get subtly wrong, so state the invariant instead
+    # of re-deriving it procedurally).
+    return {
+        name: {
+            "stage1": stage1.get(name, 0.0),
+            "stage2": stage2.get(name),
+            "active": stage1.get(name, 0.0) != 0 or stage2.get(name, 0.0) != 0,
+        }
+        for name in set(stage1) | set(stage2)
+    }
+
+
+# Gait shaping, selected by rewards.gait_reward_mode. The tables write
+# cfg.reward_scales.* -- _prepare_reward_function copies any name absent from
+# cfg.wbc.reward_scales into the stage-2 table at the same value, so one entry
+# drives both stages. A nonzero entry is deliberately *not* mirrored into
+# cfg.wbc.reward_scales: that table carries stage-2-specific tuning (e.g.
+# raibert_heuristic at -1.0 rather than stage 1's -10.0) which must survive a
+# mode switch. Zero entries are mirrored, because a name left nonzero there
+# would keep a clock-based term alive in stage 2 after clock_free turned it
+# off in stage 1 -- see set_gait_reward_mode.
+GAIT_REWARD_MODES = {
+    # Scored against _step_contact_targets' absolute phase. Requires
+    # dog.observe_clock_inputs, or the actor is graded on a target it cannot
+    # observe. These are the stock wtw.py values.
+    "clock": {
+        "tracking_contacts_shaped_force": 4.0,
+        "tracking_contacts_shaped_vel": 4.0,
+        "feet_clearance_cmd_linear": -30.0,
+        "raibert_heuristic": -10.0,
+        "gait_sync": 0.0,
+        "feet_air_time_variance": 0.0,
+        "joint_mirror": 0.0,
+        "feet_stance_width": 0.0,
+        "feet_swing_height": 0.0,
+    },
+    # Contact stopwatches, foot geometry and joint symmetry only -- nothing
+    # reads foot_indices or desired_contact_states. Scales are chosen against
+    # the ji22 shaping in use here (only_positive_rewards_ji22_style with
+    # sigma_rew_neg=0.02), where the total is rew_pos * exp(rew_neg / 0.02):
+    # a negative term costs a factor exp(scale * dt * value / 0.02), so at
+    # dt=0.02 a per-step product of -0.02 already costs 37% of the reward.
+    # gait_sync and feet_stance_width are bounded positives and land in
+    # rew_pos, so they cannot close that gate at all; the three costs below
+    # are sized to stay well inside it. Raise joint_mirror toward -1.0/-2.0
+    # if the symmetry effect is too weak, and watch rew_total for the
+    # collapse signature.
+    "clock_free": {
+        "tracking_contacts_shaped_force": 0.0,
+        "tracking_contacts_shaped_vel": 0.0,
+        "feet_clearance_cmd_linear": 0.0,
+        "raibert_heuristic": 0.0,
+        "gait_sync": 2.0,
+        "feet_air_time_variance": -2.0,
+        "joint_mirror": -0.5,
+        "feet_stance_width": 1.0,
+        "feet_swing_height": -20.0,
+    },
+}
+
+
+def set_gait_reward_mode(cfg, mode):
+    """Swap the gait shaping between the clock-based and clock-free tables.
+
+    ``mode=None`` leaves cfg alone, so the override tables in wbc.py stay the
+    source of truth and the CLI flag is a genuine override (same convention as
+    set_arm_action_mode).
+
+    Changes no observation or action dimension, so it is safe to flip on a
+    resume -- but the two tables optimise different objectives, and a policy
+    trained under one is not comparable to one trained under the other.
+    """
+    if mode is None:
+        return
+    if mode not in GAIT_REWARD_MODES:
+        raise ValueError(
+            f"Unknown rewards.gait_reward_mode {mode!r}; expected one of {sorted(GAIT_REWARD_MODES)}"
+        )
+    cfg.rewards.gait_reward_mode = mode
+    for name, scale in GAIT_REWARD_MODES[mode].items():
+        setattr(cfg.reward_scales, name, scale)
+        # Disabling has to reach stage 2 as well: wbc.reward_scales overrides
+        # the stage-1 value, so leaving it nonzero would keep a clock-based
+        # term scoring the WBC policy against a phase the actor cannot see.
+        # Enabling deliberately does not, so stage-2-specific tuning survives.
+        if scale == 0.0 and hasattr(cfg.wbc.reward_scales, name):
+            setattr(cfg.wbc.reward_scales, name, 0.0)
+
+
+# Paired (form, stage-1 scale, stage-2 scale) presets for
+# _reward_raibert_heuristic. The sign is part of the form, not a free
+# parameter: 'quadratic' returns a cost and 'exp' returns a bounded reward.
+RAIBERT_FORMS = {
+    "quadratic": {"reward_scales": -10.0, "wbc": -1.0},
+    # exp lands in rew_buf_pos and adds rather than gates. Calibrated (with
+    # rewards.raibert_sigma=0.35) against the real rew_pos budget of a healthy
+    # run -- tracking_lin_vel + tracking_ang_vel summed to ~18.4 over an
+    # episode in stage1_sim2real_abl_14 -- so that a mostly-well-placed foot
+    # (reward around 0.5-0.6/step, see raibert_sigma's comment) contributes
+    # roughly 20% of that, not enough to dominate velocity tracking, still
+    # enough to matter. Stage 2 gets half: it has EE tracking to leave room
+    # for. Both numbers are a calibration by formula, not yet confirmed by an
+    # actual 'exp'-form training run -- no run in stage1_sim2real_abl_1..15
+    # used this form, they were all 'quadratic' regardless of what the table
+    # said (see resolve_reward_scales).
+    "exp": {"reward_scales": 0.4, "wbc": 0.2},
+}
+
+
+def set_raibert_form(cfg, form):
+    """Switch _reward_raibert_heuristic between the cost and bounded forms.
+
+    ``form=None`` leaves cfg alone. Anything else rewrites both the form and
+    the matching scales together -- flipping the form without flipping the
+    sign would reward bad foot placement, and nothing downstream would catch
+    it, so the two are never settable independently through this path.
+    """
+    if form is None:
+        return
+    if form not in RAIBERT_FORMS:
+        raise ValueError(f"Unknown rewards.raibert_form {form!r}; expected one of {sorted(RAIBERT_FORMS)}")
+    cfg.rewards.raibert_form = form
+    scales = RAIBERT_FORMS[form]
+    # Only rescale a term that is actually live: gait_reward_mode='clock_free'
+    # zeroes raibert on purpose, and that must not be undone here.
+    if cfg.reward_scales.raibert_heuristic != 0.0:
+        cfg.reward_scales.raibert_heuristic = scales["reward_scales"]
+    if getattr(cfg.wbc.reward_scales, "raibert_heuristic", 0.0) != 0.0:
+        cfg.wbc.reward_scales.raibert_heuristic = scales["wbc"]
+
+
+def validate_raibert_form(cfg):
+    """Reject a raibert form whose scale has the wrong sign.
+
+    'quadratic' returns a cost and 'exp' returns a bounded reward, so a scale
+    carried over from the other form flips the objective: the policy would be
+    paid to put its feet in the wrong place. That trains quietly to a
+    plausible-looking reward curve, so it is an error, not a warning.
+    """
+    form = getattr(cfg.rewards, "raibert_form", "quadratic")
+    if form not in RAIBERT_FORMS:
+        raise ValueError(f"Unknown rewards.raibert_form {form!r}; expected one of {sorted(RAIBERT_FORMS)}")
+    wanted = "positive" if form == "exp" else "negative"
+    for label, scale in (
+        ("reward_scales.raibert_heuristic", cfg.reward_scales.raibert_heuristic),
+        ("wbc.reward_scales.raibert_heuristic", getattr(cfg.wbc.reward_scales, "raibert_heuristic", 0.0)),
+    ):
+        if scale == 0.0:
+            continue  # disabled; sign is meaningless
+        if (form == "exp") != (scale > 0):
+            raise ValueError(
+                f"rewards.raibert_form='{form}' needs a {wanted} {label}, got {scale}. "
+                f"The 'exp' form returns a bounded reward in [0, 1] and the 'quadratic' "
+                f"form returns an unbounded cost -- use set_raibert_form so the two stay paired."
+            )
+
+
+def validate_gait_reward_mode(cfg):
+    """Warn when the gait shaping and the clock observation disagree.
+
+    Not an error: 'clock' shaping without clock_inputs is exactly the ablation
+    stage1_sim2real_abl_2/8/9/10 ran, and 'clock_free' shaping with the clock
+    still observed is a harmless superset. But the first combination grades the
+    actor against a phase it cannot see, which is easy to do by accident and
+    hard to spot in the logs, so say so out loud.
+    """
+    mode = getattr(cfg.rewards, "gait_reward_mode", "clock")
+    observes_clock = bool(getattr(cfg.dog, "observe_clock_inputs", True))
+    if mode == "clock" and not observes_clock:
+        print(
+            "[config] WARNING: rewards.gait_reward_mode='clock' but "
+            "dog.observe_clock_inputs is off -- tracking_contacts_shaped_*, "
+            "feet_clearance_cmd_linear and raibert_heuristic all score against "
+            "the gait phase, which the actor cannot observe. Use "
+            "--clock_free_gait, or turn the clock observation back on."
+        )
+
+
 def set_arm_action_mode(cfg, mode):
     """Override how the actor's 6 arm action dims become joint position targets.
 
@@ -649,6 +970,16 @@ def configure_robot_asset(cfg, robot):
 
 def validate_roboduet_cfg(cfg):
     domain_randomization_mode(cfg)
+    if cfg.terrain.height_reference not in ("world", "terrain"):
+        raise ValueError("terrain.height_reference must be world or terrain")
+    if cfg.terrain.height_reference == "terrain":
+        if cfg.terrain.mesh_type == "trimesh" and cfg.terrain.slope_treshold is not None:
+            raise ValueError("terrain height queries require terrain.slope_treshold=None (unshifted triangles)")
+        if cfg.terrain.mesh_type not in ("plane", "trimesh", "heightfield"):
+            raise ValueError("terrain height reference requires a ground surface")
+    for name in ("priv_observe_ground_friction", "priv_observe_ground_friction_per_foot"):
+        if getattr(cfg.env, name, False):
+            raise ValueError(f"env.{name} is unsupported; use env.priv_observe_friction for actor friction.")
     validate_reset_mixture(cfg.terrain)
     required_fields = (
         ("env.num_observations", cfg.env.num_observations),
@@ -666,116 +997,6 @@ def validate_roboduet_cfg(cfg):
     # straight from the pickle, bypassing set_arm_action_mode -- so re-check here,
     # which every build and every load_env path runs through.
     validate_arm_action_mode(cfg)
-    validate_raibert_form(cfg)
-    # Both of these reach for LeggedRobot._get_ground_frictions, which no
-    # longer exists in this fork -- it belonged to WTW's per-tile terrain
-    # friction.  Turning either on used to survive config build and then die
-    # inside the privileged-observation construction, minutes into a run, with
-    # an AttributeError that says nothing about the cause.
-    for name in ("priv_observe_ground_friction", "priv_observe_ground_friction_per_foot"):
-        if getattr(cfg.env, name, False):
-            raise ValueError(
-                f"env.{name} is not supported: per-tile ground friction needs the "
-                "trimesh terrain this fork does not run. The friction the robot "
-                "feels is domain_rand.randomize_friction / friction_range, which "
-                "the critic already sees as env.priv_observe_friction."
-            )
-
-
-def resolve_reward_scales(cfg):
-    """Non-mutating preview of _prepare_reward_function's registration logic.
-
-    Returns {name: {"stage1": float, "stage2": float | None, "active": bool}}
-    for every key appearing in either cfg.reward_scales or cfg.wbc.reward_
-    scales. "stage2" is None when the name is absent from cfg.wbc.reward_
-    scales (i.e. it would inherit "stage1" into the registration check, per
-    the comment above). "active" is a single flag, not one per stage: exactly
-    one reward_names list is built and walked in every stage, so a name is
-    either computed everywhere or nowhere.
-
-    dt does not affect any of this (scaling by a positive dt never changes
-    whether a value is zero), so this reports the raw config scales, not the
-    dt-scaled values LeggedRobot._parse_cfg/_prepare_reward_function compute
-    at env creation.
-    """
-    stage1 = {k: v for k, v in vars(cfg.reward_scales).items() if not k.startswith("_")}
-    stage2 = {k: v for k, v in vars(cfg.wbc.reward_scales).items() if not k.startswith("_")}
-
-    # Matches _prepare_reward_function's fixed pop condition directly, rather
-    # than replaying its dict-mutation sequence (an earlier version of this
-    # function did that and reproduced the *pre-fix* bug: dict-mutation order
-    # matters and is easy to get subtly wrong, so state the invariant instead
-    # of re-deriving it procedurally).
-    return {
-        name: {
-            "stage1": stage1.get(name, 0.0),
-            "stage2": stage2.get(name),
-            "active": stage1.get(name, 0.0) != 0 or stage2.get(name, 0.0) != 0,
-        }
-        for name in set(stage1) | set(stage2)
-    }
-
-RAIBERT_FORMS = {
-    "quadratic": {"reward_scales": -10.0, "wbc": -1.0},
-    # exp lands in rew_buf_pos and adds rather than gates. Calibrated (with
-    # rewards.raibert_sigma=0.35) against the real rew_pos budget of a healthy
-    # run -- tracking_lin_vel + tracking_ang_vel summed to ~18.4 over an
-    # episode in stage1_sim2real_abl_14 -- so that a mostly-well-placed foot
-    # (reward around 0.5-0.6/step, see raibert_sigma's comment) contributes
-    # roughly 20% of that, not enough to dominate velocity tracking, still
-    # enough to matter. Stage 2 gets half: it has EE tracking to leave room
-    # for. Both numbers are a calibration by formula, not yet confirmed by an
-    # actual 'exp'-form training run -- no run in stage1_sim2real_abl_1..15
-    # used this form, they were all 'quadratic' regardless of what the table
-    # said (see resolve_reward_scales).
-    "exp": {"reward_scales": 0.4, "wbc": 0.2},
-}
-
-def set_raibert_form(cfg, form):
-    """Switch _reward_raibert_heuristic between the cost and bounded forms.
-
-    ``form=None`` leaves cfg alone. Anything else rewrites both the form and
-    the matching scales together -- flipping the form without flipping the
-    sign would reward bad foot placement, and nothing downstream would catch
-    it, so the two are never settable independently through this path.
-    """
-    if form is None:
-        return
-    if form not in RAIBERT_FORMS:
-        raise ValueError(f"Unknown rewards.raibert_form {form!r}; expected one of {sorted(RAIBERT_FORMS)}")
-    cfg.rewards.raibert_form = form
-    scales = RAIBERT_FORMS[form]
-    # Only rescale a term that is actually live: gait_reward_mode='clock_free'
-    # zeroes raibert on purpose, and that must not be undone here.
-    if cfg.reward_scales.raibert_heuristic != 0.0:
-        cfg.reward_scales.raibert_heuristic = scales["reward_scales"]
-    if getattr(cfg.wbc.reward_scales, "raibert_heuristic", 0.0) != 0.0:
-        cfg.wbc.reward_scales.raibert_heuristic = scales["wbc"]
-
-def validate_raibert_form(cfg):
-    """Reject a raibert form whose scale has the wrong sign.
-
-    'quadratic' returns a cost and 'exp' returns a bounded reward, so a scale
-    carried over from the other form flips the objective: the policy would be
-    paid to put its feet in the wrong place. That trains quietly to a
-    plausible-looking reward curve, so it is an error, not a warning.
-    """
-    form = getattr(cfg.rewards, "raibert_form", "quadratic")
-    if form not in RAIBERT_FORMS:
-        raise ValueError(f"Unknown rewards.raibert_form {form!r}; expected one of {sorted(RAIBERT_FORMS)}")
-    wanted = "positive" if form == "exp" else "negative"
-    for label, scale in (
-        ("reward_scales.raibert_heuristic", cfg.reward_scales.raibert_heuristic),
-        ("wbc.reward_scales.raibert_heuristic", getattr(cfg.wbc.reward_scales, "raibert_heuristic", 0.0)),
-    ):
-        if scale == 0.0:
-            continue  # disabled; sign is meaningless
-        if (form == "exp") != (scale > 0):
-            raise ValueError(
-                f"rewards.raibert_form='{form}' needs a {wanted} {label}, got {scale}. "
-                f"The 'exp' form returns a bounded reward in [0, 1] and the 'quadratic' "
-                f"form returns an unbounded cost -- use set_raibert_form so the two stay paired."
-            )
 
 
 def validate_reset_mixture(t):
@@ -808,6 +1029,8 @@ def build_roboduet_config(args=None, *, options=None, debug=False):
     if options is None:
         options = RoboDuetRuntimeOptions.from_args(args) if args is not None else RoboDuetRuntimeOptions(4096, "go2")
     cfg = build_config(GO1_PROFILE, WTW_PROFILE, ROBODUET_PROFILE)
+    from .coordination import configure_experiment, validate_coordination
+    configure_experiment(cfg, args)
     if options.domain_rand_mode is not None:
         cfg.domain_rand.mode = options.domain_rand_mode
     _derive_wbc_rewards(cfg, WBC_REWARD_FACTORS)
@@ -829,7 +1052,10 @@ def build_roboduet_config(args=None, *, options=None, debug=False):
     if options.traj_tracking:
         enable_traj_tracking(cfg, layout)
     set_arm_action_mode(cfg, options.arm_action_mode)
+    set_gait_reward_mode(cfg, options.gait_reward_mode)
+    validate_gait_reward_mode(cfg)
     set_raibert_form(cfg, options.raibert_form)
+    validate_raibert_form(cfg)
     if not options.reach_table:
         cfg.wbc.goal_reaching.reach_table_path = ""
 
@@ -837,6 +1063,7 @@ def build_roboduet_config(args=None, *, options=None, debug=False):
     configure_privileged_obs_dims(cfg)
     configure_robot_asset(cfg, options.robot)
     validate_roboduet_cfg(cfg)
+    validate_coordination(cfg)
 
     if debug:
         cfg.domain_rand.randomize_mount_position = False

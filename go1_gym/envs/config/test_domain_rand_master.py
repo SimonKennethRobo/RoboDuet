@@ -105,7 +105,8 @@ def test_mode_snapshot_roundtrip(mode):
 
 
 def test_default_and_invalid_modes():
-    assert build().domain_rand.mode == "benchmark"
+    from go1_gym.envs.config.wbc import ROBODUET_PROFILE
+    assert build().domain_rand.mode == ROBODUET_PROFILE.overrides["domain_rand.mode"]
     with pytest.raises(ValueError, match="domain_rand.mode"):
         build(domain_rand_mode="typo")
 
@@ -156,3 +157,16 @@ def test_partial_snapshot_does_not_reset_mode():
     apply_config_snapshot(cfg, {"domain_rand": {"enabled": False}})
     assert cfg.domain_rand.mode == "none"
     assert not hasattr(cfg.domain_rand, "enabled")
+
+
+def test_pre_feature_snapshot_preserves_sensing_payload_and_terrain():
+    snapshot = cfg_to_dict(build())
+    for key in ("randomize_dog_obs_latency", "dog_obs_latency_steps_range", "dog_obs_latency_jitter_steps"):
+        snapshot["domain_rand"].pop(key)
+    snapshot["domain_rand"]["stage1_arm"].pop("ee_payload_com_offset_range")
+    snapshot["terrain"].pop("roughness_tiers")
+    cfg = build()
+    apply_config_snapshot(cfg, snapshot)
+    assert not cfg.domain_rand.randomize_dog_obs_latency
+    assert cfg.domain_rand.stage1_arm.ee_payload_com_offset_range == [0., 0., 0.]
+    assert cfg.terrain.roughness_tiers == []

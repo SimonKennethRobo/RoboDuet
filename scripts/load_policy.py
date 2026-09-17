@@ -13,7 +13,7 @@ from go1_gym.envs.config import (
     RoboDuetRuntimeOptions,
     apply_config_snapshot,
     build_roboduet_config,
-    recompute_observation_dims,
+    restore_dog_observation_layout,
 )
 from go1_gym.envs.config.wbc import ROBOT_ASSET_FILES
 
@@ -219,7 +219,10 @@ def _ensure_asset_file(cfg, robot=None, checkpoint_asset_file=None):
     print(f"[RoboDuet] checkpoint asset file was empty; using {robot} asset: {cfg.asset.file}")
 
 
-def load_dog_policy(logdir, ckpt_id, cfg):
+def load_dog_policy(logdir, ckpt_id, cfg, device="cpu"):
+    """Inference-only dog policy. ``device`` defaults to CPU (single-env play
+    never needs the GPU); batched evaluation passes the sim device so the
+    observations don't round-trip to host memory every step."""
     run_parameters = _load_run_parameters(logdir)
     ckpt_path = _checkpoint_path(logdir, "dog", ckpt_id)
     ckpt = torch.load(ckpt_path, map_location="cpu")
@@ -232,7 +235,7 @@ def load_dog_policy(logdir, ckpt_id, cfg):
             cfg.dog.dog_num_obs_history,
             cfg.dog.dog_actions,
             use_adaptation_module=structure["uses_adaptation"],
-        ).to("cpu")
+        ).to(device)
     _load_inference_state(actor_critic, ckpt, "dog")
     actor_critic.eval()
     adaptation_module = actor_critic.adaptation_module
@@ -240,7 +243,7 @@ def load_dog_policy(logdir, ckpt_id, cfg):
 
     def policy(obs, info=None):
         info = {} if info is None else info
-        history = obs["obs_history"].to("cpu")
+        history = obs["obs_history"].to(device)
         actor_input = (history,)
         if adaptation_module is not None:
             latent = adaptation_module(history)
@@ -251,7 +254,8 @@ def load_dog_policy(logdir, ckpt_id, cfg):
     return policy
 
 
-def load_arm_policy(logdir, ckpt_id, cfg):
+def load_arm_policy(logdir, ckpt_id, cfg, device="cpu"):
+    """Inference-only arm policy. See ``load_dog_policy`` on ``device``."""
     run_parameters = _load_run_parameters(logdir)
     ckpt_path = _checkpoint_path(logdir, "arm", ckpt_id)
     ckpt = torch.load(ckpt_path, map_location="cpu")
@@ -264,7 +268,7 @@ def load_arm_policy(logdir, ckpt_id, cfg):
             cfg.arm.arm_num_obs_history,
             cfg.arm.num_actions_arm_cd,
             use_adaptation_module=structure["uses_adaptation"],
-        ).to("cpu")
+        ).to(device)
     _load_inference_state(actor_critic, ckpt, "arm")
     actor_critic.eval()
     adaptation_module = actor_critic.adaptation_module
@@ -273,18 +277,27 @@ def load_arm_policy(logdir, ckpt_id, cfg):
 
     def policy(obs, info=None):
         info = {} if info is None else info
-        history = obs["obs_history"].to("cpu")
+        history = obs["obs_history"].to(device)
         hist = actor_his(history[..., :-cfg.arm.arm_num_observations])
-        actor_input = (obs["obs"].to("cpu"), hist)
+        actor_input = (obs["obs"].to(device), hist)
         if adaptation_module is not None:
             latent = adaptation_module(history)
-            actor_input = (obs["obs"].to("cpu"), latent, hist)
+            actor_input = (obs["obs"].to(device), latent, hist)
             info["latent"] = latent
         return body(torch.cat(actor_input, dim=-1))
 
     return policy
 
-def load_env(logdir, wrapper, headless=False, device='cuda:0', robot=None):
+def load_env(
+    logdir,
+    wrapper,
+    headless=False,
+    device='cuda:0',
+    robot=None,
+    training_scene=False,
+    num_envs=1,
+    scene_spacing_scale=1.0,
+):
     print('*'*10, logdir)
     cfg = build_roboduet_config(options=RoboDuetRuntimeOptions(num_envs=1, robot=robot or "go2"))
 
@@ -293,9 +306,12 @@ def load_env(logdir, wrapper, headless=False, device='cuda:0', robot=None):
     snapshot = pkl_cfg["Cfg"]
     checkpoint_asset_file = snapshot.get("asset", {}).get("file")
     apply_config_snapshot(cfg, snapshot, drop_unknown=True)
+    # Interactive commands belong to the operator. Keep the saved reward and
+    # observation semantics, but do not run the training command scheduler.
+    cfg.commands.coordination.enabled = False
 
     _ensure_asset_file(cfg, robot=robot, checkpoint_asset_file=checkpoint_asset_file)
-    recompute_observation_dims(cfg)
+    restore_dog_observation_layout(cfg, snapshot)
     recorded_arm_obs = snapshot.get("arm", {}).get("arm_num_observations")
     current_arm_obs = int(cfg.arm.arm_num_observations)
     if (
@@ -324,9 +340,47 @@ def load_env(logdir, wrapper, headless=False, device='cuda:0', robot=None):
     # a waypoint policy silently gets replayed as a joint-residual one.
     print(f"[RoboDuet] arm action mode: {cfg.arm.action_mode}")
 
-    cfg.terrain.mesh_type = "plane"
-    if cfg.terrain.mesh_type == "plane":
-      cfg.terrain.teleport_robots = False
+    if training_scene:
+        if scene_spacing_scale <= 0:
+            raise ValueError("scene_spacing_scale must be positive")
+        if scene_spacing_scale != 1.0:
+            original_spacing = (
+                float(cfg.terrain.terrain_length),
+                float(cfg.terrain.terrain_width),
+            )
+            original_horizontal_scale = float(cfg.terrain.horizontal_scale)
+            length_pixels = int(round(original_spacing[0] / original_horizontal_scale))
+            width_pixels = int(round(original_spacing[1] / original_horizontal_scale))
+            cfg.terrain.horizontal_scale *= scene_spacing_scale
+            cfg.terrain.terrain_length = length_pixels * cfg.terrain.horizontal_scale
+            cfg.terrain.terrain_width = width_pixels * cfg.terrain.horizontal_scale
+            cfg.terrain.border_size *= scene_spacing_scale
+            print(
+                "[RoboDuet] scene spacing: "
+                f"{original_spacing} -> "
+                f"({cfg.terrain.terrain_length}, {cfg.terrain.terrain_width}) m"
+            )
+        print(
+            "[RoboDuet] training scene: preserving checkpoint terrain "
+            f"({cfg.terrain.mesh_type}, {cfg.terrain.num_rows}x{cfg.terrain.num_cols}, "
+            f"{num_envs} envs)"
+        )
+        if num_envs > 1 and cfg.terrain.mesh_type in ("heightfield", "trimesh"):
+            scene_x = float(cfg.terrain.num_rows * cfg.terrain.terrain_length)
+            scene_y = float(cfg.terrain.num_cols * cfg.terrain.terrain_width)
+            scene_span = max(scene_x, scene_y)
+            cfg.viewer.pos = [scene_x * 0.5, -scene_span * 0.6, scene_span * 0.65]
+            cfg.viewer.lookat = [scene_x * 0.5, scene_y * 0.5, 0.0]
+            print(
+                "[RoboDuet] overview camera: "
+                f"pos={cfg.viewer.pos}, lookat={cfg.viewer.lookat}"
+            )
+    else:
+        cfg.terrain.mesh_type = "plane"
+        cfg.terrain.teleport_robots = False
+
+    cfg.domain_rand.randomize_dog_obs_latency = False
+    cfg.domain_rand.dog_obs_latency_jitter_steps = 0
 
     # turn off DR for evaluation script
     cfg.domain_rand.push_robots = False
@@ -345,14 +399,15 @@ def load_env(logdir, wrapper, headless=False, device='cuda:0', robot=None):
     cfg.domain_rand.randomize_end_effector_force = False
 
     cfg.env.num_recording_envs = 1
-    cfg.env.num_envs = 1
-    cfg.terrain.num_rows = 5
-    cfg.terrain.num_cols = 5
-    cfg.terrain.border_size = 0
-    cfg.terrain.center_robots = True
-    cfg.terrain.center_span = 1
-    cfg.terrain.teleport_robots = False
-    cfg.asset.render_sphere = True
+    cfg.env.num_envs = int(num_envs)
+    if not training_scene:
+        cfg.terrain.num_rows = 5
+        cfg.terrain.num_cols = 5
+        cfg.terrain.border_size = 0
+        cfg.terrain.center_robots = True
+        cfg.terrain.center_span = 1
+        cfg.terrain.teleport_robots = False
+    cfg.asset.render_sphere = False
     cfg.env.episode_length_s = 10000
     cfg.commands.resampling_time = 10000
     # Cfg.domain_rand.lag_timesteps = 6

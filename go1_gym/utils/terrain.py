@@ -21,10 +21,14 @@ def roughness_tier_columns(num_cols, num_tiers, weights=None):
     """
     if num_tiers <= 0 or num_cols <= 0:
         return []
+    if num_cols < num_tiers:
+        raise ValueError("terrain needs at least one column per roughness tier")
     if weights is None:
         weights = [1.0] * num_tiers
     if len(weights) != num_tiers:
         raise ValueError(f"{len(weights)} tier weights for {num_tiers} tiers")
+    if any(not math.isfinite(w) or w < 0 for w in weights):
+        raise ValueError("roughness tier weights must be finite and nonnegative")
     total = float(sum(weights))
     if total <= 0:
         raise ValueError("roughness tier weights must sum to something positive")

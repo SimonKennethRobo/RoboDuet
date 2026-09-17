@@ -9,9 +9,12 @@ import shutil
 from datetime import datetime
 
 import wandb
-from go1_gym import MINI_GYM_ROOT_DIR
-from go1_gym.envs.config import ARM_ACTION_MODES, build_roboduet_config, cfg_to_dict
+from go1_gym.file_io import atomic_output, optional_output
 from go1_gym.envs.config.domain_randomization import DOMAIN_RAND_MODES, domain_randomization_mode
+from go1_gym import MINI_GYM_ROOT_DIR
+from go1_gym.envs.config import ARM_ACTION_MODES, build_roboduet_config, cfg_to_dict, restore_dog_observation_layout
+from go1_gym.envs.config.coordination import read_experiment
+from go1_gym.envs.config.finetune import validate_finetune
 from go1_gym.envs.roboduet.utils import StageSchedule, apply_wbc_reward_settings
 from go1_gym.envs.roboduet.wbc_env import WBCEnv
 from go1_gym.envs.roboduet.wbc_env_wrapper import HistoryWrapper
@@ -70,6 +73,10 @@ def apply_dog_checkpoint_command_limits(cfg, ckpt_path):
     if dog_commands is None:
         print(f"[warn] dog parameters.pkl has no Cfg.commands; using current command limits.", flush=True)
         return
+    if isinstance(dog_cfg, dict):
+        restore_dog_observation_layout(cfg, dog_cfg)
+        print(f"Dog checkpoint observations: {cfg.dog.dog_num_observations}D, "
+              f"layout v{cfg.dog.observation_layout_version}, height_reference={cfg.terrain.height_reference}", flush=True)
     copied = []
     print(f"Loaded dog policy parameters from {params_path}", flush=True)
     print("Dog command limits applied to stage2:", flush=True)
@@ -92,14 +99,17 @@ def _cfg_snapshot_with_command_limits(cfg):
 
 
 def configure_train_stage(args, cfg):
+    initial_iteration = getattr(args, 'stage1_finetune_iteration', 0)
     schedule = StageSchedule(
         args.train_stage,
-        args.num_learning_iterations,
+        args.num_learning_iterations + initial_iteration,
         default_switch_iteration=2000 if args.resume else 8000,
         stage1_arm_ramp_iterations=cfg.env.stage1_arm_ramp_iterations,
         debug=args.debug,
     )
     schedule.configure(global_switch)
+    if initial_iteration:
+        global_switch.count = global_switch.stage1_count = initial_iteration
 
     if args.debug:
         RunnerArgs.save_interval = 2
@@ -127,20 +137,48 @@ def main(args):
     args.tags.append(f"seed{args.seed}")
 
     cfg = build_roboduet_config(args, debug=args.debug)
+    args.stage1_finetune_iteration = 0
+    if args.stage1_finetune_ckpt_path:
+        provenance = validate_finetune(cfg, args.stage1_finetune_ckpt_path)
+        args.stage1_finetune_iteration = provenance['source_iteration']
+        cfg.coordination_experiment['finetune'] = provenance
+        print(f'[fine-tune] {provenance}; fresh PPO optimizer and sampled environments', flush=True)
     print(f"[domain rand] training mode: {domain_randomization_mode(cfg)}", flush=True)
     if cfg.terrain.reset_mode == "fixed_mixture":
         print("[reset mixture] " + str({k: v for k, v in cfg_to_dict(cfg.terrain).items()
                                        if k.startswith("reset_mix")}), flush=True)
         print(f"[push] max angular velocity per world axis: {cfg.domain_rand.max_push_ang_vel} rad/s", flush=True)
     cfg.env.arm_policy_enabled = args.train_stage != "stage1"
-    cfg.env.record_video = args.video
+    cfg.env.record_video = bool(args.video and not args.no_video)
     if not cfg.env.record_video:
         RunnerArgs.log_video = False
+        RunnerArgs.save_video_interval = 0
+        if args.headless:
+            args.graphics_device_id = -1
+            cfg.asset.render_sphere = False
     RunnerArgs.num_steps_per_env = args.num_steps_per_env
     PPO_Args.num_mini_batches = args.num_mini_batches
+    RunnerArgs.save_interval = args.save_interval
+    PPO_Args.learning_rate = args.learning_rate
+    PPO_Args.schedule = args.lr_schedule
+    PPO_Args.desired_kl = args.desired_kl
+    PPO_Args.entropy_coef = args.entropy_coef
+    if args.experiment:
+        cfg.coordination_experiment["training"] = {
+            key: getattr(args, "lr_schedule" if key == "schedule" else key)
+            for key in cfg.coordination_experiment["training"]
+        }
+        print(f"[coordination] {args.experiment}: {cfg.coordination_experiment['description']}", flush=True)
+        print(f"[coordination] {cfg.coordination_experiment['source']}; "
+              f"obs={cfg.dog.dog_num_observations} x {cfg.dog.dog_num_observation_history}, "
+              f"pitch={cfg.commands.limit_body_pitch}, roll={cfg.commands.limit_body_roll}, "
+              f"moving gait={cfg.commands.limit_gait_frequency}, "
+              f"arm mixture={cfg.env.coordination_arm.fractions}", flush=True)
 
     stage2_freeze_loco_policy = not args.stage2_unfreeze_loco_policy
-    DogRunnerArgs.ckpt_path = args.stage1_ckpt_path
+    DogRunnerArgs.ckpt_path = args.stage1_finetune_ckpt_path or args.stage1_ckpt_path
+    if args.stage1_finetune_ckpt_path:
+        stage2_freeze_loco_policy = False
     if args.train_stage != "stage1" and DogRunnerArgs.ckpt_path is None and stage2_freeze_loco_policy:
         if stage2_freeze_loco_policy:
             print(
@@ -149,7 +187,8 @@ def main(args):
                 flush=True,
             )
         stage2_freeze_loco_policy = False
-    apply_dog_checkpoint_command_limits(cfg, DogRunnerArgs.ckpt_path)
+    if not args.stage1_finetune_ckpt_path:
+        apply_dog_checkpoint_command_limits(cfg, DogRunnerArgs.ckpt_path)
     DogRunnerArgs.stage2_freeze_loco_policy = stage2_freeze_loco_policy
     DogRunnerArgs.stage2_loco_learning_rate = args.stage2_loco_learning_rate
     ArmRunnerArgs.ckpt_path = args.stage2_ckpt_path
@@ -206,36 +245,45 @@ def main(args):
     print(f"Logging to {args.log_dir}")
     # args.log_dir += f"_seed{args.seed}"
 
-    os.makedirs(osp.join(args.log_dir, "checkpoints_arm"), exist_ok=True)
-    os.makedirs(osp.join(args.log_dir, "checkpoints_dog"), exist_ok=True)
-    os.makedirs(osp.join(args.log_dir, "videos"), exist_ok=True)
-    os.makedirs(osp.join(args.log_dir, "deploy_model"), exist_ok=True)
-    os.makedirs(f"{MINI_GYM_ROOT_DIR}/tmp/deploy_model", exist_ok=True)
+    with optional_output("training output directories"):
+        os.makedirs(osp.join(args.log_dir, "checkpoints_arm"), exist_ok=True)
+    with optional_output("training output directories"):
+        os.makedirs(osp.join(args.log_dir, "checkpoints_dog"), exist_ok=True)
+    with optional_output("training output directories"):
+        os.makedirs(osp.join(args.log_dir, "videos"), exist_ok=True)
+    with optional_output("training output directories"):
+        os.makedirs(osp.join(args.log_dir, "deploy_model"), exist_ok=True)
+    with optional_output("training output directories"):
+        os.makedirs(f"{MINI_GYM_ROOT_DIR}/tmp/deploy_model", exist_ok=True)
 
     if not args.debug:
-        os.makedirs(osp.join(args.log_dir, "scripts"), exist_ok=True)
-        shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/scripts/auto_train.py", f"{args.log_dir}/scripts/auto_train.py")
-        for root, dirs, files in os.walk(f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet"):
-            rel_root = osp.relpath(root, f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet")
-            target_root = (
-                osp.join(args.log_dir, "scripts", rel_root) if rel_root != "." else osp.join(args.log_dir, "scripts")
+        with optional_output("source snapshot"):
+            os.makedirs(osp.join(args.log_dir, "scripts"), exist_ok=True)
+            shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/scripts/auto_train.py", f"{args.log_dir}/scripts/auto_train.py")
+            shutil.copyfile(f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/rewards/rewards.py", f"{args.log_dir}/scripts/rewards.py")
+            if args.experiment:
+                shutil.copyfile(cfg.coordination_experiment["source"], f"{args.log_dir}/coordination_recipe.json")
+            for root, dirs, files in os.walk(f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet"):
+                rel_root = osp.relpath(root, f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/roboduet")
+                target_root = (
+                    osp.join(args.log_dir, "scripts", rel_root) if rel_root != "." else osp.join(args.log_dir, "scripts")
+                )
+                os.makedirs(target_root, exist_ok=True)
+                for filename in files:
+                    if filename.endswith(".py"):
+                        shutil.copyfile(osp.join(root, filename), osp.join(target_root, filename))
+            shutil.copytree(
+                f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/config",
+                f"{args.log_dir}/scripts/config",
+                dirs_exist_ok=True,
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
             )
-            os.makedirs(target_root, exist_ok=True)
-            for filename in files:
-                if filename.endswith(".py"):
-                    shutil.copyfile(osp.join(root, filename), osp.join(target_root, filename))
-        shutil.copytree(
-            f"{MINI_GYM_ROOT_DIR}/go1_gym/envs/config",
-            f"{args.log_dir}/scripts/config",
-            dirs_exist_ok=True,
-            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
-        )
-        shutil.copyfile(
-            f"{MINI_GYM_ROOT_DIR}/go1_gym_learn/ppo_cse_automatic/arm_ac.py", f"{args.log_dir}/scripts/arm_ac.py"
-        )
-        shutil.copyfile(
-            f"{MINI_GYM_ROOT_DIR}/go1_gym_learn/ppo_cse_automatic/dog_ac.py", f"{args.log_dir}/scripts/dog_ac.py"
-        )
+            shutil.copyfile(
+                f"{MINI_GYM_ROOT_DIR}/go1_gym_learn/ppo_cse_automatic/arm_ac.py", f"{args.log_dir}/scripts/arm_ac.py"
+            )
+            shutil.copyfile(
+                f"{MINI_GYM_ROOT_DIR}/go1_gym_learn/ppo_cse_automatic/dog_ac.py", f"{args.log_dir}/scripts/dog_ac.py"
+            )
 
         temp_dict = {
             "Cfg": _cfg_snapshot_with_command_limits(cfg),
@@ -245,21 +293,26 @@ def main(args):
             "PPO_Args": vars(PPO_Args),
         }
 
-        with open(f"{args.log_dir}/params.txt", "w", encoding="utf-8") as f:
+        with optional_output("params.txt"), open(f"{args.log_dir}/params.txt", "w", encoding="utf-8") as f:
             format_temp_dict = format_code(str(temp_dict))
             f.write(format_temp_dict)
 
-        with open(osp.join(args.log_dir, "parameters.pkl"), "wb") as f:
-            pickle.dump(temp_dict, f)
-        wandb.save(osp.join(args.log_dir, "parameters.pkl"), policy="now")
+        def write_parameters(path):
+            with open(path, "wb") as f:
+                pickle.dump(temp_dict, f)
 
-        wandb.log(
-            {
-                "Global_Switch/start": global_switch.pretrained_to_wbc_start,
-                "Global_Switch/end": global_switch.pretrained_to_wbc_end,
-            },
-            step=0,
-        )
+        with optional_output("parameters.pkl"):
+            atomic_output(osp.join(args.log_dir, "parameters.pkl"), write_parameters)
+            wandb.save(osp.join(args.log_dir, "parameters.pkl"), policy="now")
+
+        with optional_output("wandb.log"):
+            wandb.log(
+                {
+                    "Global_Switch/start": global_switch.pretrained_to_wbc_start,
+                    "Global_Switch/end": global_switch.pretrained_to_wbc_end,
+                },
+                step=0,
+            )
 
     env = WBCEnv(
         sim_device=args.sim_device,
@@ -268,21 +321,33 @@ def main(args):
         graphics_device_id=args.graphics_device_id,
     )
     env = HistoryWrapper(env)
+    env.env.numerical_fault_log_dir = osp.join(args.log_dir, 'numerical_faults')
     gpu_id = args.sim_device.split(":")[-1]
     runner = Runner(
         env, device=f"cuda:{gpu_id}", run_name=args.run_name, resume=args.resume, log_dir=args.log_dir, debug=args.debug
     )
+    runner.current_learning_iteration = args.stage1_finetune_iteration
+    if cfg.env.guard_policy_numerics:
+        from go1_gym_learn.ppo_cse_automatic.numerical_guard import NumericalGuard
+        from go1_gym.envs.roboduet.numerical_safety import fault_context
+        guard = NumericalGuard(runner.dog_model, runner.alg_dog.optimizer,
+                               osp.join(args.log_dir, 'numerical_faults'),
+                               context=lambda ids: fault_context(env.env, ids))
+        runner.alg_dog.numerical_guard = guard
+        runner.dog_model.numerical_guard = guard
+        guard.check_parameters()
+        print('[numerics] physics quarantine, policy/PPO checks and recent state trace enabled', flush=True)
     runner.learn(
         num_learning_iterations=args.num_learning_iterations, init_at_random_ep_len=True, eval_freq=args.eval_freq
     )
 
 
-if __name__ == "__main__":
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Go1")
     parser.add_argument("--headless", action="store_true", default=False)
     parser.add_argument("--sim_device", type=str, default="cuda:0")
     parser.add_argument("--graphics_device_id", type=int, default=None)
-    parser.add_argument("--num_learning_iterations", type=int, default=100000)
+    parser.add_argument("--num_learning_iterations", type=int, default=None)
     parser.add_argument("--eval_freq", type=int, default=100)
     parser.add_argument("--run_name", type=str, default="test")
     parser.add_argument("--debug", action="store_true")
@@ -291,21 +356,33 @@ if __name__ == "__main__":
     parser.add_argument("--resume", action="store_true")  # for two_stage
     parser.add_argument("--tags", nargs="+", default=[])
     parser.add_argument("--notes", type=str, default=None)
-    parser.add_argument("--seed", type=int, default=-1)
+    parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--robot", type=str, default="go2_x5", choices=["go1", "go2", "go2_x5"])
     parser.add_argument("--video", action="store_true", default=False)
+    parser.add_argument("--no_video", action="store_true", default=False,
+                        help="Disable video even if a launcher supplies --video; headless runs also disable graphics")
 
-    parser.add_argument("--num_envs", type=int, default=4096)
+    parser.add_argument("--num_envs", type=int, default=None)
+    parser.add_argument("--experiment", default=None,
+                        help="Opt-in Stage-1 coordination recipe from configs/coordination_6gpu.json")
+    parser.add_argument("--experiment_config", default=None, help="Alternate coordination JSON tuning file")
+    parser.add_argument("--save_interval", type=int, default=None)
+    parser.add_argument("--learning_rate", type=float, default=None)
+    parser.add_argument("--lr_schedule", choices=["adaptive", "fixed"], default=None)
+    parser.add_argument("--desired_kl", type=float, default=None)
+    parser.add_argument("--entropy_coef", type=float, default=None)
     parser.add_argument("--domain_rand_mode", choices=DOMAIN_RAND_MODES, default=None,
                         help="Training DR recipe: benchmark (profile default), sim2real, or none.")
-    parser.add_argument("--num_steps_per_env", type=int, default=RunnerArgs.num_steps_per_env)
-    parser.add_argument("--num_mini_batches", type=int, default=PPO_Args.num_mini_batches)
+    parser.add_argument("--num_steps_per_env", type=int, default=None)
+    parser.add_argument("--num_mini_batches", type=int, default=None)
 
     parser.add_argument("--train_stage", type=str, default="two_stage", choices=["stage1", "stage2", "two_stage"])
     stage2_loco_group = parser.add_mutually_exclusive_group()
     stage2_loco_group.add_argument("--stage2_unfreeze_loco_policy", action="store_true", default=False)
     parser.add_argument("--stage2_loco_learning_rate", type=float, default=None)
     parser.add_argument("--stage1_ckpt_path", type=str, default=None)
+    parser.add_argument("--stage1_finetune_ckpt_path", default=None,
+                        help="Weight-only fine-tuning from a numbered corrected-RPY Stage-1 checkpoint; fresh optimizer")
     parser.add_argument("--stage2_ckpt_path", type=str, default=None)
 
     parser.add_argument("--dyna_gait", action="store_true", default=False)
@@ -345,8 +422,45 @@ if __name__ == "__main__":
         "the M2 direction-dependent reachability table.",
     )
 
-    parser.add_argument('--raibert_exp', action='store_true', default=False,
-                        help='Use exponential Raibert reward with v3-stage2 weights (0.4 / 0.2).')
-    args = parser.parse_args()
+    parser.add_argument(
+        "--clock_free_gait",
+        action="store_true",
+        default=False,
+        help="Train the locomotion gait with the clock-free reward table (rewards.gait_reward_mode='clock_free'): contact-stopwatch trot sync, leg-symmetry and foot-geometry terms ported from robot_lab replace tracking_contacts_shaped_*, feet_clearance_cmd_linear and raibert_heuristic, none of which the actor can satisfy once dog.observe_clock_inputs is off. Omit to keep the clock-based table.",
+    )
 
-    main(args)
+    parser.add_argument(
+        "--raibert_exp",
+        action="store_true",
+        default=False,
+        help="Score raibert_heuristic as exp(-err/raibert_sigma), a bounded reward in [0,1] with a positive scale, instead of the legacy unbounded squared-error cost. Removes its multiplicative effect: under rewards.only_positive_rewards_ji22_style the cost form gates the whole reward by exp(scale*err), which is what collapsed stage1_sim2real_abl_4/7/9/11.",
+    )
+
+    args = parser.parse_args(argv)
+    if args.stage1_finetune_ckpt_path and (args.train_stage != 'stage1' or not args.experiment or
+                                         args.resume or args.stage1_ckpt_path or args.stage2_ckpt_path):
+        parser.error('Stage-1 fine-tuning requires --train_stage stage1 --experiment and no resume/other checkpoints')
+    defaults = dict(seed=-1, num_envs=4096, num_learning_iterations=100000,
+                    num_steps_per_env=RunnerArgs.num_steps_per_env, num_mini_batches=PPO_Args.num_mini_batches,
+                    save_interval=RunnerArgs.save_interval, learning_rate=PPO_Args.learning_rate,
+                    schedule=PPO_Args.schedule, desired_kl=PPO_Args.desired_kl, entropy_coef=PPO_Args.entropy_coef)
+    if args.experiment:
+        defaults.update(read_experiment(args.experiment, args.experiment_config)["training"])
+        if args.run_name == "test":
+            args.run_name = f"stage1_coord6_{args.experiment}"
+    elif args.experiment_config:
+        parser.error("--experiment_config requires --experiment")
+    for key, value in defaults.items():
+        dest = "lr_schedule" if key == "schedule" else key
+        if getattr(args, dest, None) is None:
+            setattr(args, dest, value)
+    for key in ("num_envs", "num_learning_iterations", "num_steps_per_env", "num_mini_batches", "save_interval"):
+        if getattr(args, key) <= 0:
+            parser.error(f"--{key} must be positive")
+    if args.learning_rate <= 0 or args.desired_kl <= 0 or args.entropy_coef < 0:
+        parser.error("learning_rate and desired_kl must be positive; entropy_coef must be nonnegative")
+    return args
+
+
+if __name__ == "__main__":
+    main(parse_args())

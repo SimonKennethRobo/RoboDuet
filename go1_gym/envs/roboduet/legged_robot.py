@@ -50,7 +50,9 @@ from go1_gym.response.reward_terms import (
 from go1_gym.utils import global_switch, quaternion_to_rpy
 from go1_gym.utils.math_utils import get_scale_shift, quat_apply_yaw, wrap_to_pi
 from go1_gym.utils.terrain import Terrain
+from go1_gym.utils.height_sampling import sample_triangle_heights
 from go1_gym.envs.roboduet.robustness import FixedResetMixture, RobustnessMetrics
+from go1_gym.envs.roboduet.numerical_safety import quarantine_physics, record_physics_context
 
 #: The reward terms the adaptive command curriculum reads as its progress
 #: signal.  R6 invariant 2: only the original tracking terms may appear here --
@@ -114,6 +116,10 @@ class LeggedRobot(BaseTask):
             self.set_camera(self.cfg.viewer.pos, self.cfg.viewer.lookat)
 
         self._init_buffers()
+        self.numerical_fault_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.numerical_fault_count = 0
+        self.numerical_fault_dumps = 0
+        self.numerical_fault_active = False
 
         self._prepare_reward_function()
         self.init_done = True
@@ -269,6 +275,7 @@ class LeggedRobot(BaseTask):
         clip_actions = self.cfg.normalization.clip_actions
         self.actions = torch.clip(actions, -clip_actions, clip_actions).to(self.device)
         self._arm_pre_step_hook()
+        record_physics_context(self)
         # step physics and render each frame
         self.prev_base_pos = self.base_pos.clone()
         self.prev_base_quat = self.base_quat.clone()
@@ -278,6 +285,8 @@ class LeggedRobot(BaseTask):
             self.render_gui()
         randomize_action_delay = getattr(self.cfg.domain_rand, "randomize_action_delay", False)
         self.step_locomotion_power.zero_()
+        self.step_locomotion_abs_energy_j.zero_()
+        self.step_locomotion_positive_energy_j.zero_()
         if randomize_action_delay:
             actions_start_decimation = torch.randint(
                 0,
@@ -306,13 +315,19 @@ class LeggedRobot(BaseTask):
             # if self.device == 'cpu':
             self.gym.fetch_results(self.sim, True)
             self.gym.refresh_dof_state_tensor(self.sim)
-            self.step_locomotion_power += torch.sum(
-                torch.abs(
-                    self.torques[:, : self.num_actions_loco]
-                    * self.dof_vel[:, : self.num_actions_loco]
-                ),
-                dim=-1,
-            ) / float(self.cfg.control.decimation)
+            leg_joint_power = (
+                self.torques[:, : self.num_actions_loco]
+                * self.dof_vel[:, : self.num_actions_loco]
+            )
+            leg_abs_power = torch.sum(torch.abs(leg_joint_power), dim=-1)
+            self.step_locomotion_power += leg_abs_power / float(
+                self.cfg.control.decimation
+            )
+            physics_dt = float(self.cfg.sim.dt)
+            self.step_locomotion_abs_energy_j += leg_abs_power * physics_dt
+            self.step_locomotion_positive_energy_j += torch.sum(
+                torch.clamp_min(leg_joint_power, 0.0), dim=-1
+            ) * physics_dt
         self.post_physics_step()
 
         return self.rew_buf_dog, self.rew_buf_arm, self.reset_buf, self.extras
@@ -403,6 +418,15 @@ class LeggedRobot(BaseTask):
         """Append arm/WBC episode metrics to ``extras['train/episode']``."""
         pass
 
+    def _arm_pre_reset_capture_hook(self, env_ids):
+        """Capture read-only terminal state before ``reset_idx`` mutates tensors.
+
+        The training environment intentionally leaves this as a no-op. Evaluation
+        subclasses can use it to retain the final physical sample without moving
+        any simulator-state writes out of the canonical reset path.
+        """
+        pass
+
     def post_physics_step(self):
         """check terminations, compute observations and rewards
         calls self._post_physics_step_callback() for common computations
@@ -411,6 +435,8 @@ class LeggedRobot(BaseTask):
         self.gym.refresh_actor_root_state_tensor(self.sim)
         self.gym.refresh_net_contact_force_tensor(self.sim)
         self.gym.refresh_rigid_body_state_tensor(self.sim)
+        if getattr(self.cfg.env, 'quarantine_invalid_physics', False):
+            quarantine_physics(self)
         self.episode_length_buf += 1
         self.common_step_counter += 1
 
@@ -426,7 +452,11 @@ class LeggedRobot(BaseTask):
         ]
         self.foot_positions = self.rigid_body_state.view(self.num_envs, self.num_bodies, 13)[:, self.feet_indices, 0:3]
 
+        self._update_foot_contact_times()
+
         self._arm_post_physics_hook()
+        if getattr(self, "coordination_arm", None) is not None:
+            self.coordination_arm.after_physics(self)
 
         self._post_physics_step_callback()
 
@@ -438,7 +468,10 @@ class LeggedRobot(BaseTask):
         self._update_response_state()
         self._update_performance_metrics()
         self.compute_reward()
+        if getattr(self, "coordination_commands", None) is not None:
+            self.coordination_commands.after_reward(self, global_switch.count)
         env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
+        self._arm_pre_reset_capture_hook(env_ids)
         self.reset_idx(env_ids)
 
         if getattr(self.cfg.env, "arm_policy_enabled", True):
@@ -458,6 +491,40 @@ class LeggedRobot(BaseTask):
 
         self._render_headless()
 
+    def _update_foot_contact_times(self):
+        """Per-foot air/contact stopwatches, the clock-free gait rewards' only
+        source of timing (see Rewards._reward_gait_sync / _reward_feet_air_time
+        _variance). Mirrors IsaacLab's ContactSensor bookkeeping:
+
+          feet_air_time / feet_contact_time -- time elapsed in the phase the
+              foot is in *right now*, zero while it is in the other phase.
+          last_air_time / last_contact_time -- duration of the most recently
+              *completed* phase of each kind, held until the next one ends.
+
+        A dedicated _gait_last_contacts is kept instead of reusing
+        last_contacts: _reward_feet_slip overwrites that one as a side effect
+        during compute_reward(), i.e. after this runs, so sharing it would make
+        the debounce depend on reward-registration order.
+        """
+        contact = self.contact_forces[:, self.feet_indices, 2] > 1.0
+        # Same one-step debounce _reward_feet_slip uses: PhysX reports the
+        # occasional zero-force frame mid-stance, which would otherwise split
+        # one stance into two and halve the measured contact time.
+        contact_filt = torch.logical_or(contact, self._gait_last_contacts)
+        self._gait_last_contacts[:] = contact
+
+        touchdown = contact_filt & (self.feet_air_time > 0.0)
+        liftoff = (~contact_filt) & (self.feet_contact_time > 0.0)
+        self.last_air_time = torch.where(touchdown, self.feet_air_time, self.last_air_time)
+        self.last_contact_time = torch.where(liftoff, self.feet_contact_time, self.last_contact_time)
+
+        self.feet_air_time = torch.where(
+            contact_filt, torch.zeros_like(self.feet_air_time), self.feet_air_time + self.dt
+        )
+        self.feet_contact_time = torch.where(
+            contact_filt, self.feet_contact_time + self.dt, torch.zeros_like(self.feet_contact_time)
+        )
+
     def check_termination(self):
         """Check if environments need to be reset"""
         self.reset_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
@@ -465,7 +532,8 @@ class LeggedRobot(BaseTask):
         self.reset_buf |= self.time_out_buf
         if self.cfg.rewards.use_terminal_body_height:
             self.body_height_buf = (
-                torch.mean(self.root_states[:, 2].unsqueeze(1) - self.measured_heights, dim=1)
+                (self._body_height() if self._uses_terrain_height() else
+                 torch.mean(self.root_states[:, 2].unsqueeze(1) - self.measured_heights, dim=1))
                 < self.cfg.rewards.terminal_body_height
             )
             self.reset_buf = torch.logical_or(self.body_height_buf, self.reset_buf)
@@ -484,6 +552,8 @@ class LeggedRobot(BaseTask):
 
         self._arm_check_termination_hook()
         self.reset_buf |= self.reverse_buf
+        self.reset_buf |= self.numerical_fault_mask
+        self.time_out_buf &= ~self.numerical_fault_mask
 
     def reset_idx(self, env_ids):
         if len(env_ids) == 0:
@@ -516,6 +586,7 @@ class LeggedRobot(BaseTask):
             self.refresh_actor_rigid_shape_props(env_ids, self.cfg)
             self.refresh_actor_rigid_body_props(env_ids, self.cfg)
 
+        self._assign_terrain_tiers(env_ids)
         self._reset_dofs(env_ids, self.cfg)
         self._reset_root_states(env_ids, self.cfg)
         self._arm_post_reset_refresh_hook(env_ids)
@@ -539,6 +610,10 @@ class LeggedRobot(BaseTask):
         # after it belong to different episodes and different commands.
         self.ripple_valid_steps[env_ids] = 0
         self.feet_air_time[env_ids] = 0.0
+        self.feet_contact_time[env_ids] = 0.0
+        self.last_air_time[env_ids] = 0.0
+        self.last_contact_time[env_ids] = 0.0
+        self._gait_last_contacts[env_ids] = False
         self.episode_length_buf[env_ids] = 0
         self._resample_push_interval(env_ids)
         self.reset_buf[env_ids] = 1
@@ -822,7 +897,7 @@ class LeggedRobot(BaseTask):
             privileged_obs_buf = torch.cat(
                 (
                     privileged_obs_buf,
-                    ((self.root_states[: self.num_envs, 2]).view(self.num_envs, -1) - body_height_shift)
+                    ((self._body_height()).view(self.num_envs, -1) - body_height_shift)
                     * body_height_scale,
                 ),
                 dim=1,
@@ -1066,6 +1141,8 @@ class LeggedRobot(BaseTask):
                 continue
 
             rew = self.reward_functions[i]() * reward_scales[name]
+            if self.numerical_fault_active:
+                rew = torch.where(self.numerical_fault_mask, 0.0, rew)
 
             if name in ["vis_manip_commands_tracking_lpy", "vis_manip_commands_tracking_rpy"]:
                 self.episode_sums[name] += rew
@@ -1112,6 +1189,9 @@ class LeggedRobot(BaseTask):
                 self.episode_sums["termination"] += rew
                 self.command_sums["termination"] += rew
 
+        if self.numerical_fault_active:
+            self.rew_buf_dog[self.numerical_fault_mask] = 0
+            self.rew_buf_arm[self.numerical_fault_mask] = 0
         self.episode_sums["total"] += self.rew_buf_dog + self.rew_buf_arm
 
         self.command_sums["lin_vel_raw"] += self.base_lin_vel[:, 0]
@@ -1643,7 +1723,10 @@ class LeggedRobot(BaseTask):
             env_id = int(env_id)
             env_handle, actor_handle = self.envs[env_id], self.actor_handles[env_id]
             body_props = self.gym.get_actor_rigid_body_properties(env_handle, actor_handle)
-            body_props[0].mass = self.default_body_mass + float(self.payloads[env_id])
+            mass = self.default_body_mass + float(self.payloads[env_id])
+            if mass <= 0:
+                raise ValueError("domain_rand.added_mass_range produces nonpositive chassis mass")
+            body_props[self.base_mass_body_index].mass = mass
             self.gym.set_actor_rigid_body_properties(
                 env_handle, actor_handle, body_props, recomputeInertia=True
             )
@@ -1687,16 +1770,22 @@ class LeggedRobot(BaseTask):
             )
 
     def _process_rigid_body_props(self, props, env_id):
-        self.default_body_mass = props[0].mass
+        # Go2+arm assets have a light "base" at index 0 and the chassis at
+        # "trunk". Applying +/-2 kg to that light body creates negative mass.
+        self.base_mass_body_index = self.body_names.index("trunk") if "trunk" in self.body_names else 0
+        base_props = props[self.base_mass_body_index]
+        self.default_body_mass = base_props.mass
 
         if env_id == 0:
             assert len(props) == len(self.body_names), "props length is not equal to body_names length"
             for name, item in zip(self.body_names, props):
                 print(f"{name}: {item.mass}")
 
-        props[0].mass = self.default_body_mass + self.payloads[env_id]
+        base_props.mass = self.default_body_mass + float(self.payloads[env_id])
+        if base_props.mass <= 0:
+            raise ValueError("domain_rand.added_mass_range produces nonpositive chassis mass")
 
-        props[0].com = gymapi.Vec3(
+        base_props.com = gymapi.Vec3(
             self.com_displacements[env_id, 0], self.com_displacements[env_id, 1], self.com_displacements[env_id, 2]
         )
         props[self.ee_idx].mass += 100.0 / 1000  # camera
@@ -1716,6 +1805,7 @@ class LeggedRobot(BaseTask):
             "vertical_velocity_sq",
             "horizontal_angular_velocity_sq",
             "base_height_sq_error",
+            "base_height_signed_error",
             "foot_slip_speed_sum",
             "foot_contact_samples",
             "locomotion_power_sum",
@@ -1741,6 +1831,12 @@ class LeggedRobot(BaseTask):
             device=self.device,
             requires_grad=False,
         )
+        self.step_locomotion_abs_energy_j = torch.zeros_like(
+            self.step_locomotion_power
+        )
+        self.step_locomotion_positive_energy_j = torch.zeros_like(
+            self.step_locomotion_power
+        )
         self._arm_init_performance_metrics_hook()
 
     def _stance_geometry(self):
@@ -1755,6 +1851,10 @@ class LeggedRobot(BaseTask):
 
     def _update_performance_metrics(self):
         """Accumulate one simulator-step sample in physical units, without reward functions or scales."""
+        rejected = {}
+        if self.numerical_fault_active:
+            rejected = {key: value[self.numerical_fault_mask].clone()
+                        for key, value in self.performance_metric_sums.items()}
         lin_vel_error = self.base_lin_vel[:, :2] - self.commands_dog[:, :2]
         yaw_rate_error = self.base_ang_vel[:, 2] - self.commands_dog[:, 2]
         if self.robustness_metrics is not None:
@@ -1767,6 +1867,7 @@ class LeggedRobot(BaseTask):
                 torch.cat((lin_vel_error[:n], yaw_rate_error[:n, None]), dim=1),
                 self.robustness_age_steps[:n], self.reset_buf[:n], self.time_out_buf[:n],
                 height_failure, orientation_failure, self.robustness_push_mask[:n],
+                valid=~self.numerical_fault_mask[:n] if self.numerical_fault_active else None,
             )
         sums = self.performance_metric_sums
         sums["vx_abs_error"] += torch.abs(lin_vel_error[:, 0])
@@ -1798,9 +1899,10 @@ class LeggedRobot(BaseTask):
         else:
             reference_height = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         height_command = self.commands_dog[:, 5] if self.commands_dog.shape[1] > 5 else 0.0
-        body_height = self.base_pos[:, 2] - reference_height
+        body_height = self._body_height() if self._uses_terrain_height() else self.base_pos[:, 2] - reference_height
         height_target = float(self.cfg.rewards.base_height_target) + height_command
         sums["base_height_sq_error"] += torch.square(body_height - height_target)
+        sums["base_height_signed_error"] += body_height - height_target
 
         foot_contact = self.contact_forces[:, self.feet_indices, 2] > 1.0
         foot_slip_speed = torch.norm(self.foot_velocities[:, :, :2], dim=-1)
@@ -1856,6 +1958,8 @@ class LeggedRobot(BaseTask):
         self._record_ref_tracking_window()
 
         self._arm_update_performance_metrics_hook()
+        for key, value in rejected.items():
+            self.performance_metric_sums[key][self.numerical_fault_mask] = value
 
     def _record_ref_tracking_window(self):
         """One R8.2 diagnostic sample per env: the raw, UNGATED R4.1 term.
@@ -2014,6 +2118,7 @@ class LeggedRobot(BaseTask):
         extras["perf_stance_length_m"] = mean_valid(episode_mean("stance_length_m"))
         extras["perf_stance_width_mae_m"] = mean_valid(episode_mean("stance_width_abs_err"))
         extras["perf_stance_length_mae_m"] = mean_valid(episode_mean("stance_length_abs_err"))
+        extras["perf_base_height_signed_error_m"] = mean_valid(episode_mean("base_height_signed_error"))
         contact_samples = sums["foot_contact_samples"][train_env_ids]
         contact_valid = valid & (contact_samples > 0)
         slip_speed = sums["foot_slip_speed_sum"][train_env_ids] / torch.clamp(contact_samples, min=1.0)
@@ -2227,6 +2332,9 @@ class LeggedRobot(BaseTask):
     def _resample_commands(self, env_ids):
         if len(env_ids) == 0:
             return
+        if getattr(self, "coordination_commands", None) is not None:
+            self.coordination_commands.reset(self, env_ids, global_switch.count)
+            return
         arm_controls_commands = bool(self._arm_resample_commands_train_hook(env_ids))
 
         timesteps = int(self.cfg.commands.resampling_time / self.dt)
@@ -2435,6 +2543,15 @@ class LeggedRobot(BaseTask):
         self.grouping.mark_desync(env_ids)
 
     def _init_command_distribution(self, env_ids):
+        self.coordination_commands = None
+        if getattr(getattr(self.cfg.commands, "coordination", None), "enabled", False):
+            from .coordination_sampling import CoordinationCommands
+            self.coordination_commands = CoordinationCommands(self.cfg, self.num_envs, self.device, self.dt)
+            self.category_names = ["trot"]
+            self.curricula = [self.coordination_commands.curriculum]
+            self.env_command_bins = self.coordination_commands.bins
+            self.env_command_categories = np.zeros(self.num_envs, dtype=np.int64)
+            return
         # new style curriculum
         self.category_names = ["trot"]
 
@@ -2458,49 +2575,50 @@ class LeggedRobot(BaseTask):
         self._arm_post_callback_hook()
 
         # resample commands
-        sample_interval = int(self.cfg.commands.resampling_time / self.dt)
-        # R5: grouped envs resample on the GROUP clock, ungrouped ones on their
-        # own episode counter.  Both paths end in _resample_commands; what
-        # differs is who decides when.
-        #
-        # R6 rides on the same mechanism.  An identification group needs its
-        # four passive channels to hold still for a whole excitation plan --
-        # stepping them mid-chirp is exactly the disturbance that makes the
-        # record un-identifiable as SISO -- so it gets a LONGER period rather
-        # than having its resample suppressed.  Suppression was the first
-        # implementation and it was wrong: once R5 made a reset env adopt its
-        # twin's command, an identification group whose twin was also suppressed
-        # never drew a command at all and sat at zeros for the whole run.
-        due = (
-            (self.episode_length_buf % sample_interval == 0)
-            & ~self.grouping.is_grouped
-            & ~self.is_identification_env
-        )
-        due_groups = self.grouping.groups_due(self.group_resample_interval)
-        if due_groups.numel() > 0:
-            due[self.grouping.envs_of_groups(due_groups)] = True
-        env_ids = due.nonzero(as_tuple=False).flatten()
-        self._resample_commands(env_ids)
-        # Phase sync and the desync clear come after the commands, because
-        # _resample_commands is what re-establishes the shared command vector.
-        # Note this runs for identification groups too, which are filtered out
-        # of env_ids above: they must not have their commands stepped
-        # mid-episode (R6), but they still need their phase clocks realigned
-        # (R5), and the two requirements are independent.
-        if due_groups.numel() > 0:
-            self._sync_groups(due_groups)
+        if self.coordination_commands is None:
+            sample_interval = int(self.cfg.commands.resampling_time / self.dt)
+            # R5: grouped envs resample on the GROUP clock, ungrouped ones on their
+            # own episode counter.  Both paths end in _resample_commands; what
+            # differs is who decides when.
+            #
+            # R6 rides on the same mechanism.  An identification group needs its
+            # four passive channels to hold still for a whole excitation plan --
+            # stepping them mid-chirp is exactly the disturbance that makes the
+            # record un-identifiable as SISO -- so it gets a LONGER period rather
+            # than having its resample suppressed.  Suppression was the first
+            # implementation and it was wrong: once R5 made a reset env adopt its
+            # twin's command, an identification group whose twin was also suppressed
+            # never drew a command at all and sat at zeros for the whole run.
+            due = (
+                (self.episode_length_buf % sample_interval == 0)
+                & ~self.grouping.is_grouped
+                & ~self.is_identification_env
+            )
+            due_groups = self.grouping.groups_due(self.group_resample_interval)
+            if due_groups.numel() > 0:
+                due[self.grouping.envs_of_groups(due_groups)] = True
+            env_ids = due.nonzero(as_tuple=False).flatten()
+            self._resample_commands(env_ids)
+            # Phase sync and the desync clear come after the commands, because
+            # _resample_commands is what re-establishes the shared command vector.
+            # Note this runs for identification groups too, which are filtered out
+            # of env_ids above: they must not have their commands stepped
+            # mid-episode (R6), but they still need their phase clocks realigned
+            # (R5), and the two requirements are independent.
+            if due_groups.numel() > 0:
+                self._sync_groups(due_groups)
 
-        # Excitation is written after the resample and before anything reads the
-        # commands, so the excited channel wins over the baseline draw.
-        excitation_jumped = self.response_excitation.step(self.commands_dog)
-        self.steps_since_command_change[excitation_jumped] = 0.0
-        self.performance_metric_sums["excitation_jumps"] += excitation_jumped.float()
+            # Excitation is written after the resample and before anything reads the
+            # commands, so the excited channel wins over the baseline draw.
+            excitation_jumped = self.response_excitation.step(self.commands_dog)
+            self.steps_since_command_change[excitation_jumped] = 0.0
+            self.performance_metric_sums["excitation_jumps"] += excitation_jumped.float()
 
-        # Check-then-advance: see EnvGrouping's clock contract.  Advancing here
-        # rather than beside episode_length_buf is what makes every group due on
-        # its first step instead of holding zeros for a full interval.
-        self.grouping.advance()
-        self._update_consistency_availability()
+            # Check-then-advance: see EnvGrouping's clock contract.  Advancing here
+            # rather than beside episode_length_buf is what makes every group due on
+            # its first step instead of holding zeros for a full interval.
+            self.grouping.advance()
+            self._update_consistency_availability()
 
         self._step_contact_targets()
 
@@ -2683,6 +2801,8 @@ class LeggedRobot(BaseTask):
         if getattr(cfg.domain_rand, "push_use_response_curriculum", True):
             intensity *= float(getattr(self, "domain_disturbance_intensity", 0.0))
         self.robustness_push_mask[env_ids] = False
+        if self.numerical_fault_active:
+            env_ids = env_ids[~self.numerical_fault_mask[env_ids]]
         if cfg.domain_rand.push_robots:
             push_env_ids = env_ids[self.episode_length_buf[env_ids] >= self.next_push_step[env_ids]]
             # Advance clocks even while R8 disables disturbances, avoiding a
@@ -2899,8 +3019,15 @@ class LeggedRobot(BaseTask):
             requires_grad=False,
         )
 
+        # Foot air/contact stopwatches -- see _update_foot_contact_times.
         self.feet_air_time = torch.zeros(
             self.num_envs, self.feet_indices.shape[0], dtype=torch.float, device=self.device, requires_grad=False
+        )
+        self.feet_contact_time = torch.zeros_like(self.feet_air_time)
+        self.last_air_time = torch.zeros_like(self.feet_air_time)
+        self.last_contact_time = torch.zeros_like(self.feet_air_time)
+        self._gait_last_contacts = torch.zeros(
+            self.num_envs, len(self.feet_indices), dtype=torch.bool, device=self.device, requires_grad=False
         )
         self.last_contacts = torch.zeros(
             self.num_envs, len(self.feet_indices), dtype=torch.bool, device=self.device, requires_grad=False
@@ -3280,14 +3407,19 @@ class LeggedRobot(BaseTask):
             if name not in self.wbc_reward_scales:
                 self.wbc_reward_scales[name] = scale
 
-        # Registration below walks this table, but compute_reward walks the
-        # resulting name list in *both* stages -- so a name dropped here is
-        # never computed in stage 1 either, however nonzero its stage-1 scale.
-        # That silently killed raibert_heuristic (the very example the comment
-        # above cites): stage 1 asked for -10.0 and got nothing, leaving no
-        # term with an opinion about where the feet go in x/y.  So drop a name
-        # only when *both* stages have it at zero; a per-stage zero stays in
-        # its own table, and compute_reward multiplies by it.
+        # remove WBC-side zero scales (dt-scaling above turns them into
+        # exactly 0 too, so this also catches those) -- EXCEPT a name stage 1
+        # still wants nonzero. Registration below walks self.wbc_reward_scales
+        # in *both* stages (compute_reward has one reward_names list, not one
+        # per stage -- see global_switch.get_reward_scales, which only
+        # switches which VALUES are used, not which names are computed), so
+        # dropping a name here means it is never computed in stage 1 either,
+        # however nonzero cfg.reward_scales.<name> is. That silently disabled
+        # raibert_heuristic for six weeks (2026-07-26 to 2026-09-05, commit
+        # 15a4581): wbc.py set it to -0.0 meaning "off for stage 2", and it
+        # went missing from stage-1 runs too, with no error and no changed log
+        # key. See config.core.resolve_reward_scales to check which rewards
+        # are actually registered without needing a live run to find out.
         for key in list(self.wbc_reward_scales.keys()):
             if self.wbc_reward_scales[key] == 0 and key not in self.pretrained_reward_scales:
                 self.wbc_reward_scales.pop(key)
@@ -4027,6 +4159,41 @@ class LeggedRobot(BaseTask):
         points[:, :, 0] = grid_x.flatten()
         points[:, :, 1] = grid_y.flatten()
         return points
+
+    def _uses_terrain_height(self):
+        return getattr(self.cfg.terrain, "height_reference", "world") == "terrain"
+
+    def _ground_height_at(self, xy):
+        """World-space ground height at arbitrary XY positions, including after reset."""
+        if self.cfg.terrain.mesh_type == "plane":
+            return torch.zeros_like(xy[..., 0])
+        if self.height_samples is None:
+            raise RuntimeError("Terrain-relative heights require a height grid")
+        t = self.terrain.cfg
+        if t.mesh_type == "trimesh" and t.slope_treshold is not None:
+            raise ValueError("Terrain height queries require unshifted triangles (slope_treshold=None)")
+        return sample_triangle_heights(self.height_samples, xy, t.horizontal_scale,
+                                       t.vertical_scale, t.border_size)
+
+    def _body_ground_reference(self):
+        if not self._uses_terrain_height() or self.cfg.terrain.mesh_type == "plane":
+            return torch.zeros_like(self.base_pos[:, 2])
+        # Query current root pose, not the pre-reset measured_heights cache.
+        if not hasattr(self, "body_height_points"):
+            x = torch.tensor(self.cfg.terrain.measured_points_x, device=self.device)
+            y = torch.tensor(self.cfg.terrain.measured_points_y, device=self.device)
+            gx, gy = torch.meshgrid(x, y, indexing="ij")
+            self.body_height_points = torch.stack((gx.flatten(), gy.flatten(), torch.zeros_like(gx.flatten())), -1)
+        local = self.body_height_points.unsqueeze(0).expand(self.num_envs, -1, -1)
+        points = quat_apply_yaw(self.base_quat.repeat(1, local.shape[1]), local) + self.base_pos.unsqueeze(1)
+        return self._ground_height_at(points[..., :2]).mean(dim=1)
+
+    def _body_height(self):
+        return self.base_pos[:, 2] - self._body_ground_reference()
+
+    def _foot_clearance(self):
+        z = self.foot_positions[:, :, 2]
+        return z - self._ground_height_at(self.foot_positions[..., :2]) if self._uses_terrain_height() else z
 
     def _get_heights(self, env_ids, cfg):
         """Samples heights of the terrain at required points around each robot.

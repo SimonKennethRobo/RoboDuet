@@ -71,6 +71,7 @@ class LeggedRobotDefaults:
         # one per tier, laid out as column bands (see utils/terrain.py).
         # Tier 0 must be 0.0 -- it is the flat ground the R5 twins stand on.
         # None keeps the stock terrain_proportions behaviour.
+        height_reference = "world"  # legacy world / terrain (relative height)
         roughness_tiers = None
         # Share of the columns each tier gets. The flat tier needs the
         # largest share: it has to be wide enough that a twin cannot walk
@@ -291,15 +292,20 @@ class LeggedRobotDefaults:
         gravity_range = [-1.0, 1.0]
         push_robots = True
         push_interval_s = 15
-        # Optional per-env, per-push interval jitter; None keeps the fixed period.
+        # [min, max] seconds; each env independently resamples its own next
+        # push time from this range after every push (and on reset), instead
+        # of every env pushing on the same fixed period. None = fall back to
+        # the fixed push_interval_s (every push_interval_s seconds, no jitter).
         push_interval_s_range = None
-        push_curriculum = False
-        # Legacy RL-MPC runs additionally gate pushes on the response stage.
-        push_use_response_curriculum = True
-        push_curriculum_initial_fraction = 0.0
-        push_curriculum_growth_iterations = 10000
         max_push_vel_xy = 1.
         max_push_ang_vel = 0.6
+        # Ramp push magnitude from push_curriculum_initial_fraction * max_push_*
+        # up to the full max_push_* linearly over push_curriculum_growth_iterations
+        # training iterations. Disabled by default (push applies at full strength
+        # from iteration 0), same as push_robots itself defaulting off downstream.
+        push_curriculum = False
+        push_curriculum_initial_fraction = 0.
+        push_curriculum_growth_iterations = 10000
         randomize_action_delay = True
         randomize_lag_timesteps = True
         lag_timesteps = 6
@@ -309,8 +315,7 @@ class LeggedRobotDefaults:
         dog_obs_frame_drop_prob = 0.0
         # Sensing latency on the measured half of the dog observation, in
         # policy steps of dt (0.02 s).  The range is a per-episode draw --
-        # a robot's constant transport delay -- scaled by the R8
-        # randomisation curriculum; the jitter is redrawn every step.
+        # a robot's constant transport delay. Jitter is redrawn every step.
         randomize_dog_obs_latency = False
         dog_obs_latency_steps_range = [0, 0]
         dog_obs_latency_jitter_steps = 0
@@ -335,16 +340,72 @@ class LeggedRobotDefaults:
         terminal_foot_height = -0.005
         use_terminal_roll_pitch = False
         terminal_body_ori = 0.5
-        terminal_roll_pitch_grace_s = 0.
+        terminal_roll_pitch_grace_s = 0.  # skip the roll/pitch terminal check for this long after a reset
         kappa_gait_probs = 0.07
         gait_force_sigma = 50.
         gait_vel_sigma = 0.5
+        # _reward_feet_impact_vel: exp(-impact^2 / sigma). impact is a sum
+        # over 4 feet of squared touchdown velocity (m/s)^2. Calibrated
+        # against stage1_gait_force_1/3's per-step raw value (~0.015-0.017,
+        # see _reward_feet_impact_vel's docstring) so a typical uncorrected
+        # touchdown lands mid-curve (exp(-0.016/0.02) ~= 0.45) rather than on
+        # either saturation shelf.
         feet_impact_vel_sigma = 0.02
-        raibert_form = "quadratic"
-        raibert_sigma = 0.35
         footswing_height = 0.09
+        # Time constant (s) of the first-order low-pass reference model that
+        # response_consistency tracks: v_ref += (v_cmd - v_ref) * dt / T.
+        response_consistency_T = 0.4
+        # Which gait shaping is active. 'clock' = the stock terms scored
+        # against _step_contact_targets' phase (tracking_contacts_shaped_
+        # force/vel, feet_clearance_cmd_linear, raibert_heuristic).
+        # 'clock_free' = the contact-stopwatch/symmetry terms ported from
+        # robot_lab, for training with dog.observe_clock_inputs off. Set via
+        # config.core.set_gait_reward_mode, which rewrites the reward scales;
+        # writing this field alone changes nothing.
+        gait_reward_mode = "clock"
+        # _reward_gait_sync: exp(-squared timing error / sigma), with each
+        # squared term clipped at max_err^2 so one badly out-of-phase foot
+        # saturates instead of zeroing the whole product.
+        gait_sync_sigma = 0.5
+        gait_sync_max_err = 0.2
+        # _reward_feet_air_time_variance: cap (s) on each measured phase
+        # duration before the variance is taken.
+        gait_air_time_clip = 0.5
+        # _reward_feet_stance_width: exp(-lateral error^2 / sigma).
+        gait_stance_width_sigma = 0.25
+        # _reward_feet_swing_height: body-frame target foot height (m, negative
+        # = below the base) and the gain of the tanh(|v_xy|) swing detector
+        # that replaces the clock's (1 - desired_contact_states) weight.
+        gait_swing_height_target = -0.25
+        gait_swing_tanh_mult = 2.0
+        # How _reward_raibert_heuristic scores placement error.
+        # 'quadratic' = the legacy unbounded cost (needs a NEGATIVE
+        # reward_scales.raibert_heuristic); it enters rew_buf_neg and, under
+        # only_positive_rewards_ji22_style, gates the whole reward.
+        # 'exp' = exp(-err / raibert_sigma), bounded in [0, 1] (needs a
+        # POSITIVE scale); it enters rew_buf_pos and is purely additive.
+        # validate_raibert_form rejects a form/sign mismatch.
+        raibert_form = 'quadratic'
+        # Error (m^2, summed over 4 feet x 2 axes) at which the 'exp' form
+        # decays to 1/e. Calibrated against real stage1_sim2real_abl_{4,5,13,
+        # 14,15} placement errors (raibert_heuristic's episode sum / episode
+        # length / -10, the scale actually in effect for every one of those
+        # runs -- see resolve_reward_scales for why the wbc.py value some of
+        # them appeared to use was never read): ~0.15-0.34 for runs that
+        # trained, ~0.59-0.66 for the ones that stumbled/collapsed early.
+        # 0.35 keeps both ends off the exp() saturation shelf (good=0.20 ->
+        # 0.57, bad=0.65 -> 0.16, a 3.6x spread); an earlier 0.05 guess,
+        # calibrated from an arithmetic error, saturated the entire observed
+        # range to ~0 and would have carried no gradient at all.
+        raibert_sigma = 0.35
 
     class reward_scales:
+        # This is the "stage 1" / "pretrained" reward table -- its sibling is
+        # cfg.wbc.reward_scales ("stage 2" / "wbc"), NOT a value this one
+        # feeds into. Setting a name here does nothing for stage 2, and does
+        # nothing for stage 1 EITHER if that same name sits in cfg.wbc.
+        # reward_scales at exactly 0.0. See config.core.resolve_reward_scales
+        # and the comment above GAIT_REWARD_MODES in config/core.py.
         termination = -0.0
         tracking_lin_vel = 1.0
         tracking_ang_vel = 0.5
@@ -369,6 +430,13 @@ class LeggedRobotDefaults:
         action_smoothness_2 = 0.
         feet_impact_vel = 0.0
         raibert_heuristic = 0.0
+        # Clock-free gait shaping (rewards.gait_reward_mode == 'clock_free').
+        # Zero here; set_gait_reward_mode fills in the live values.
+        gait_sync = 0.0
+        feet_air_time_variance = 0.0
+        joint_mirror = 0.0
+        feet_stance_width = 0.0
+        feet_swing_height = 0.0
 
     class normalization:
         clip_observations = 100.

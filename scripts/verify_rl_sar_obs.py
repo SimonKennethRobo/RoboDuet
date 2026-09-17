@@ -36,7 +36,7 @@ if str(REPO_ROOT) not in sys.path:
 from go1_gym.envs.roboduet.wbc_env_wrapper import KeyboardStage1Wrapper  # noqa: E402
 from go1_gym.utils.global_switch import global_switch  # noqa: E402
 from scripts.load_policy import load_dog_policy, load_env  # noqa: E402
-from scripts.rl_sar_obs import RlSarObservation  # noqa: E402
+from scripts.rl_sar_obs import RlSarObservation, dog_command_values, effective_gait_frequency  # noqa: E402
 
 
 # Operator command schedule. rl_sar drives the commands, so the env is driven to
@@ -60,7 +60,7 @@ def apply_rl_sar_commands(env, params, command):
               "limit_body_pitch", "limit_body_roll", "limit_body_height"]
     clamped = [float(np.clip(value, params[key][0], params[key][1]))
                for value, key in zip(command, limits)]
-    full = clamped + [float(value) for value in params["dog_commands_extra"]]
+    full = dog_command_values(params, clamped)
     inner = env.env
     width = inner.commands_dog.shape[1]
     if len(full) != width:
@@ -99,7 +99,7 @@ def env_resampled_commands(env, params, applied):
     the replay assumes, so that sample is not comparable and gets skipped.
     """
     live = env.env.commands_dog[0].detach().cpu().numpy().astype(np.float64)
-    expected = np.array(list(applied) + list(params["dog_commands_extra"]), dtype=np.float64)
+    expected = dog_command_values(params, applied)
     return not np.allclose(live, expected, atol=1e-5)
 
 
@@ -184,7 +184,7 @@ def main():
         # A constant phase offset is harmless -- the policy only ever sees a
         # phase, and rl_sar zeroes gait_indices when the RL state is entered.
         # What matters is the *rate*, so measure how far the offset moves.
-        rl_sar_gait = np.fmod(rl_sar_gait + policy_dt * float(params["gait_frequency"]), 1.0)
+        rl_sar_gait = np.fmod(rl_sar_gait + policy_dt * effective_gait_frequency(params, applied[:3]), 1.0)
         circular = abs(rl_sar_gait - state["gait_indices"])
         offset = min(circular, 1.0 - circular)
         if gait_offset_reference is None:

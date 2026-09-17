@@ -86,6 +86,7 @@ def test_early_push_ramp_preserves_twin_and_starts_recovery(iteration, expected)
              episode_length_buf=torch.ones(2, dtype=torch.long), next_push_step=torch.zeros(2),
              is_nominal_twin=torch.tensor([True, False]), root_states=torch.zeros(2, 13),
              response_soft_gate_timer=torch.zeros(2, dtype=torch.long), soft_gate_hold_steps=50,
+             numerical_fault_active=False, numerical_fault_mask=torch.zeros(2, dtype=torch.bool),
              gym=NS(set_actor_root_state_tensor_indexed=lambda *args: writes.append(args)))
     env._get_push_curriculum_intensity = lambda: ramp(env)
     env._resample_push_interval = lambda ids, cfg: None

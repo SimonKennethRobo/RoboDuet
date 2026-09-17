@@ -95,6 +95,8 @@ def robot(monkeypatch):
     env.base_quat = env.root_states[:, 3:7]
     env.is_nominal_twin = torch.arange(32) % 4 == 0
     env.domain_disturbance_intensity = 0.
+    env.numerical_fault_active = False
+    env.numerical_fault_mask = torch.zeros(32, dtype=torch.bool)
     env.sim = None
     env.writes = []
     env.gym = SimpleNamespace(set_actor_root_state_tensor_indexed=lambda *args: env.writes.append(args[2].clone()))

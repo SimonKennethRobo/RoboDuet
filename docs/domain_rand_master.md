@@ -21,14 +21,14 @@ Startup prints the effective training mode.
 
 ## Mode boundaries
 
-| Feature | benchmark | sim2real | none |
-| --- | --- | --- | --- |
-| Friction, restitution, base mass/COM, motor strength, Kp/Kd | Configured recipe | Configured recipe | Disabled |
-| Both arm stages' gains, motor strength, link mass/COM, synthetic payload | Configured recipe | Configured recipe | Disabled |
-| Pushes and EE external forces | Configured recipe | Configured recipe | Disabled |
-| Gravity perturbation, dog/arm motor offsets, mount position/rotation error | Disabled | Configured recipe | Disabled |
-| Observation noise, sensing delay/jitter, frame drop, action delay | Disabled | Configured recipe | Disabled |
-| Task commands, arm motion, reset/trajectory curricula, rewards, smoothing, response training | Preserved | Preserved | Preserved |
+| Feature                                                                    | benchmark         | sim2real          | none      |
+| -------------------------------------------------------------------------- | ----------------- | ----------------- | --------- |
+| Friction, restitution, base mass/COM, motor strength, Kp/Kd                | Configured recipe | Configured recipe | Disabled  |
+| Both arm stages' gains, motor strength, link mass/COM, synthetic payload   | Configured recipe | Configured recipe | Disabled  |
+| Pushes and EE external forces                                              | Configured recipe | Configured recipe | Disabled  |
+| Gravity perturbation, dog/arm motor offsets, mount position/rotation error | Disabled          | Configured recipe | Disabled  |
+| Observation noise, sensing delay/jitter, frame drop, action delay          | Disabled          | Configured recipe | Disabled  |
+| Task commands, arm motion, reset/trajectory curricula, rewards, smoothing  | Preserved         | Preserved         | Preserved |
 
 “Configured recipe” respects every existing individual flag and range; it does
 not turn intentionally disabled features on. Both modes preserve normalization
@@ -40,8 +40,7 @@ nominal training reward. It retains task-relevant dynamics variation and removes
 additional hardware uncertainties. Ranges are not automatically widened or
 narrowed: performance claims require validation against the chosen test protocol.
 The current dog-policy evaluator focuses on command tracking and arm disturbance;
-it does not consume `configs/domain_*.json`. This training mode is consequently a
-conservative robustness recipe, not an exact reconstruction of those JSON tiers.
+it owns its scenario overrides independently of the training mode.
 
 ## Evaluation ownership
 
@@ -74,15 +73,85 @@ fall back to `sim2real`, preserving pre-mode behavior. The snapshot loader
 converts old `enabled=False` to `mode="none"` (even if an old mode is present),
 and removes the obsolete field. Old `enabled=True` retains an explicit mode
 or falls back to `sim2real`. Input snapshots are not mutated and newly saved
-configs contain no `enabled` field. Play overrides apply after snapshot loading.
+configs contain no `enabled` field. Full older snapshots also keep sensing latency
+disabled, point payload loads and the old terrain generator when these new fields
+are absent. Play overrides apply after snapshot loading.
+
+## Terrain and physical randomization on v3-stage2
+
+Ported from `33fb403`, `d136c66`, and `b71ecc0` on `feat/rlmpc`.
+The response model, R8 curriculum and nominal twins are not part of this port.
+Terrain is sampled uniformly among `[0.0, 0.02, 0.04]` metre height-noise
+amplitudes at creation and reset. `roughness_tier_weights` controls map column
+shares, not the probability of selecting each tier. Terrain and reset curricula
+are task settings and remain enabled with DR mode `none`; select
+`terrain.mesh_type = "plane"` separately for flat terrain.
+
+Chassis CoM is drawn once at actor creation with a +/-5 cm range. Chassis
+mass resampling reaches the simulator before DOF/root reset writes when
+`randomize_rigids_after_start` is enabled. Go2 assets use the `trunk` body,
+because the first body named `base` is too light for the configured +/-2 kg
+range. Assets without `trunk` retain the first-body fallback; nonpositive mass
+fails explicitly. Arm link mass/CoM remain per-environment creation properties.
+
+Stage-1 synthetic payload weight acts at an EE-frame offset sampled within
+`[0.10, 0.05, 0.05]` m per-axis half-widths, scaled by the existing arm curriculum.
+Sensing latency affects measurements before tracking errors are computed;
+commands and previous actions remain current. It does not change policy widths.
+Repeated reads within a policy step share the same latency jitter. Reset fills
+all latency slots with the new episode's measurements. Play disables latency.
 
 ## Validation
 
 ```bash
-PYTHONPATH=. /opt/miniconda3/envs/isaacgym/bin/python -m pytest -q go1_gym/envs/config/test_domain_rand_master.py go1_gym/response/test_response_config.py
-PATH=/opt/miniconda3/envs/isaacgym/bin:$PATH LD_LIBRARY_PATH=/opt/miniconda3/envs/isaacgym/lib:$LD_LIBRARY_PATH PYTHONPATH=. /opt/miniconda3/envs/isaacgym/bin/python -m pytest -q benchmark/test_stage2_backports.py
+PATH=/opt/miniconda3/envs/isaacgym/bin:$PATH LD_LIBRARY_PATH=/opt/miniconda3/envs/isaacgym/lib:$LD_LIBRARY_PATH PYTHONPATH=. /opt/miniconda3/envs/isaacgym/bin/python -m pytest -q go1_gym/envs/config/test_domain_rand_master.py go1_gym/envs/config/test_domain_rand_features.py
 ```
 
-Tests cover mode masking, retained dynamics/task/layout, recipe isolation,
-checkpoint compatibility, and the evaluator entrypoint's independence from
-candidate training modes. These tests do not measure trained-policy scores.
+These tests check modes, snapshots, latency/reset and terrain generation;
+they do not measure trained-policy performance.
+
+GPU integration smoke (8 environments, 32 steps, no policy training):
+
+```bash
+PATH=/opt/miniconda3/envs/isaacgym/bin:$PATH LD_LIBRARY_PATH=/opt/miniconda3/envs/isaacgym/lib:$LD_LIBRARY_PATH PYTHONPATH=. /opt/miniconda3/envs/isaacgym/bin/python scripts/check_domain_rand_runtime.py --mode sim2real
+```
+
+Use `--mode benchmark` or `--mode none` for the other modes.
+
+## Height reference and uneven-ground rewards
+
+New training uses `terrain.height_reference = "terrain"` in `COMMON_OVERRIDES`.
+Body-height observations (including arm pose and privileged height), dog height
+tracking error, jump reward, height metrics and height termination share
+`base_z - mean(local_ground_heights)`. The fixed yaw-aligned window uses
+`terrain.measured_points_x/y`; samples are queried at the current root pose so
+reset observations cannot reuse the previous episode's ground reference.
+The relative body measurement enters the sensing-delay buffer as one quantity.
+
+Swing clearance and near-ground velocity rewards use each foot's own ground
+height, retaining the 2 cm foot-radius offset. The separate triangle query
+matches the regular grid's 00--11 diagonal, rather than bilinear interpolation
+or the old minimum-of-three query. New trimesh training sets
+`terrain.slope_treshold = None` to prevent vertex relocation; the legacy
+`_get_heights()` scan is unchanged. Terrain-relative queries reject trimeshes
+with slope relocation enabled instead of silently reporting an inaccurate height.
+
+Full old checkpoints without the reference field restore `"world"`, including
+old metric/termination behavior. Stage-2 dog loading also restores the field.
+New bundles serialize the field in parameters.pkl and RL-SAR YAML. On ground at
+z=0, world and relative heights coincide. On elevated/uneven terrain the RL-SAR
+state estimator must supply height above local ground; the export metadata does
+not modify the external deployment executable. Existing world-frame odometry z
+is not sufficient there. Observation widths are unchanged; new terrain semantics
+require new training or an explicitly validated fine-tuning run.
+
+`perf_base_height_signed_error_m` is actual minus target: negative means lower
+than commanded. Use it alongside RMSE to distinguish persistent squat bias from
+oscillation. No reward weights, push settings or hard-reset fractions were changed
+by the height fix.
+
+Height regression tests:
+
+```bash
+PATH=/opt/miniconda3/envs/isaacgym/bin:$PATH LD_LIBRARY_PATH=/opt/miniconda3/envs/isaacgym/lib:$LD_LIBRARY_PATH PYTHONPATH=. /opt/miniconda3/envs/isaacgym/bin/python -m pytest -q go1_gym/envs/config/test_height_reference.py
+```

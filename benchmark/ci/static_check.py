@@ -255,7 +255,9 @@ def _validate_candidate_layout() -> None:
         return
 
     for path in sorted(candidate_root.iterdir()):
-        if path.name == ".gitignore" or not path.is_dir():
+        # Hidden directories and local symlink collections are administrative
+        # candidate indexes, not checked-in runnable bundles.
+        if path.name.startswith(".") or path.is_symlink() or not path.is_dir():
             continue
         if _is_date_like_dir(path.name):
             raise ValueError(

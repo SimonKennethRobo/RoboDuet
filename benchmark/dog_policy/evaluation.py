@@ -19,6 +19,7 @@ from go1_gym.envs.config import (
     build_roboduet_config,
     configure_privileged_obs_dims,
     recompute_observation_dims,
+    restore_dog_observation_layout,
 )
 from go1_gym.envs.config.wbc import ROBODUET_OVERRIDES
 from go1_gym.envs.config.domain_randomization import configure_benchmark_domain_randomization
@@ -295,6 +296,14 @@ class BenchmarkHistoryWrapper(HistoryWrapper):
 
     def _detect_dog_obs_mode(self) -> str:
         saved = int(self.benchmark_dog_dims["dog_num_observations"])
+        legacy_env = self._checkpoint_cfg.get("env", {})
+        if (
+            "observation_layout_version" not in self._checkpoint_cfg.get("dog", {})
+            and not legacy_env.get("ext_est_obs", True)
+        ):
+            dropped = bool(legacy_env.get("del_ext_obs_dim", False))
+            if saved == self._runtime_dog_obs_dim - (7 if dropped else 0):
+                return "legacy_no_estimator_dropped" if dropped else "legacy_no_estimator_zeroed"
         if saved == self._runtime_dog_obs_dim:
             return "native"
 
@@ -410,19 +419,34 @@ class BenchmarkHistoryWrapper(HistoryWrapper):
         arm_vel = b.dof_vel[:, arm_slice] * b.obs_scales.dof_vel
         return torch.cat((obs, arm_pos, arm_vel), dim=-1)
 
-    def _legacy_no_response_observation(self) -> torch.Tensor:
-        """Old checkpoints without response blocks keep only the leading legacy segment."""
-        obs, _ = self.env.get_dog_observations()
-        target = int(self.benchmark_dog_dims["dog_num_observations"])
-        if obs.shape[1] < target:
-            raise AssertionError(
-                f"legacy_no_response mode expects {target} obs, but runtime returns {obs.shape[1]}"
-            )
-        return obs[:, :target]
+    def _adapt_estimator_observation(self, obs: torch.Tensor) -> torch.Tensor:
+        # Match the historical ext_est_obs split using runtime segment names.
+        excluded = {
+            "base_lin_vel": (0, 1, 2),
+            "body_pose_actual": (0,),
+            "body_pose_error": (0,),
+            "velocity_error": (0, 1),
+        }
+        indices = []
+        offset = 0
+        for name, width, *_ in self.env._dog_obs_layout():
+            indices.extend(offset + i for i in excluded.get(name, ()))
+            offset += width
+        if offset != obs.shape[1] or len(indices) != 7:
+            raise AssertionError("Runtime dog layout cannot reconstruct legacy estimator channels")
+        if self._dog_obs_mode == "legacy_no_estimator_dropped":
+            keep = [i for i in range(offset) if i not in indices]
+            return obs[:, keep]
+        obs = obs.clone()
+        obs[:, indices] = 0.0
+        return obs
 
     def get_dog_observations(self):
         if self._dog_obs_mode == "native":
             obs, privileged_obs = self.env.get_dog_observations()
+        elif self._dog_obs_mode.startswith("legacy_no_estimator_"):
+            obs, privileged_obs = self.env.get_dog_observations()
+            obs = self._adapt_estimator_observation(obs)
         elif self._dog_obs_mode == "native_plus_ee_pose":
             obs, privileged_obs = self.env.get_dog_observations()
             arm_state_width = 2 * self.env.num_actions_arm
@@ -665,6 +689,13 @@ CRITICAL_COMPAT_CFG_PATHS = [
     "env.observe_only_lin_vel",
     "env.observe_yaw",
     "env.observe_contact_states",
+    "env.ext_est_obs",
+    "env.del_ext_obs_dim",
+    "dog.observation_layout_version",
+    "dog.observe_clock_inputs",
+    "dog.observe_lin_vel",
+    "dog.observe_pose_actual",
+    "dog.observe_track_error",
     "wbc.use_vision",
     "use_rot6d",
 ]
@@ -775,7 +806,20 @@ def _load_cfg_from_pkl(logdir: str, robot: Optional[str] = None) -> ConfigNode:
         checkpoint_asset_file = cfg_snapshot.get("asset", {}).get("file")
         apply_config_snapshot(cfg, cfg_snapshot, drop_unknown=True)
     _ensure_asset_file(cfg, robot=robot, checkpoint_asset_file=checkpoint_asset_file)
-    recompute_observation_dims(cfg)
+    if "observation_layout_version" in cfg_snapshot.get("dog", {}):
+        # Checkpoint was saved with the switch-aware layout: trust it to
+        # reconcile exactly, and surface a real mismatch instead of masking
+        # it behind the generic legacy-adapter error.
+        restore_dog_observation_layout(cfg, cfg_snapshot)
+    else:
+        # Predates the dog.* observation-switch layout (e.g. arm.trajectory-era
+        # checkpoints); BenchmarkHistoryWrapper's legacy adapters reconstruct
+        # the policy-facing observation for these instead.
+        cfg.dog.observation_layout_version = 1
+        cfg.dog.observe_clock_inputs = cfg_snapshot.get("env", {}).get("observe_clock_inputs", True)
+        for name in ("observe_lin_vel", "observe_pose_actual", "observe_track_error"):
+            setattr(cfg.dog, name, cfg_snapshot.get("dog", {}).get(name, True))
+        recompute_observation_dims(cfg)
     return cfg
 
 
@@ -1237,10 +1281,13 @@ def _eval_loop_parallel(
         acc.add_sq_err("yaw", ang[:, 2], cmd[:, 2])
         lin_vel_err = torch.sum(torch.square(cmd[:, :2] - vel[:, :2]), dim=1)
         acc.add_sq("lin_vel_xy", lin_vel_err)
-        if ref_xi is not None:
-            # Preserve this branch's prescribed second-order R2 trajectory.
-            # Keep the two velocity channels for historical metric comparability.
-            acc.add_sq("response_consistency", torch.sum(torch.square(vel[:, :2] - ref_xi[:, :2]), dim=1))
+        if vel_ref is not None:
+            # Predictable-plant metric: deviation of the realised base velocity
+            # from the first-order reference model of the command
+            # (v_ref += (v_cmd - v_ref) * dt / T). Same quantity as the
+            # response_consistency reward -- low = leg response tracks a
+            # fixed-time-constant linear plant, which upstream v_ff needs.
+            acc.add_sq("response_consistency", torch.sum(torch.square(vel[:, :2] - vel_ref), dim=1))
         yaw_err = torch.square(cmd[:, 2] - ang[:, 2])
         acc.add_val("tracking_lin_vel_reward", torch.exp(-lin_vel_err / base.cfg.rewards.tracking_sigma))
         acc.add_val("tracking_ang_vel_reward", torch.exp(-yaw_err / base.cfg.rewards.tracking_sigma_yaw))

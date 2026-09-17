@@ -15,6 +15,35 @@ simulation. Keep it free of IsaacGym imports: sim2sim must run without it.
 import numpy as np
 
 
+def effective_gait_frequency(params, velocity_command):
+    """Match the deployment's dynamic-gait stand rule; preserve fixed gait."""
+    if "gait_frequency" not in params:
+        return 0.0
+    dynamic = params.get("use_dynamic_gait", len(params.get("dog_commands_scale", [])) > 6)
+    if dynamic and np.linalg.norm(velocity_command) < 0.1:
+        return 0.0
+    return float(params["gait_frequency"])
+
+
+def dog_command_values(params, command):
+    command = np.asarray(command, dtype=np.float64)
+    if params.get("omit_height", False) and command.size >= 6:
+        command = np.delete(command, 5)
+    # Older, already exported bundles store these values as named fields.
+    # New exports also carry the packed list consumed by current rl_sar.
+    extra = np.array(params.get("dog_commands_extra", [
+        params.get("gait_frequency", 0.0),
+        params.get("footswing_height", 0.0),
+        params.get("stance_width", 0.0),
+        params.get("stance_length", 0.0),
+        params.get("gait_duration", 0.5),
+    ]), dtype=np.float64, copy=True)
+    if extra.size:
+        extra[0] = effective_gait_frequency(params, command[:3])
+    values = np.concatenate([command, extra])
+    return values[: len(params["dog_commands_scale"])]
+
+
 def quat_rotate_inverse_np(quat_xyzw, vec):
     """IsaacGym's quat_rotate_inverse, matching rl_sar's QuatRotateInverse."""
     x, y, z, w = quat_xyzw
@@ -42,10 +71,30 @@ class RlSarObservation:
     """
 
     def __init__(self, params):
+        # base_height is already in the bundle height_reference: world z for
+        # legacy bundles, or height above local ground for terrain bundles.
+        # This observation builder does not estimate the ground surface.
         self.p = params
         self.num_leg = int(params["num_leg_dofs"])
         self.num_arm = int(params["num_arm_dofs"])
         self.default_dof_pos = np.array(params["default_dof_pos"], dtype=np.float64)
+        # Compact bundles omit disabled terms entirely. Legacy bundles keep
+        # their trained zero slots and are handled by term() below.
+        if int(params.get("dog_observation_layout_version", 1)) == 2:
+            switches = {
+                "observe_clock_inputs": ("roboduet/clock_inputs",),
+                "observe_lin_vel": ("roboduet/base_lin_vel",),
+                "observe_pose_actual": ("roboduet/body_pose_actual",),
+                "observe_track_error": ("roboduet/body_pose_error", "roboduet/velocity_error"),
+            }
+            for switch, terms in switches.items():
+                for term in terms:
+                    if (term in params["observations"]) != bool(params[switch]):
+                        raise ValueError(f"{switch} disagrees with observations term {term}")
+        width = sum(self.widths()[name] for name in params["observations"])
+        if width != int(params["num_observations"]):
+            raise ValueError(f"Observation terms have width {width}, expected {params['num_observations']}")
+
 
     def widths(self):
         p = self.p
@@ -56,13 +105,17 @@ class RlSarObservation:
             "roboduet/leg_dof_pos": self.num_leg,
             "roboduet/leg_dof_vel": self.num_leg,
             "roboduet/leg_actions": self.num_leg,
-            "roboduet/dog_commands": len(p["dog_commands_scale"]),
-            "roboduet/arm_commands": int(p["arm_num_commands"]),
+            "roboduet/dog_commands": len(p.get("dog_commands_scale", [])),
+            "roboduet/arm_commands": int(p.get("arm_num_commands", 0)),
+            "robot_lab/velocity_pose_commands": 7,
+            "robot_lab/arm_dof_vel": self.num_arm,
             "roboduet/clock_inputs": 4,
             "roboduet/base_lin_vel": 3,
-            "roboduet/body_pose_actual": 3,
-            "roboduet/body_pose_error": 3,
+            "roboduet/body_pose_actual": 2 if p.get("omit_height", False) else 3,
+            "roboduet/body_pose_error": 2 if p.get("omit_height", False) else 3,
             "roboduet/velocity_error": 3,
+            "roboduet/base_roll": 1,
+            "roboduet/base_pitch": 1,
             "roboduet/arm_dof_pos": self.num_arm,
             "roboduet/arm_dof_vel": self.num_arm,
         }
@@ -76,6 +129,12 @@ class RlSarObservation:
             return quat_rotate_inverse_np(s["quat"], np.array([0.0, 0.0, -1.0]))
         if name == "ang_vel":
             return s["ang_vel"] * p["ang_vel_scale"]
+        if name == "robot_lab/velocity_pose_commands":
+            return np.array([s["cmd_x"], s["cmd_y"], s["cmd_yaw"],
+                             p["base_height_target"] + s["cmd_height"],
+                             s["cmd_roll"], s["cmd_pitch"], 0.0])
+        if name == "robot_lab/arm_dof_vel":
+            return s["dof_vel"][num_leg:num_leg + num_arm] * p["arm_dof_vel_scale"]
         if name == "roboduet/leg_dof_pos":
             return (s["dof_pos"][:num_leg] - self.default_dof_pos[:num_leg]) * p["dof_pos_scale"]
         if name == "roboduet/leg_dof_vel":
@@ -88,16 +147,21 @@ class RlSarObservation:
         if name == "roboduet/arm_dof_vel":
             return s["dof_vel"][num_leg:num_leg + num_arm] * p["dof_vel_scale"]
         if name == "roboduet/dog_commands":
-            cmd = np.concatenate([
-                [s["cmd_x"], s["cmd_y"], s["cmd_yaw"],
-                 s["cmd_pitch"], s["cmd_roll"], s["cmd_height"]],
-                np.array(p["dog_commands_extra"], dtype=np.float64),
-            ])
+            cmd = dog_command_values(p, [s["cmd_x"], s["cmd_y"], s["cmd_yaw"],
+                                        s["cmd_pitch"], s["cmd_roll"], s["cmd_height"]])
             return cmd * np.array(p["dog_commands_scale"], dtype=np.float64)
         if name == "roboduet/arm_commands":
-            return np.zeros(int(p["arm_num_commands"]))
+            return np.asarray(s.get("arm_commands", np.zeros(int(p["arm_num_commands"]))), dtype=np.float64)
+        if name == "roboduet/base_roll":
+            return quat_to_euler_np(s["quat"])[0:1]
+        if name == "roboduet/base_pitch":
+            return quat_to_euler_np(s["quat"])[1:2]
         if name == "roboduet/clock_inputs":
-            phases, offsets, bounds = p["gait_phases"]
+            gait_phases = p["gait_phases"]
+            phases, offsets, bounds = (
+                [gait_phases[key] for key in ("phases", "offsets", "bounds")]
+                if isinstance(gait_phases, dict) else gait_phases
+            )
             duration = float(p["gait_duration"])
             gait = s["gait_indices"]
             foot = [gait + phases + offsets + bounds, gait + offsets, gait + bounds, gait + phases]
@@ -119,17 +183,19 @@ class RlSarObservation:
             if not p.get("observe_pose_actual", True):
                 return np.zeros(3)
             euler = quat_to_euler_np(s["quat"])
-            return np.array([s["base_height"] * p["body_height_cmd_scale"],
-                             euler[1] * p["body_pitch_cmd_scale"],
-                             euler[0] * p["body_roll_cmd_scale"]])
+            values = np.array([s["base_height"] * p["body_height_cmd_scale"],
+                               euler[1] * p["body_pitch_cmd_scale"],
+                               euler[0] * p["body_roll_cmd_scale"]])
+            return values[1:] if p.get("omit_height", False) else values
         if name == "roboduet/body_pose_error":
             if not p.get("observe_track_error", True):
                 return np.zeros(3)
             euler = quat_to_euler_np(s["quat"])
             height_target = float(p["base_height_target"]) + s["cmd_height"]
-            return np.array([(height_target - s["base_height"]) * p["body_height_cmd_scale"],
-                             (s["cmd_pitch"] - euler[1]) * p["body_pitch_cmd_scale"],
-                             (s["cmd_roll"] - euler[0]) * p["body_roll_cmd_scale"]])
+            values = np.array([(height_target - s["base_height"]) * p["body_height_cmd_scale"],
+                               (s["cmd_pitch"] - euler[1]) * p["body_pitch_cmd_scale"],
+                               (s["cmd_roll"] - euler[0]) * p["body_roll_cmd_scale"]])
+            return values[1:] if p.get("omit_height", False) else values
         if name == "roboduet/velocity_error":
             if not p.get("observe_track_error", True):
                 return np.zeros(3)

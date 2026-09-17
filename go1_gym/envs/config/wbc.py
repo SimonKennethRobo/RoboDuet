@@ -183,6 +183,8 @@ COMMON_OVERRIDES = {
     "dog.dog_num_commands": 6,
     "dog.use_adaptation_module": False,
     "dog.add_obs_noise": True,
+    "dog.observation_layout_version": 2, # Version 2 removes disabled observation terms; version 1 only set to zero.
+    "dog.observe_clock_inputs": True,
     "dog.observe_lin_vel": True,
     "dog.observe_pose_actual": True,
     "dog.observe_track_error": True,
@@ -349,6 +351,7 @@ COMMON_OVERRIDES = {
     # halved episode length before stage 4 recovered it.
     "reward_scales.domain_consistency": -0.5,
     "reward_scales.loco_energy": -0.00004,
+    "reward_scales.response_consistency": -0.05,
     "domain_rand.push_robots": True,
     "domain_rand.max_push_vel_xy": 1.0,
     "domain_rand.max_push_ang_vel": 1.0,
@@ -360,7 +363,12 @@ COMMON_OVERRIDES = {
     "terrain.reset_curriculum_tracking_threshold": 0.35,
     "terrain.reset_curriculum_growth_iterations": 15000,
 
+    # v3 stays on flat ground for stage 1/2 by default (see docs/rlmpc-v3 scope
+    # notes); a recipe (e.g. configs/coordination_6gpu.json) can still opt a
+    # specific run into the benchmark branch's trimesh/height-randomized
+    # terrain by overriding mesh_type/height_reference/measure_heights itself.
     "terrain.mesh_type": "plane",
+    "terrain.slope_treshold": None,  # preserve regular-grid triangles for height queries, if trimesh is enabled
     "terrain.measure_heights": False,
     "terrain.roughness_tiers": [0.0, 0.02, 0.04],
     # Half the map is flat: a twin has to stay on it for a whole episode,
@@ -508,6 +516,11 @@ STAGE2_OVERRIDES = {
     "wbc.reward_scales.arm_contact": -1.0,
     "wbc.reward_scales.jump": 5.0,
     "wbc.reward_scales.hip_action_l2": -0.05,
+    # Stage 2's OWN value for this name -- it does not derive from, and does
+    # not gate, reward_scales.raibert_heuristic in wtw.py (stage 1's value).
+    # The two are co-equal sibling tables; see the comment above
+    # config.core.resolve_reward_scales for how registration and value
+    # selection actually work.
     "wbc.reward_scales.raibert_heuristic": -1.0,
     "wbc.rewards.terminal_body_height": 0.17,
     "wbc.rewards.use_terminal_body_height": True,
@@ -660,11 +673,18 @@ GOAL_REACHING_OVERRIDES = {
     # front, slightly up.
     "wbc.goal_reaching.trajectory.anchor_offset_body": [0.36, 0.0, 0.10],
     # trajectory bank / batch sizing (see modules/curriculum.py TrajectoryBank).
-    # max_gamma_points bounds L/ds_grid; hardest cell L~10m at ds_grid=0.01 with
-    # per-sample variation, so 1536 leaves headroom.
-    "wbc.goal_reaching.trajectory.max_gamma_points": 1536,
+    # max_gamma_points bounds L/ds_grid. The 5 m planar-travel, 0--1.5 m
+    # ground-relative and high-curvature hardest cell reached 1515 points in
+    # the fixed 384-row audit; 2048 prevents benchmark reference truncation.
+    "wbc.goal_reaching.trajectory.max_gamma_points": 2048,
     "wbc.goal_reaching.trajectory.max_tl_points": 512,
     "wbc.goal_reaching.trajectory.bank_per_cell": 64,
+    # Seed for the pre-generated trajectory bank. Training leaves this at 0;
+    # evaluation (benchmark/wbc/) sets a different value so the policy is scored
+    # on trajectories drawn from the same distribution but NOT the ones it
+    # trained on -- with a fixed seed the bank is byte-identical every run, so
+    # a same-seed eval is a training-set score.
+    "wbc.goal_reaching.trajectory.bank_seed": 0,
     # M10 curriculum grid
     "wbc.goal_reaching.trajectory.n_levels_A": 6,
     "wbc.goal_reaching.trajectory.n_levels_B": 6,
@@ -695,15 +715,11 @@ GOAL_REACHING_OVERRIDES = {
     # reach_radius, which means the same thing in every curriculum cell.
     "wbc.goal_reaching.trajectory.terminate_d_lat": 1.00,  # lateral err (m)
     # timing is a FRACTION of the path length, not metres. |s - s_ref| is an
-    # arc length bounded by L, and L spans 2.0 m (easiest cell) to 9.0 m
-    # (hardest) -- a fixed metre threshold would mean 75% of the path on the
-    # easy end and 17% on the hard end, i.e. effectively disabled early and
-    # strict late, by accident rather than by design. As a fraction it is
-    # cell-independent, and because the time law normalizes L to T seconds,
-    # timing_err / L is exactly "fraction of the episode's duration behind
-    # schedule": 0.70 ~ 5.6 s of lag at the default T = 8 s, in every cell.
-    # 0.70 is the same ~p99-of-baseline calibration as terminate_d_lat (the
-    # baseline's p99 lag is 1.35 m on the easiest cell, whose L is 2.0 m).
+    # arc length bounded by L, so a fixed metre threshold would become
+    # accidentally stricter as paths get longer. The time-law generator can
+    # extend duration to respect its declared speed/acceleration limits;
+    # timing_err / L therefore remains a path-progress lag, not a fixed number
+    # of seconds. 0.70 retains the original ~p99-of-baseline calibration.
     "wbc.goal_reaching.trajectory.terminate_timing_frac": 0.70,
     # Grace period after a reset during which none of the above fire. The arm
     # starts the episode wherever the reset pose left it, not on the path, so

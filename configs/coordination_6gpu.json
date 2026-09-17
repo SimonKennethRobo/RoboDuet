@@ -1,0 +1,141 @@
+{
+  "training": {
+    "seed": 11,
+    "num_envs": 4096,
+    "num_learning_iterations": 35000,
+    "num_steps_per_env": 24,
+    "num_mini_batches": 4,
+    "save_interval": 2500,
+    "learning_rate": 0.0005,
+    "schedule": "adaptive",
+    "desired_kl": 0.01,
+    "entropy_coef": 0.01
+  },
+  "common": {
+    "env.record_video": false,
+    "asset.render_sphere": false,
+    "terrain.mesh_type": "trimesh",
+    "terrain.height_reference": "terrain",
+    "terrain.roughness_tiers": [0.0, 0.02, 0.04],
+    "terrain.roughness_tier_weights": [0.5, 0.25, 0.25],
+    "terrain.reset_mode": "fixed_mixture",
+    "terrain.reset_mix_hard_fraction": 0.2,
+    "terrain.reset_mix_start_iteration": 4000,
+    "terrain.reset_mix_ramp_iterations": 8000,
+    "domain_rand.mode": "sim2real",
+    "domain_rand.push_robots": true,
+    "domain_rand.max_push_vel_xy": 1.0,
+    "domain_rand.max_push_ang_vel": 1.0,
+    "domain_rand.push_curriculum": true,
+    "domain_rand.push_curriculum_initial_fraction": 0.0,
+    "domain_rand.push_curriculum_growth_iterations": 8000,
+    "domain_rand.push_interval_s_range": [4.0, 10.0],
+    "domain_rand.randomize_dog_obs_latency": true,
+    "domain_rand.dog_obs_latency_steps_range": [0, 1],
+    "rewards.attitude_command_convention": "rpy",
+    "commands.body_pitch_range": [-0.3, 0.3],
+    "commands.limit_body_pitch": [-0.3, 0.3],
+    "commands.body_roll_range": [-0.2, 0.2],
+    "commands.limit_body_roll": [-0.2, 0.2],
+    "commands.body_height_cmd": [-0.05, 0.05],
+    "commands.limit_body_height": [-0.05, 0.05],
+    "commands.gait_frequency_cmd_range": [2.0, 3.5],
+    "commands.limit_gait_frequency": [2.0, 3.5],
+    "commands.limit_vel_x": [-1.5, 1.5],
+    "commands.limit_vel_y": [-1.0, 1.0],
+    "commands.limit_vel_yaw": [-2.0, 2.0],
+    "commands.coordination.enabled": true,
+    "commands.coordination.velocity_schedule": [[0, 10.0], [8000, 10.0], [16000, 8.0], [24000, 6.0]],
+    "commands.coordination.final_velocity_range_s": [6.0, 10.0],
+    "commands.coordination.pose_range_s": [8.0, 12.0],
+    "commands.coordination.gait_range_s": [15.0, 20.0],
+    "commands.coordination.short_fraction": 0.0,
+    "commands.coordination.short_start_iteration": 20000,
+    "commands.coordination.short_range_s": [3.0, 4.0],
+    "commands.coordination.standing_probability": 0.1,
+    "commands.coordination.transition_window_s": 1.0,
+    "env.stage1_arm_ramp_iterations": 20000,
+    "env.stage1_arm_fixed_fraction": 0.1,
+    "env.stage1_arm_saturation_fraction": 0.8,
+    "env.stage1_arm_accel_resample_time_s": 0.02,
+    "env.stage1_arm_max_vel": 5.0,
+    "env.stage1_arm_max_accel": 10.0,
+    "env.coordination_arm.enabled": true,
+    "env.coordination_arm.fractions": [0.7, 0.2, 0.1],
+    "env.coordination_arm.random_speed_scales": [0.35, 0.7, 1.0],
+    "env.coordination_arm.structured_frequency_hz": [0.12, 0.45],
+    "env.coordination_arm.workspace_fraction": 0.8,
+    "env.coordination_arm.target_gain": 6.0,
+    "env.coordination_arm.seed": 1234,
+    "env.coordination_arm.max_joint_velocity": [5.0, 5.0, 5.0, 5.0, 5.0, 5.0],
+    "env.coordination_arm.max_joint_acceleration": [10.0, 10.0, 10.0, 10.0, 10.0, 10.0],
+    "reward_scales.tracking_lin_vel": 1.5,
+    "reward_scales.tracking_ang_vel": 1.0,
+    "reward_scales.orientation_control": -7.5,
+    "reward_scales.jump": 20.0
+  },
+  "experiments": {
+    "A": {
+      "description": "综合保底：长驻留、70% 随机摆臂",
+      "overrides": {
+        "commands.coordination.velocity_schedule": [[0, 10.0]],
+        "commands.coordination.final_velocity_range_s": [10.0, 10.0]
+      }
+    },
+    "B": {
+      "description": "精度强化：更强速度、姿态和高度跟踪",
+      "overrides": {
+        "reward_scales.tracking_lin_vel": 2.0,
+        "reward_scales.tracking_ang_vel": 1.25,
+        "reward_scales.orientation_control": -10.0,
+        "reward_scales.jump": 30.0
+      }
+    },
+    "C": {
+      "description": "快速摆臂与启停换向：80% 随机运动、30% 短驻留群",
+      "overrides": {
+        "reward_scales.tracking_lin_vel": 2.0,
+        "reward_scales.tracking_ang_vel": 1.25,
+        "reward_scales.orientation_control": -10.0,
+        "reward_scales.jump": 30.0,
+        "env.coordination_arm.fractions": [0.8, 0.1, 0.1],
+        "env.stage1_arm_accel_resample_time_s": 0.1,
+        "commands.coordination.short_fraction": 0.3
+      }
+    },
+    "D": {
+      "description": "户外鲁棒：原推扰频率、0–40 ms 状态迟滞",
+      "overrides": {
+        "domain_rand.push_interval_s_range": [1.0, 8.0],
+        "domain_rand.dog_obs_latency_steps_range": [0, 2],
+        "env.coordination_arm.fractions": [0.8, 0.1, 0.1]
+      }
+    },
+    "E": {
+      "description": "大幅摆臂下持续精跟踪：保留长驻留，强化姿态和高度",
+      "overrides": {
+        "reward_scales.tracking_lin_vel": 2.0,
+        "reward_scales.tracking_ang_vel": 1.25,
+        "reward_scales.orientation_control": -12.5,
+        "reward_scales.jump": 35.0,
+        "env.coordination_arm.fractions": [0.8, 0.1, 0.1],
+        "env.stage1_arm_accel_resample_time_s": 0.1,
+        "commands.coordination.velocity_schedule": [[0, 10.0]],
+        "commands.coordination.final_velocity_range_s": [10.0, 10.0]
+      }
+    },
+    "F": {
+      "description": "户外精度折中：强化跟踪、较长迟滞、持续随机摆臂",
+      "overrides": {
+        "reward_scales.tracking_lin_vel": 2.0,
+        "reward_scales.tracking_ang_vel": 1.25,
+        "reward_scales.orientation_control": -10.0,
+        "reward_scales.jump": 30.0,
+        "domain_rand.push_interval_s_range": [2.0, 8.0],
+        "domain_rand.dog_obs_latency_steps_range": [0, 2],
+        "env.coordination_arm.fractions": [0.8, 0.1, 0.1],
+        "env.stage1_arm_accel_resample_time_s": 0.1
+      }
+    }
+  }
+}

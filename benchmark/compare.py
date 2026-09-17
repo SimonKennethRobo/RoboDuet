@@ -13,6 +13,9 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
 PRIMARY_METRICS = [
+    ("ee_pos_rmse_m", "EE pos RMSE", "lower"),
+    ("ee_rot_rmse_rad", "EE rot RMSE", "lower"),
+    ("completion_rate", "completion rate", "higher"),
     ("lin_vel_x_rmse", "vx RMSE", "lower"),
     ("ang_vel_yaw_rmse", "yaw RMSE", "lower"),
     ("fall_rate", "fall rate", "lower"),
@@ -51,16 +54,27 @@ def _finite_values(rows: Iterable[dict], key: str) -> List[float]:
 
 
 def _metric_average(rows: Iterable[dict], metric: str) -> Optional[float]:
+    rows = list(rows)
     values = _finite_values(rows, metric)
+    if not values and metric == "completion_rate":
+        values = [float(bool(row["completed"])) for row in rows if "completed" in row]
+    if not values and metric == "fall_rate":
+        values = [float(bool(row["fall"])) for row in rows if "fall" in row]
     if not values:
         return None
     return mean(values)
 
 
+def _preferred_result_rows(scenarios):
+    if scenarios.get("wbc_trajectories"):
+        return scenarios["wbc_trajectories"]
+    return [row for scenario_rows in scenarios.values() for row in scenario_rows]
+
+
 def _summary_rows(results: Dict[str, Dict[str, List[dict]]]) -> Dict[str, Dict[str, Any]]:
     summaries = {}
     for run_name, scenarios in results.items():
-        rows = [row for scenario_rows in scenarios.values() for row in scenario_rows]
+        rows = _preferred_result_rows(scenarios)
         summary = {
             "candidate": run_name,
             "scenarios": len(scenarios),
@@ -77,8 +91,7 @@ def _aggregate_summary(results: Dict[str, Dict[str, List[dict]]], label: str) ->
     scenario_count = 0
     for scenarios in results.values():
         scenario_count += len(scenarios)
-        for rows in scenarios.values():
-            all_rows.extend(rows)
+        all_rows.extend(_preferred_result_rows(scenarios))
     summary = {
         "candidate": label,
         "scenarios": scenario_count,

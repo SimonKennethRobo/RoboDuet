@@ -20,7 +20,7 @@ body_pitch_cmd = 0.0
 body_roll_cmd = 0.0
 body_height_delta_cmd = 0.0
 # gait params (only used when use_dynamic_gait=True)
-gait_freq_cmd = 4.0
+gait_freq_cmd = 2.0
 footswing_height_cmd = 0.06
 stance_width_cmd = 0.3
 stance_length_cmd = 0.4
@@ -46,10 +46,10 @@ def maybe_export_rl_sar(args, logdir, ckpt_id):
         return
     import os
 
-    try:
-        from scripts.export_rl_sar import export
+    from scripts.export_rl_sar import export
 
-        config_name = args.rl_sar_config_name or os.path.basename(os.path.normpath(logdir))
+    config_name = args.rl_sar_config_name or os.path.basename(os.path.normpath(logdir))
+    try:
         out_dir = export(
             logdir,
             args.rl_sar_root,  # None -> <logdir>/rl_sar
