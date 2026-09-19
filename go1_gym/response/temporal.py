@@ -8,6 +8,9 @@ starting a simulator.  ``dog_ac.py`` imports the class from here.
 
 from __future__ import annotations
 
+import warnings
+
+import torch
 import torch.nn as nn
 
 
@@ -63,6 +66,20 @@ class TemporalEncoder(nn.Module):
                 raise ValueError(
                     "the TCN encoder needs a pure (T, C) history; it cannot be used "
                     "with the adaptation module's concatenated privileged vector"
+                )
+            # The convolutions below need cuDNN to be usable at training scale.
+            # Without it torch falls back to a native kernel and one dilated
+            # layer costs ~8.5 s at PPO minibatch shape (24576, 88, 30) against
+            # 2.96 ms with cuDNN, which once turned a 4 s iteration into 898 s.
+            # Nothing raises in that case, so warn rather than let a run quietly
+            # take months.  Gated on CUDA so CPU unit tests stay quiet.
+            if torch.cuda.is_available() and not torch.backends.cudnn.is_available():
+                warnings.warn(
+                    "temporal_encoder='tcn' on a CUDA build without cuDNN "
+                    f"(torch {torch.__version__}): nn.Conv1d will use the slow "
+                    "native fallback, roughly 250x slower per iteration. Use an "
+                    "env whose torch reports backends.cudnn.is_available().",
+                    RuntimeWarning, stacklevel=2,
                 )
             layers = []
             channels = int(self._args.tcn_channels)

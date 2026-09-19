@@ -5,6 +5,8 @@ a comment.  The one that matters most is the history layout: an interleaved
 buffer would not fail, it would silently make the encoder's reshape wrong.
 """
 
+import warnings
+
 import pytest
 import torch
 import torch.nn as nn
@@ -57,6 +59,26 @@ def test_tcn_is_far_smaller_than_the_flat_first_layer():
     flat = sum(p.numel() for p in build("flat").parameters())
     tcn = sum(p.numel() for p in build("tcn").parameters())
     assert tcn < flat / 5
+
+
+def test_tcn_warns_on_a_cuda_build_without_cudnn(monkeypatch):
+    """The trap this guards is silent: without cuDNN the convolutions still run,
+    just ~250x slower, so a run looks healthy while taking months."""
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.backends.cudnn, "is_available", lambda: False)
+    with pytest.warns(RuntimeWarning, match="without cuDNN"):
+        build("tcn")
+
+
+def test_tcn_is_quiet_when_cudnn_is_there_or_there_is_no_cuda(monkeypatch):
+    """Both halves of the condition matter: a CPU-only box is not a problem,
+    and neither is a CUDA box that has cuDNN."""
+    for cuda, cudnn in ((False, False), (True, True)):
+        monkeypatch.setattr(torch.cuda, "is_available", lambda cuda=cuda: cuda)
+        monkeypatch.setattr(torch.backends.cudnn, "is_available", lambda cudnn=cudnn: cudnn)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            build("tcn")
 
 
 def test_tcn_receptive_field_covers_the_history():
