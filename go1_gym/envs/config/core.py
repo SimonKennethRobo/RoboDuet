@@ -374,7 +374,7 @@ def arm_obs_dim_parts(cfg):
 def dog_obs_term_present(cfg, switch):
     """Old checkpoints retain zero slots; new policies omit disabled terms."""
     version = cfg.dog.observation_layout_version
-    if version not in (1, 2):
+    if version not in (1, 2, 3):
         raise ValueError(f"Unsupported dog observation layout version: {version}")
     return version == 1 or bool(getattr(cfg.dog, switch))
 
@@ -409,6 +409,12 @@ def restore_dog_observation_layout(cfg, snapshot):
     )
     for name in ("observe_lin_vel", "observe_pose_actual", "observe_track_error"):
         setattr(cfg.dog, name, dog.get(name, True))
+    cfg.dog.omit_height = dog.get("omit_height", False)
+    cfg.dog.omit_height_command = dog.get("omit_height_command", True)
+    if "observe_response_model" in dog:
+        cfg.dog.observe_response_model = bool(dog["observe_response_model"])
+    else:
+        cfg.dog.observe_response_model = _infer_response_model_presence(cfg, dog)
     if "dog_num_observation_history" in dog:
         cfg.dog.dog_num_observation_history = dog["dog_num_observation_history"]
     recompute_observation_dims(cfg)
@@ -422,6 +428,27 @@ def restore_dog_observation_layout(cfg, snapshot):
     recorded_history = dog.get("dog_num_obs_history")
     if recorded_history is not None and int(recorded_history) != cfg.dog.dog_num_obs_history:
         raise ValueError("Dog checkpoint history width disagrees with frame width and history length")
+
+
+def _infer_response_model_presence(cfg, dog):
+    """Whether a snapshot's dog frame carries the R7.1 response block.
+
+    Checkpoints predating the flag never recorded it, and the two answers are
+    not interchangeable: guessing today's default would silently feed an
+    old actor 22 columns it was never trained on. The block is never
+    zero-width, so the recorded frame width decides. When neither answer fits,
+    keep the current default and let the caller's width check report it.
+    """
+    recorded = dog.get("dog_num_observations")
+    default = getattr(cfg.dog, "observe_response_model", True)
+    if recorded is None:
+        return default
+    for present in (True, False):
+        cfg.dog.observe_response_model = present
+        if sum_dim_parts(dog_obs_dim_parts(cfg)) == int(recorded):
+            return present
+    cfg.dog.observe_response_model = default
+    return default
 
 
 def dog_obs_dim_parts(cfg):
@@ -455,12 +482,27 @@ def dog_obs_dim_parts(cfg):
         parts["contact_states"] = 4
     # R7.1.  Appended last so the existing segment offsets are untouched; the
     # widths are derived from the response config, never written as literals.
-    channels = len(cfg.response.channel_order)
-    parts["reference_state"] = channels
-    parts["reference_rate"] = channels
-    parts["reference_minus_cmd"] = channels
-    parts["ee_pos_in_base"] = 3
-    parts["response_deviation"] = 2 * len(cfg.response.deviation.channels)
+    # Checkpoints trained before the response model carry no such block at all;
+    # restore_dog_observation_layout recovers that from their snapshot.
+    if getattr(cfg.dog, "observe_response_model", True):
+        channels = len(cfg.response.channel_order)
+        parts["reference_state"] = channels
+        parts["reference_rate"] = channels
+        parts["reference_minus_cmd"] = channels
+        parts["ee_pos_in_base"] = 3
+        parts["response_deviation"] = 2 * len(cfg.response.deviation.channels)
+    if getattr(cfg.dog, "omit_height", False):
+        # No-height route: the actor never sees a base-height scalar, so no
+        # state estimator has to supply one. The measured height and its
+        # tracking error always go; the *command* scalar only goes when the
+        # checkpoint was trained that way, hence omit_height_command.
+        if cfg.dog.observation_layout_version != 3:
+            raise ValueError("Height omission requires dog observation layout version 3")
+        if getattr(cfg.dog, "omit_height_command", True):
+            parts["dog_commands"] -= 1
+        for term in ("body_pose_actual", "body_pose_error"):
+            if term in parts:
+                parts[term] -= 1
     return parts
 
 

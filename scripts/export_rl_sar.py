@@ -263,6 +263,10 @@ def observation_terms(cfg):
     if bool(cfg.env.observe_contact_states):
         raise NotImplementedError("env.observe_contact_states has no rl_sar term")
     terms += ["roboduet/arm_dof_pos", "roboduet/arm_dof_vel"]      # 6, 6
+    if not bool(getattr(cfg.dog, "observe_response_model", True)):
+        # Pre-response-model policy (e.g. the no-height N-series): the frame
+        # ends at the arm encoders, so rl_sar must not run the integrator.
+        return terms
     # R7.1.  The first three are the same second-order integrator the MPC
     # already runs as its nominal dynamics, so rl_sar implements it once and
     # reads three terms off it -- and the agreement between the on-robot xi and
@@ -304,6 +308,12 @@ def expected_obs_width(cfg, terms):
         "roboduet/ee_pos_in_base": 3,
         "roboduet/response_deviation": 2 * len(cfg.response.deviation.channels),
     }
+    if bool(getattr(cfg.dog, "omit_height", False)):
+        # Mirrors core.dog_obs_dim_parts' height omission.
+        widths["roboduet/body_pose_actual"] -= 1
+        widths["roboduet/body_pose_error"] -= 1
+        if bool(getattr(cfg.dog, "omit_height_command", True)):
+            widths["roboduet/dog_commands"] -= 1
     return sum(widths[name] for name in terms)
 
 
@@ -353,9 +363,13 @@ def export_policy(logdir, ckpt_id, cfg, out_path):
         use_adaptation_module=False,
     )
     actor_body = actor_critic.actor_body
+    # Through DogActorCritic's own translation first: a pre-TemporalEncoder
+    # checkpoint names the same tensors differently, and loading the actor_body
+    # submodule directly bypasses the class that knows how to read them.
+    tensors = dog_ac.DogActorCritic.compatible_state_dict(checkpoint)
     actor_body.load_state_dict(
         {key[len("actor_body."):]: value
-         for key, value in checkpoint.items() if key.startswith("actor_body.")}
+         for key, value in tensors.items() if key.startswith("actor_body.")}
     )
     actor_body.eval()
 
@@ -513,6 +527,11 @@ def write_config_yaml(path, robot, config_name, cfg, ctx):
   observe_lin_vel: {str(bool(cfg.dog.observe_lin_vel)).lower()}
   observe_pose_actual: {str(bool(cfg.dog.observe_pose_actual)).lower()}
   observe_track_error: {str(bool(cfg.dog.observe_track_error)).lower()}
+  # No-height route (layout version 3): every base-height scalar is absent from
+  # the frame, so no height estimate is needed on the robot. omit_height_command
+  # false means the *commanded* height stays in dog_commands.
+  omit_height: {str(bool(getattr(cfg.dog, "omit_height", False))).lower()}
+  omit_height_command: {str(bool(getattr(cfg.dog, "omit_height_command", True))).lower()}
 
   # Operator command clamps, taken from the ranges the policy trained against.
 {float_entry('limit_vel_x', list(cfg.commands.limit_vel_x))}
@@ -525,12 +544,17 @@ def write_config_yaml(path, robot, config_name, cfg, ctx):
 {float_entry('default_dof_pos', ctx['default_dof_pos'])}
   joint_mapping: {ctx['joint_mapping']}
 """
-    response = response_observation_config(cfg, robot)
-    body += "\n" + "\n".join(
-        "  " + line for line in yaml.safe_dump(
-            {"response_observation": response}, sort_keys=False
-        ).splitlines()
-    ) + "\n"
+    # Only for a policy that actually reads the response block. A pre-response
+    # checkpoint has no response section in its snapshot at all, so these
+    # constants would be today's source defaults describing an integrator
+    # nothing in `observations` consumes.
+    if bool(getattr(cfg.dog, "observe_response_model", True)):
+        response = response_observation_config(cfg, robot)
+        body += "\n" + "\n".join(
+            "  " + line for line in yaml.safe_dump(
+                {"response_observation": response}, sort_keys=False
+            ).splitlines()
+        ) + "\n"
     path.write_text(HEADER.format(**ctx['provenance']) + "\n" + body)
 
 

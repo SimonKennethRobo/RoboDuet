@@ -184,6 +184,15 @@ COMMON_OVERRIDES = {
     "dog.use_adaptation_module": False,
     "dog.add_obs_noise": True,
     "dog.observation_layout_version": 2, # Version 2 removes disabled observation terms; version 1 only set to zero.
+    # No-height route (layout version 3): drop every base-height scalar from the
+    # dog frame so deployment needs no height estimate. omit_height_command
+    # keeps the *commanded* height when False -- N-series checkpoints were
+    # trained that way, and the command is known onboard regardless.
+    "dog.omit_height": False,
+    "dog.omit_height_command": True,
+    # R7.1 response-model segments. Off means the frame ends at the arm
+    # encoders, which is what every pre-response-model checkpoint expects.
+    "dog.observe_response_model": True,
     "dog.observe_clock_inputs": True,
     "dog.observe_lin_vel": True,
     "dog.observe_pose_actual": True,

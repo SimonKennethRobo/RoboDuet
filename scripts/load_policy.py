@@ -161,6 +161,14 @@ def _validate_checkpoint_layout(checkpoint, policy_name, cfg):
 
 def _load_inference_state(model, checkpoint, policy_name):
     """Strictly load every inference tensor while ignoring critic-only state."""
+    # A model that knows how to read an older tensor naming -- the dog actor's
+    # pre-TemporalEncoder flat MLP, see DogActorCritic.compatible_state_dict --
+    # has to translate before the strict key comparison below, or its own
+    # compatibility path could never run and every such checkpoint would be
+    # reported as structurally incompatible.
+    normalize = getattr(type(model), "compatible_state_dict", None)
+    if normalize is not None:
+        checkpoint = normalize(checkpoint)
     prefixes = ["actor_body."]
     if policy_name == "arm":
         prefixes.append("actor_history_encoder.")
@@ -397,6 +405,13 @@ def load_env(
     cfg.domain_rand.randomize_com_displacement = False
 
     cfg.domain_rand.randomize_end_effector_force = False
+
+    # R5 grouping pairs environments for the consistency objective and pins its
+    # "nominal twin" rows to terrain columns a full episode of walking cannot
+    # leave. Neither belongs in play: the operator drives the commands, and the
+    # confined placement is unsatisfiable anyway because play below sets an
+    # effectively unbounded episode length, which _episode_reach reads.
+    cfg.response.grouping.enabled = False
 
     cfg.env.num_recording_envs = 1
     cfg.env.num_envs = int(num_envs)

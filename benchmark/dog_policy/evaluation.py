@@ -696,6 +696,9 @@ CRITICAL_COMPAT_CFG_PATHS = [
     "dog.observe_lin_vel",
     "dog.observe_pose_actual",
     "dog.observe_track_error",
+    "dog.omit_height",
+    "dog.omit_height_command",
+    "dog.observe_response_model",
     "wbc.use_vision",
     "use_rot6d",
 ]

@@ -301,6 +301,45 @@ mount transform. `arm_mount_tfs` must contain the exact `[x, y, z, roll, pitch, 
 URDF because it is exposed through privileged observations. Do not try to resample a fixed-joint mount TF
 during episode reset.
 
+## Dog Observation Layout Versions
+
+`cfg.dog.observation_layout_version` selects the actor-facing dog frame, and
+`core.dog_obs_term_present` / `core.dog_obs_dim_parts` are the only places that
+decide it. Supported values:
+
+- `1`: legacy -- disabled terms keep their trained zero slots.
+- `2`: disabled terms are omitted entirely. This is the profile default.
+- `3`: the no-height route. Every base-height *scalar* leaves the frame, so
+  deployment needs no height estimate. `cfg.dog.omit_height` switches it on and
+  requires version 3. `cfg.dog.omit_height_command` decides whether the
+  *commanded* height also goes: the N-series (`runs/sota/N3_*`) trained with it
+  `False`, because the command is known onboard without an estimator.
+
+Height omission shrinks segment widths in `dog_obs_dim_parts` /
+`WBCEnv._dog_obs_layout`, and `WBCEnv._dog_height_keep_indices` drops the actual
+columns. Those keep indices come from `_dog_obs_layout(apply_height_omission=False)`
+-- do not reintroduce a second hand-written segment list, which is exactly how
+the ordering drifted on the branch this route came from.
+
+`cfg.dog.observe_response_model` gates the R7.1 response block (`reference_state`,
+`reference_rate`, `reference_minus_cmd`, `ee_pos_in_base`, `response_deviation`).
+Checkpoints predating the response model never recorded the flag, so
+`restore_dog_observation_layout` infers it from the snapshot's recorded
+`dog_num_observations` rather than inheriting today's default -- a frame of the
+right width can still be the wrong frame. `scripts/export_rl_sar.py` gates both
+the term list and the `response_observation` metadata block on the same flag, and
+writes `omit_height` / `omit_height_command` into the bundle.
+
+Playing a pre-TemporalEncoder dog checkpoint works because
+`DogActorCritic.compatible_state_dict` renames the flat MLP tensors; both
+`scripts/load_policy.py` and `scripts/export_rl_sar.py` must route a raw
+checkpoint through it before any strict key comparison.
+
+`scripts/load_policy.load_env` disables `cfg.response.grouping` for play. R5
+nominal twins are a training mechanism, and their confined terrain placement is
+unsatisfiable at play time because play sets an effectively unbounded
+`env.episode_length_s`, which `_episode_reach` reads.
+
 ## Config Gotchas
 
 For play/eval, `scripts/load_policy.py` loads `parameters.pkl` and can overwrite source defaults. If config edits do not seem to work, print runtime `Cfg` after checkpoint loading.

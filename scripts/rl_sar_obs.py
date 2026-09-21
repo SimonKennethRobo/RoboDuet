@@ -27,7 +27,13 @@ def effective_gait_frequency(params, velocity_command):
 
 def dog_command_values(params, command):
     command = np.asarray(command, dtype=np.float64)
-    if params.get("omit_height", False) and command.size >= 6:
+    if (
+        params.get("omit_height", False)
+        and params.get("omit_height_command", True)
+        and command.size >= 6
+    ):
+        # The commanded height is known onboard, so a bundle may keep it even
+        # while every measured height is gone; see export_rl_sar's params block.
         command = np.delete(command, 5)
     # Older, already exported bundles store these values as named fields.
     # New exports also carry the packed list consumed by current rl_sar.
@@ -80,7 +86,9 @@ class RlSarObservation:
         self.default_dof_pos = np.array(params["default_dof_pos"], dtype=np.float64)
         # Compact bundles omit disabled terms entirely. Legacy bundles keep
         # their trained zero slots and are handled by term() below.
-        if int(params.get("dog_observation_layout_version", 1)) == 2:
+        # Version 3 is version 2 plus the no-height omission, which widths()
+        # and term() handle through the omit_height flags; both are compact.
+        if int(params.get("dog_observation_layout_version", 1)) in (2, 3):
             switches = {
                 "observe_clock_inputs": ("roboduet/clock_inputs",),
                 "observe_lin_vel": ("roboduet/base_lin_vel",),

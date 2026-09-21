@@ -2953,7 +2953,7 @@ class WBCEnv(LeggedRobot):
 
         return obs_buf, privileged_obs_buf
 
-    def _dog_obs_layout(self):
+    def _dog_obs_layout(self, apply_height_omission=True):
         """Ordered (name, width, noise_scale, droppable) description of
         get_dog_observations()'s actor-facing segments. Single source of
         truth for the post-concatenation independent-noise vector and the
@@ -3027,15 +3027,51 @@ class WBCEnv(LeggedRobot):
         # ee_pos_in_base does come from the arm encoders, through forward
         # kinematics, so it drops and is noised like the encoders it derives
         # from.
-        channels = len(self.cfg.response.channel_order)
-        layout.append(("reference_state", channels, 0.0, False))
-        layout.append(("reference_rate", channels, 0.0, False))
-        layout.append(("reference_minus_cmd", channels, 0.0, False))
-        layout.append(("ee_pos_in_base", 3, ns.dof_pos * level * s.dof_pos, True))
-        layout.append(
-            ("response_deviation", 2 * len(self.cfg.response.deviation.channels), 0.0, False)
-        )
+        if getattr(cfg.dog, "observe_response_model", True):
+            channels = len(self.cfg.response.channel_order)
+            layout.append(("reference_state", channels, 0.0, False))
+            layout.append(("reference_rate", channels, 0.0, False))
+            layout.append(("reference_minus_cmd", channels, 0.0, False))
+            layout.append(("ee_pos_in_base", 3, ns.dof_pos * level * s.dof_pos, True))
+            layout.append(
+                ("response_deviation", 2 * len(self.cfg.response.deviation.channels), 0.0, False)
+            )
+
+        # No-height route: one scalar leaves each height-carrying segment (see
+        # core.dog_obs_dim_parts).  Which index goes is _dog_height_keep_indices'
+        # business; here only the widths shrink, which is all the noise vector
+        # and the frame-drop offsets need -- a segment's noise scale is uniform
+        # across its columns.  apply_height_omission=False returns the
+        # un-omitted layout those keep indices are computed against.
+        if apply_height_omission and getattr(cfg.dog, "omit_height", False):
+            shrink = {"body_pose_actual", "body_pose_error"}
+            if getattr(cfg.dog, "omit_height_command", True):
+                shrink.add("dog_commands")
+            layout = [(name, width - int(name in shrink), noise, drop)
+                      for name, width, noise, drop in layout]
         return layout
+
+    def _dog_height_keep_indices(self):
+        """Columns of the un-omitted dog frame that survive the no-height route.
+
+        Derived from _dog_obs_layout with the omission switched off, so it
+        cannot drift from the real concatenation order the way a second
+        hand-written segment list would.
+        """
+        if not hasattr(self, "_dog_height_keep_idx"):
+            drop_command = getattr(self.cfg.dog, "omit_height_command", True)
+            keep, offset = [], 0
+            for name, width, _, _ in self._dog_obs_layout(apply_height_omission=False):
+                if name == "dog_commands":
+                    drop = dog_cmd_idx["body_height"] if drop_command else None
+                elif name in ("body_pose_actual", "body_pose_error"):
+                    drop = 0  # (height, pitch, roll)
+                else:
+                    drop = None
+                keep.extend(offset + i for i in range(width) if i != drop)
+                offset += width
+            self._dog_height_keep_idx = torch.tensor(keep, device=self.device, dtype=torch.long)
+        return self._dog_height_keep_idx
 
     def _dog_measurement_layout(self):
         """(name, width) of every sensor-derived quantity get_dog_observations
@@ -3304,7 +3340,15 @@ class WBCEnv(LeggedRobot):
         arm_vel = sensed("arm_dof_vel") * self.obs_scales.dof_vel
         obs_buf = torch.cat((obs_buf, arm_pos, arm_vel), dim=-1)
 
-        obs_buf = torch.cat((obs_buf, self._response_observation(sensed("ee_pos_in_base"))), dim=-1)
+        if getattr(self.cfg.dog, "observe_response_model", True):
+            obs_buf = torch.cat(
+                (obs_buf, self._response_observation(sensed("ee_pos_in_base"))), dim=-1
+            )
+
+        # Applied after every segment exists, so the keep indices are indices
+        # into the whole un-omitted frame.
+        if getattr(self.cfg.dog, "omit_height", False):
+            obs_buf = obs_buf.index_select(1, self._dog_height_keep_indices())
 
         if dog_obs_noise_enabled:
             # Per-element zero-mean Gaussian sensor noise. The configured
